@@ -17,6 +17,7 @@
     "distance_metric": "cosine_distance"
   },
   "fts": {
+    "attributes": ["title", "body"],
     "tokenizer": "word_v4",
     "case_sensitive": false,
     "language": "english",

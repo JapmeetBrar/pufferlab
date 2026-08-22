@@ -31,6 +31,7 @@ def canonical_corpus_bytes(documents: Iterable["SourceDocument"]) -> bytes:
     }
     encoded = json.dumps(
         payload,
+        allow_nan=False,
         ensure_ascii=False,
         separators=(",", ":"),
         sort_keys=True,
@@ -47,6 +48,7 @@ def canonical_schema_hash(schema_payload: dict[str, object]) -> str:
     """Hash explicit index settings using canonical JSON."""
     encoded = json.dumps(
         schema_payload,
+        allow_nan=False,
         ensure_ascii=False,
         separators=(",", ":"),
         sort_keys=True,

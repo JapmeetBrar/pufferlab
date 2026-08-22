@@ -1,6 +1,7 @@
 """Provider-neutral, deterministic asynchronous corpus ingestion."""
 
 import asyncio
+import math
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
@@ -10,6 +11,7 @@ from uuid import UUID
 from pufferlab.contracts.common import JsonValue
 from pufferlab.datasets.identity import document_uuid
 from pufferlab.datasets.models import FixtureCorpus, SourceDocument
+from pufferlab.datasets.schema import NamespaceWriteSpec, compile_namespace_write_spec
 
 
 @dataclass(frozen=True, slots=True)
@@ -19,8 +21,17 @@ class EmbeddedDocument:
     title: str
     body: str
     source_url: str
-    attributes: dict[str, JsonValue]
     vector: tuple[float, ...]
+
+    def provider_attributes(self, *, vector_attribute: str) -> dict[str, JsonValue]:
+        """Return exactly the attributes represented by the compiled namespace schema."""
+        return {
+            "external_id": self.external_id,
+            "title": self.title,
+            "body": self.body,
+            "source_url": self.source_url,
+            vector_attribute: list(self.vector),
+        }
 
 
 class Embedder(Protocol):
@@ -35,6 +46,7 @@ class Embedder(Protocol):
 @dataclass(frozen=True, slots=True)
 class NamespaceReadiness:
     document_count: int
+    document_ids: frozenset[UUID]
     schema_hash: str
     metadata_ready: bool
     indexes_ready: bool
@@ -48,7 +60,7 @@ class NamespaceWriter(Protocol):
         namespace: str,
         documents: Sequence[EmbeddedDocument],
         *,
-        schema: dict[str, object],
+        write_spec: NamespaceWriteSpec,
     ) -> None: ...
 
     async def inspect_readiness(self, namespace: str) -> NamespaceReadiness: ...
@@ -111,6 +123,10 @@ class EmbeddingDimensionMismatch(IngestionError):
     pass
 
 
+class EmbeddingValueMismatch(IngestionError):
+    pass
+
+
 class BatchWriteError(IngestionError):
     pass
 
@@ -157,6 +173,7 @@ class IngestionService:
     ) -> IngestionReport:
         if not namespace.strip():
             raise ValueError("namespace must not be blank")
+        write_spec = compile_namespace_write_spec(corpus.manifest)
         if self._embedder.dimensions != corpus.manifest.embedding.dimensions:
             report = self._report(corpus, namespace=namespace, state=IngestionState.FAILED)
             raise EmbeddingDimensionMismatch(
@@ -173,7 +190,13 @@ class IngestionService:
         for wave_start in range(0, len(batches), self._max_concurrency):
             wave = batches[wave_start : wave_start + self._max_concurrency]
             tasks = [
-                self._ingest_batch(corpus, namespace=namespace, index=index, documents=documents)
+                self._ingest_batch(
+                    corpus,
+                    namespace=namespace,
+                    write_spec=write_spec,
+                    index=index,
+                    documents=documents,
+                )
                 for index, documents in wave
             ]
             outcomes = await asyncio.gather(*tasks, return_exceptions=True)
@@ -199,10 +222,12 @@ class IngestionService:
                     completed=completed,
                 )
                 if isinstance(first_error, _EmbeddingCountError):
-                    raise EmbeddingCountMismatch(str(first_error), report) from first_error
+                    raise EmbeddingCountMismatch(str(first_error), report) from None
                 if isinstance(first_error, _EmbeddingDimensionError):
-                    raise EmbeddingDimensionMismatch(str(first_error), report) from first_error
-                raise BatchWriteError("a dataset batch failed to ingest", report) from first_error
+                    raise EmbeddingDimensionMismatch(str(first_error), report) from None
+                if isinstance(first_error, _EmbeddingValueError):
+                    raise EmbeddingValueMismatch(str(first_error), report) from None
+                raise BatchWriteError("a dataset batch failed to ingest", report) from None
 
         self._emit(
             on_progress, self._progress(corpus, batches, completed, IngestionState.VERIFYING)
@@ -210,9 +235,12 @@ class IngestionService:
         readiness: NamespaceReadiness | None = None
         ready = False
         for attempt in range(self._readiness_attempts):
+            inspection_failed = False
             try:
                 readiness = await self._writer.inspect_readiness(namespace)
-            except Exception as error:
+            except Exception:
+                inspection_failed = True
+            if inspection_failed:
                 report = self._report(
                     corpus,
                     namespace=namespace,
@@ -220,8 +248,9 @@ class IngestionService:
                     batches=batches,
                     completed=completed,
                 )
-                raise ReadinessError("namespace readiness inspection failed", report) from error
-            ready = self._is_ready(corpus, readiness)
+                raise ReadinessError("namespace readiness inspection failed", report) from None
+            assert readiness is not None
+            ready = self._is_ready(corpus, write_spec, readiness)
             if ready:
                 break
             if attempt + 1 < self._readiness_attempts:
@@ -243,12 +272,21 @@ class IngestionService:
         return report
 
     @staticmethod
-    def _is_ready(corpus: FixtureCorpus, readiness: NamespaceReadiness) -> bool:
+    def _is_ready(
+        corpus: FixtureCorpus,
+        write_spec: NamespaceWriteSpec,
+        readiness: NamespaceReadiness,
+    ) -> bool:
+        expected_document_ids = frozenset(
+            document_uuid(corpus.manifest.version, document.external_id)
+            for document in corpus.documents
+        )
         return (
             readiness.metadata_ready
             and readiness.indexes_ready
             and readiness.document_count == len(corpus.documents)
-            and readiness.schema_hash == corpus.manifest.schema_hash
+            and readiness.document_ids == expected_document_ids
+            and readiness.schema_hash == write_spec.schema_hash
         )
 
     async def _ingest_batch(
@@ -256,6 +294,7 @@ class IngestionService:
         corpus: FixtureCorpus,
         *,
         namespace: str,
+        write_spec: NamespaceWriteSpec,
         index: int,
         documents: tuple[SourceDocument, ...],
     ) -> BatchResult:
@@ -267,12 +306,24 @@ class IngestionService:
                 f"for {len(documents)} documents"
             )
         expected_dimensions = corpus.manifest.embedding.dimensions
+        normalized_vectors: list[tuple[float, ...]] = []
         for offset, vector in enumerate(vectors):
             if len(vector) != expected_dimensions:
                 raise _EmbeddingDimensionError(
                     f"embedding batch {index} vector {offset} has {len(vector)} dimensions; "
                     f"expected {expected_dimensions}"
                 )
+            try:
+                normalized = tuple(float(value) for value in vector)
+            except (TypeError, ValueError, OverflowError):
+                raise _EmbeddingValueError(
+                    f"embedding batch {index} vector {offset} contains a non-numeric component"
+                ) from None
+            if not all(math.isfinite(value) for value in normalized):
+                raise _EmbeddingValueError(
+                    f"embedding batch {index} vector {offset} contains a non-finite component"
+                )
+            normalized_vectors.append(normalized)
 
         embedded = tuple(
             EmbeddedDocument(
@@ -281,15 +332,14 @@ class IngestionService:
                 title=document.title,
                 body=document.body,
                 source_url=document.source_url,
-                attributes=dict(document.attributes),
-                vector=tuple(float(value) for value in vector),
+                vector=vector,
             )
-            for document, vector in zip(documents, vectors, strict=True)
+            for document, vector in zip(documents, normalized_vectors, strict=True)
         )
         await self._writer.upsert_batch(
             namespace,
             embedded,
-            schema=corpus.manifest.schema_payload,
+            write_spec=write_spec,
         )
         return BatchResult(index=index, document_ids=tuple(document.id for document in embedded))
 
@@ -329,7 +379,7 @@ class IngestionService:
             namespace=namespace,
             dataset_version=corpus.manifest.version,
             corpus_hash=corpus.corpus_hash,
-            schema_hash=corpus.manifest.schema_hash,
+            schema_hash=compile_namespace_write_spec(corpus.manifest).schema_hash,
             state=state,
             batches_total=len(actual_batches),
             batches_completed=len(actual_completed),
@@ -345,6 +395,10 @@ class _EmbeddingCountError(RuntimeError):
 
 
 class _EmbeddingDimensionError(RuntimeError):
+    pass
+
+
+class _EmbeddingValueError(RuntimeError):
     pass
 
 

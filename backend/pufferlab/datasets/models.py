@@ -8,7 +8,7 @@ from uuid import UUID
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from pufferlab.contracts.common import JsonValue
-from pufferlab.datasets.identity import canonical_schema_hash, document_uuid
+from pufferlab.datasets.identity import document_uuid
 
 
 def _require_non_blank(value: str) -> str:
@@ -23,7 +23,7 @@ NonBlank = Annotated[str, Field(min_length=1), AfterValidator(_require_non_blank
 class StrictModel(BaseModel):
     """Reject unknown fields and scalar coercion in source data."""
 
-    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True, allow_inf_nan=False)
 
 
 class EmbeddingProfile(StrictModel):
@@ -40,6 +40,7 @@ class VectorProfile(StrictModel):
 
 
 class FtsProfile(StrictModel):
+    attributes: list[Literal["title", "body"]] = Field(min_length=1)
     tokenizer: NonBlank
     case_sensitive: bool
     language: NonBlank
@@ -50,6 +51,12 @@ class FtsProfile(StrictModel):
     k1: float = Field(gt=0)
     b: float = Field(ge=0, le=1)
     k3: float = Field(gt=0)
+
+    @model_validator(mode="after")
+    def attributes_are_unique(self) -> "FtsProfile":
+        if len(self.attributes) != len(set(self.attributes)):
+            raise ValueError("FTS attributes must be unique")
+        return self
 
 
 class DatasetManifest(StrictModel):
@@ -63,23 +70,18 @@ class DatasetManifest(StrictModel):
     vector: VectorProfile
     fts: FtsProfile
 
+    @model_validator(mode="after")
+    def vector_attribute_does_not_collide(self) -> "DatasetManifest":
+        reserved = {"id", "external_id", "title", "body", "source_url"}
+        if self.vector.attribute in reserved:
+            raise ValueError("vector attribute collides with a document attribute")
+        return self
+
     @field_validator("source_url")
     @classmethod
     def validate_source_url(cls, value: str) -> str:
         _validate_http_url(value, field_name="source_url")
         return value
-
-    @property
-    def schema_payload(self) -> dict[str, object]:
-        return {
-            "embedding": self.embedding.model_dump(mode="json"),
-            "vector": self.vector.model_dump(mode="json"),
-            "fts": self.fts.model_dump(mode="json"),
-        }
-
-    @property
-    def schema_hash(self) -> str:
-        return canonical_schema_hash(self.schema_payload)
 
 
 class SourceDocument(StrictModel):

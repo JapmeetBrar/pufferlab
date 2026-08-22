@@ -1,6 +1,7 @@
 """Strict JSON and JSONL loading for local fixture packs."""
 
 import json
+import math
 from pathlib import Path
 from typing import NoReturn
 
@@ -43,7 +44,7 @@ def load_fixture_corpus(directory: Path) -> FixtureCorpus:
 def _load_json[ModelT: BaseModel](path: Path, model_type: type[ModelT]) -> ModelT:
     try:
         raw = path.read_text(encoding="utf-8")
-        value = json.loads(raw, parse_constant=_reject_nonfinite)
+        value = _strict_json_loads(raw)
     except (OSError, UnicodeDecodeError, ValueError) as error:
         raise DatasetLoadError(f"could not load {path.name}: {error}") from error
     if not isinstance(value, dict):
@@ -67,7 +68,7 @@ def _load_jsonl[ModelT: BaseModel](path: Path, model_type: type[ModelT]) -> tupl
         if not line.strip():
             raise DatasetLoadError(f"{path.name}:{line_number} blank lines are not allowed")
         try:
-            value = json.loads(line, parse_constant=_reject_nonfinite)
+            value = _strict_json_loads(line)
         except ValueError as error:
             raise DatasetLoadError(f"invalid JSON at {path.name}:{line_number}: {error}") from error
         if not isinstance(value, dict):
@@ -97,3 +98,33 @@ def _require_unique[ModelT: BaseModel](
 
 def _reject_nonfinite(value: str) -> NoReturn:
     raise ValueError(f"non-finite JSON number {value!r} is not allowed")
+
+
+def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    loaded: dict[str, object] = {}
+    for key, value in pairs:
+        if key in loaded:
+            raise ValueError(f"duplicate JSON object key {key!r} is not allowed")
+        loaded[key] = value
+    return loaded
+
+
+def _reject_nonfinite_values(value: object) -> None:
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError("non-finite JSON number produced by numeric overflow is not allowed")
+    if isinstance(value, dict):
+        for nested in value.values():
+            _reject_nonfinite_values(nested)
+    elif isinstance(value, list):
+        for nested in value:
+            _reject_nonfinite_values(nested)
+
+
+def _strict_json_loads(raw: str) -> object:
+    value = json.loads(
+        raw,
+        object_pairs_hook=_reject_duplicate_keys,
+        parse_constant=_reject_nonfinite,
+    )
+    _reject_nonfinite_values(value)
+    return value
