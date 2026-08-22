@@ -152,7 +152,7 @@ def _validate_result(
             or timing.get("measurement") != "client_wall_clock"
         ):
             raise VerificationError(f"{expected_mode} timing semantics are incorrect")
-    required_stages = {"turbopuffer", "total"}
+    required_stages = {"turbopuffer"}
     if expected_mode == "vector":
         required_stages.add("embed")
     if not required_stages.issubset(timing_stages):

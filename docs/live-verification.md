@@ -200,8 +200,9 @@ uv run python scripts/verify_live_api.py | tee data/m1-live-api.json
 origin. It checks health and configuration discovery, then posts fixture query `query-002`—“How
 can I find the program listening on port 8080?”—with exactly contract version, query text, BM25 and
 vector config IDs, and the debug flag. It requires non-empty ordered results, document IDs and
-external IDs, contiguous 1-based ranks, typed score direction, provider/total wall-clock timings,
-and no API-key, authorization, query-vector, or stored-vector response field.
+external IDs, contiguous 1-based ranks, typed score direction, provider client-wall-clock timing
+for both configurations, vector embedding client-wall-clock timing, and no API-key, authorization,
+query-vector, or stored-vector response field.
 
 ## 7. Exercise the real browser path
 

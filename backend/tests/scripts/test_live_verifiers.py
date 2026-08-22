@@ -38,7 +38,6 @@ def _result(*, mode: str, identifier: str, external_id: str) -> dict[str, object
             "duration_ms": 2.5,
             "measurement": "client_wall_clock",
         },
-        {"stage": "total", "duration_ms": 4.0, "measurement": "client_wall_clock"},
     ]
     if mode == "vector":
         timings.insert(
@@ -110,6 +109,7 @@ def test_live_api_verifier_rejects_remote_origins_and_private_fields() -> None:
         ("nan_score", "not numeric"),
         ("wrong_source", "semantics"),
         ("missing_embed", "missing a required timing stage"),
+        ("missing_provider", "missing a required timing stage"),
         ("nan_timing", "timing semantics"),
     ],
 )
@@ -124,6 +124,10 @@ def test_live_api_verifier_rejects_weak_vector_evidence(mutation: str, message: 
         result["hits"][0]["final_score"]["source"] = "fixture"
     elif mutation == "missing_embed":
         result["timings"] = [timing for timing in result["timings"] if timing["stage"] != "embed"]
+    elif mutation == "missing_provider":
+        result["timings"] = [
+            timing for timing in result["timings"] if timing["stage"] != "turbopuffer"
+        ]
     else:
         result["timings"][0]["duration_ms"] = math.nan
 
