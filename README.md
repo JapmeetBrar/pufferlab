@@ -7,6 +7,7 @@ The project is currently completing its first live vertical-slice milestone. See
 - [Project decision and implementation brief](docs/project-decision-and-implementation-brief.md)
 - [Shared contracts](docs/contracts.md)
 - [Implementation plan](docs/implementation-plan.md)
+- [Milestone 1 live-verification runbook](docs/live-verification.md)
 
 ## Prerequisites
 

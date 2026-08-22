@@ -297,6 +297,11 @@ async def test_manifest_plan_precedes_factories_and_success_prints_exact_search_
     output = [value for kind, value in events if kind == "output"]
     assert "progress state=ingesting batches=0/3 documents=0/20" in output
     assert "progress state=verifying batches=3/3 documents=20/20" in output
+    assert output[-3] == (
+        f"verified remote_documents=20 exact_document_ids=true "
+        f"observed_schema_hash={SCHEMA_HASH} distance_metric=cosine_distance "
+        "metadata_ready=true indexes_ready=true"
+    )
     assert output[-2] == (
         f"ready namespace=pufferlab-repeatable documents=20 schema_hash={SCHEMA_HASH}"
     )

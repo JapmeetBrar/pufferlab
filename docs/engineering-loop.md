@@ -44,10 +44,12 @@ coordination PR brings the ledger snapshot forward.
 
 The orchestrator batches outstanding merge and verification evidence into that next planned ledger
 update. It must not create recursively self-referential “record the previous ledger merge” PRs. At
-goal completion, the orchestrator opens exactly one finalization PR that records all required tasks
-as verified, links their GitHub evidence, and sets the goal outcome. The finalization PR itself goes
-through the normal independent review and protected merge. Its own PR checks, merge event, and
-post-merge `main` checks remain canonical in GitHub; no second finalization-ledger PR is created.
+goal completion, the orchestrator opens exactly one finalization PR that records all preceding
+delivery tasks as verified, adds sanitized final-verification evidence, and declares itself ready
+for the goal-closing review. The finalization PR itself goes through the normal independent review
+and protected merge. Its own reviewer verdict, merge event, and post-merge `main` checks remain
+canonical in GitHub; no branch can predict those future events and no second finalization-ledger PR
+is created.
 
 ## Branch and PR rules
 
@@ -141,10 +143,11 @@ The API key must never be pasted into tracked files, logs, test output, screensh
 
 The active goal is finished only when all of the following are true:
 
-- The finalization PR records every required delivery task as `verified` with linked GitHub evidence.
+- The finalization PR records every preceding delivery task as `verified`, includes sanitized final
+  verification evidence, and records its own state no later than `review_requested`.
 - Every required PR was independently reviewed and merged.
 - CI is green on `main`.
 - The documented setup reproduces the intended behavior from a clean checkout.
 - Remaining limitations are explicit and outside the stated goal.
-- The finalization PR was independently reviewed and merged; its own merge and post-merge checks are
-  canonical in GitHub and do not require another ledger PR.
+- The finalization PR was independently reviewed and merged; its own verdict, merge, and post-merge
+  checks are canonical in GitHub and do not require another ledger PR.

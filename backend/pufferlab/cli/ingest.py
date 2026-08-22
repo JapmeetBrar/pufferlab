@@ -204,6 +204,17 @@ class TinyFixtureIngestor:
         if failure is not None:
             raise failure from None
         assert report is not None
+        readiness = report.readiness
+        assert readiness is not None
+        exact_document_ids = len(readiness.document_ids) == len(corpus.documents)
+        emit(
+            f"verified remote_documents={readiness.document_count} "
+            f"exact_document_ids={str(exact_document_ids).lower()} "
+            f"observed_schema_hash={readiness.schema_hash} "
+            f"distance_metric={corpus.manifest.vector.distance_metric} "
+            f"metadata_ready={str(readiness.metadata_ready).lower()} "
+            f"indexes_ready={str(readiness.indexes_ready).lower()}"
+        )
         emit(
             f"ready namespace={report.namespace} documents={report.documents_completed} "
             f"schema_hash={report.schema_hash}"
