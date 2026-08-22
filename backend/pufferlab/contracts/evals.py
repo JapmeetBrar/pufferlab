@@ -96,6 +96,7 @@ class RunEnvironment(ContractModel):
 
 
 class EvalRun(ContractModel):
+    contract_version: ContractVersion = 1
     id: UUID
     status: EvalRunStatus
     query_set: QuerySetSummary

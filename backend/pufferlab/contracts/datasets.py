@@ -17,7 +17,7 @@ class FtsProfile(ContractModel):
     stemming: bool = False
     remove_stopwords: bool = False
     ascii_folding: bool = False
-    max_token_length: int = Field(default=39, ge=1, le=254)
+    max_token_length: int = Field(default=39, ge=1, le=255)
     k1: float = Field(default=1.2, gt=0)
     b: float = Field(default=0.75, ge=0, le=1)
     k3: float = Field(default=8.0, gt=0)
@@ -31,7 +31,7 @@ class IndexProfile(ContractModel):
     vector_attribute: str = "vector"
     vector_dimensions: int = Field(gt=0)
     vector_dtype: Literal["f16", "f32", "i8"]
-    distance_metric: Literal["cosine_distance", "euclidean_squared", "dot_product"]
+    distance_metric: Literal["cosine_distance", "euclidean_squared"]
     fts_profile: FtsProfile
     schema_hash: str = Field(min_length=1)
 
