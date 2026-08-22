@@ -74,6 +74,7 @@ class NamespaceAttributeWriteSpec:
 @dataclass(frozen=True, slots=True)
 class NamespaceWriteSpec:
     attributes: tuple[tuple[str, NamespaceAttributeWriteSpec], ...]
+    vector_attribute: str
     distance_metric: DistanceMetric
 
     @property
@@ -128,5 +129,6 @@ def compile_namespace_write_spec(manifest: DatasetManifest) -> NamespaceWriteSpe
     )
     return NamespaceWriteSpec(
         attributes=attributes,
+        vector_attribute=manifest.vector.attribute,
         distance_metric=manifest.vector.distance_metric,
     )
