@@ -128,7 +128,7 @@ class IndexProfile(BaseModel):
     vector_attribute: str = "vector"
     vector_dimensions: int
     vector_dtype: Literal["f16", "f32", "i8"]
-    distance_metric: Literal["cosine_distance", "euclidean_squared", "dot_product"]
+    distance_metric: Literal["cosine_distance", "euclidean_squared"]
     fts_profile: FtsProfile
     schema_hash: str
 
@@ -377,6 +377,7 @@ class RunEnvironment(BaseModel):
     query_embedding_cache_enabled: bool
 
 class EvalRun(BaseModel):
+    contract_version: Literal[1] = 1
     id: UUID
     status: EvalRunStatus
     query_set: QuerySetSummary
