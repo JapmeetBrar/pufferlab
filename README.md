@@ -25,6 +25,18 @@ uv run uvicorn pufferlab.main:app --app-dir backend --reload
 
 The API is served at `http://localhost:8000`; health is available at `GET /api/v1/health` and interactive API documentation at `/docs`.
 
+The config catalog is available without provider credentials. To run the live BM25-versus-vector
+compare path, install the optional local embedding runtime and point the backend at the namespace
+created from the checked-in fixture:
+
+```bash
+uv sync --extra live-search
+export PUFFERLAB_SEARCH_NAMESPACE=<ingested-namespace>
+```
+
+The backend loads the fixture's exact pinned `BAAI/bge-small-en-v1.5` revision lazily on the first
+vector comparison. `TURBOPUFFER_API_KEY` and the query vector stay inside the backend process.
+
 ## Frontend
 
 ```bash

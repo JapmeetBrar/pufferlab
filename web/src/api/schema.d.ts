@@ -4,6 +4,23 @@
  */
 
 export interface paths {
+    "/api/v1/configs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Retrieval Configs */
+        get: operations["list_retrieval_configs"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/health": {
         parameters: {
             query?: never;
@@ -21,12 +38,101 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/search/compare": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Compare Search Configs */
+        post: operations["compare_search_configs"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /**
+         * ApiErrorCode
+         * @enum {string}
+         */
+        ApiErrorCode: "validation_error" | "not_found" | "namespace_not_ready" | "provider_error" | "rate_limited" | "run_conflict" | "internal_error";
+        /** ApiErrorDetail */
+        ApiErrorDetail: {
+            code: components["schemas"]["ApiErrorCode"];
+            /** Details */
+            details?: {
+                [key: string]: components["schemas"]["JsonValue-Output"];
+            };
+            /** Message */
+            message: string;
+            /** Retryable */
+            retryable: boolean;
+            /**
+             * Trace Id
+             * Format: uuid
+             */
+            trace_id: string;
+        };
+        /** ApiWarning */
+        ApiWarning: {
+            /** Code */
+            code: string;
+            /** Message */
+            message: string;
+        };
+        /** ConfigSearchResult */
+        ConfigSearchResult: {
+            /** Candidate Counts */
+            candidate_counts: {
+                [key: string]: number;
+            };
+            config: components["schemas"]["RetrievalConfigSummary"];
+            /** Hits */
+            hits: components["schemas"]["SearchHit"][];
+            /** Timings */
+            timings: components["schemas"]["StageTiming"][];
+            /**
+             * Trace Id
+             * Format: uuid
+             */
+            trace_id: string;
+            /** Warnings */
+            warnings: components["schemas"]["ApiWarning"][];
+        };
         /** @constant */
         ContractVersion: 1;
+        /** FilterLogical */
+        FilterLogical: {
+            /** Children */
+            children: (components["schemas"]["FilterPredicate"] | components["schemas"]["FilterLogical"])[];
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "logical";
+            op: components["schemas"]["LogicalOp"];
+        };
+        FilterNode: components["schemas"]["FilterPredicate"] | components["schemas"]["FilterLogical"];
+        /** FilterPredicate */
+        FilterPredicate: {
+            /** Field */
+            field: string;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "predicate";
+            op: components["schemas"]["PredicateOp"];
+            value: components["schemas"]["JsonValue-Input"];
+        };
         /** HealthResponse */
         HealthResponse: {
             /** @default 1 */
@@ -40,6 +146,219 @@ export interface components {
             /** Version */
             version: string;
         };
+        /** HighlightFragment */
+        HighlightFragment: {
+            /** Fragment End */
+            fragment_end?: number | null;
+            /** Fragment Start */
+            fragment_start?: number | null;
+            /** Match Offsets */
+            match_offsets?: components["schemas"]["HighlightOffset"][];
+            /** Text */
+            text: string;
+        };
+        /** HighlightOffset */
+        HighlightOffset: {
+            /** End */
+            end: number;
+            /** Start */
+            start: number;
+        };
+        "JsonValue-Input": string | number | boolean | components["schemas"]["JsonValue-Input"][] | {
+            [key: string]: components["schemas"]["JsonValue-Input"];
+        } | null;
+        "JsonValue-Output": string | number | boolean | components["schemas"]["JsonValue-Output"][] | {
+            [key: string]: components["schemas"]["JsonValue-Output"];
+        } | null;
+        /**
+         * LogicalOp
+         * @enum {string}
+         */
+        LogicalOp: "and" | "or" | "not";
+        /** ObservedScore */
+        ObservedScore: {
+            direction: components["schemas"]["ScoreDirection"];
+            kind: components["schemas"]["ScoreKind"];
+            source: components["schemas"]["ScoreSource"];
+            /** Value */
+            value: number;
+        };
+        /** PairwiseOverlap */
+        PairwiseOverlap: {
+            /** Intersection Count */
+            intersection_count: number;
+            /** Jaccard */
+            jaccard: number;
+            /**
+             * Left Config Id
+             * Format: uuid
+             */
+            left_config_id: string;
+            /** Left Count */
+            left_count: number;
+            /**
+             * Right Config Id
+             * Format: uuid
+             */
+            right_config_id: string;
+            /** Right Count */
+            right_count: number;
+        };
+        /**
+         * PredicateOp
+         * @enum {string}
+         */
+        PredicateOp: "eq" | "not_eq" | "lt" | "lte" | "gt" | "gte" | "in" | "contains_any";
+        /** RankMovement */
+        RankMovement: {
+            /**
+             * Document Id
+             * Format: uuid
+             */
+            document_id: string;
+            /** Max Absolute Delta */
+            max_absolute_delta?: number | null;
+            /** Ranks By Config */
+            ranks_by_config: {
+                [key: string]: number | null;
+            };
+        };
+        /** RetrievalConfigListResponse */
+        RetrievalConfigListResponse: {
+            /** Configs */
+            configs: components["schemas"]["RetrievalConfigSummary"][];
+            /** @default 1 */
+            contract_version: components["schemas"]["ContractVersion"];
+        };
+        /** RetrievalConfigSummary */
+        RetrievalConfigSummary: {
+            /** Config Hash */
+            config_hash: string;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            mode: components["schemas"]["RetrievalMode"];
+            /** Name */
+            name: string;
+            /** Revision */
+            revision: number;
+        };
+        /**
+         * RetrievalMode
+         * @enum {string}
+         */
+        RetrievalMode: "bm25" | "vector" | "hybrid_rrf" | "hybrid_rerank";
+        /**
+         * RetrievalStage
+         * @enum {string}
+         */
+        RetrievalStage: "bm25_candidates" | "vector_candidates" | "rrf" | "reranker" | "final";
+        /**
+         * ScoreDirection
+         * @enum {string}
+         */
+        ScoreDirection: "higher_is_better" | "lower_is_better";
+        /**
+         * ScoreKind
+         * @enum {string}
+         */
+        ScoreKind: "bm25" | "vector_distance" | "rrf" | "reranker";
+        /**
+         * ScoreSource
+         * @enum {string}
+         */
+        ScoreSource: "turbopuffer_dist" | "compute_attribute" | "client_computed" | "reranker";
+        /** SearchCompareRequest */
+        SearchCompareRequest: {
+            /** Config Ids */
+            config_ids: string[];
+            /** @default 1 */
+            contract_version: components["schemas"]["ContractVersion"];
+            /**
+             * Debug Provenance
+             * @default true
+             */
+            debug_provenance: boolean;
+            /** Expected Document Ids */
+            expected_document_ids?: string[];
+            filter_override?: components["schemas"]["FilterNode"] | null;
+            /** Query Id */
+            query_id?: string | null;
+            /** Query Text */
+            query_text: string;
+        };
+        /** SearchCompareResponse */
+        SearchCompareResponse: {
+            /** @default 1 */
+            contract_version: components["schemas"]["ContractVersion"];
+            /** Observability Notice */
+            observability_notice: string;
+            /** Overlap */
+            overlap: components["schemas"]["PairwiseOverlap"][];
+            /** Query Id */
+            query_id: string | null;
+            /** Query Text */
+            query_text: string;
+            /** Rank Movements */
+            rank_movements: components["schemas"]["RankMovement"][];
+            /** Results */
+            results: components["schemas"]["ConfigSearchResult"][];
+        };
+        /** SearchHit */
+        SearchHit: {
+            /** Attributes */
+            attributes?: {
+                [key: string]: components["schemas"]["JsonValue-Output"];
+            };
+            /** Body Excerpt */
+            body_excerpt: string;
+            /**
+             * Document Id
+             * Format: uuid
+             */
+            document_id: string;
+            /** External Id */
+            external_id: string;
+            /** Final Rank */
+            final_rank: number;
+            final_score?: components["schemas"]["ObservedScore"] | null;
+            /** Highlights */
+            highlights?: components["schemas"]["HighlightFragment"][];
+            /** Relevance Grade */
+            relevance_grade?: number | null;
+            /** Stage Membership */
+            stage_membership: components["schemas"]["StageMembership"][];
+            /** Title */
+            title: string;
+            /** Url */
+            url?: string | null;
+        };
+        /** StageMembership */
+        StageMembership: {
+            /** Rank */
+            rank: number;
+            score?: components["schemas"]["ObservedScore"] | null;
+            stage: components["schemas"]["RetrievalStage"];
+        };
+        /** StageTiming */
+        StageTiming: {
+            /** Duration Ms */
+            duration_ms: number;
+            /**
+             * Measurement
+             * @default client_wall_clock
+             * @constant
+             */
+            measurement: "client_wall_clock";
+            stage: components["schemas"]["TimingStage"];
+        };
+        /**
+         * TimingStage
+         * @enum {string}
+         */
+        TimingStage: "embed" | "turbopuffer" | "provenance_probe" | "fusion" | "rerank" | "total";
     };
     responses: never;
     parameters: never;
@@ -49,6 +368,44 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    list_retrieval_configs: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RetrievalConfigListResponse"];
+                };
+            };
+            /** @description The request failed unexpectedly. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
+                };
+            };
+            /** @description Search runtime is unavailable. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
+                };
+            };
+        };
+    };
     get_health: {
         parameters: {
             query?: never;
@@ -65,6 +422,84 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HealthResponse"];
+                };
+            };
+        };
+    };
+    compare_search_configs: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SearchCompareRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SearchCompareResponse"];
+                };
+            };
+            /** @description A retrieval config or namespace was not found. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
+                };
+            };
+            /** @description The comparison request is invalid. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
+                };
+            };
+            /** @description The provider rate limit was exceeded. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
+                };
+            };
+            /** @description The request failed unexpectedly. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
+                };
+            };
+            /** @description The provider request failed. */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
+                };
+            };
+            /** @description Search is temporarily unavailable. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
                 };
             };
         };

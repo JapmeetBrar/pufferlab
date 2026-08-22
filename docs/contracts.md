@@ -101,9 +101,15 @@ class FilterLogical(BaseModel):
 FilterNode = Annotated[FilterPredicate | FilterLogical, Field(discriminator="kind")]
 ```
 
-`not` has exactly one child; `and` and `or` have at least one. Empty field names and unknown dataset attributes fail validation.
+`not` has exactly one child; `and` and `or` have at least one. `in` and `contains_any`
+require array operands; the other P0 comparison operators require a JSON scalar. All numeric values
+must be finite, including values nested inside arrays or objects.
 
-Unknown fields/operators fail validation; they are never passed through as arbitrary expressions.
+Before any query or embedding runs, the complete AST is validated against the active dataset's
+compiled namespace schema. Unknown and non-filterable attributes fail validation; values must match
+the attribute's scalar type, and `contains_any` is valid only for array attributes. The tiny fixture
+marks only `external_id` as filterable. Invalid filters return the direct `422 validation_error`
+contract and are never passed through as arbitrary provider expressions.
 
 ## 4. Dataset and index profile
 
@@ -271,6 +277,10 @@ class RetrievalConfigSummary(BaseModel):
     mode: RetrievalMode
     config_hash: str
 
+class RetrievalConfigListResponse(BaseModel):
+    contract_version: Literal[1] = 1
+    configs: list[RetrievalConfigSummary]
+
 class RankMovement(BaseModel):
     document_id: UUID
     ranks_by_config: dict[UUID, int | None]
@@ -295,6 +305,11 @@ class SearchCompareResponse(BaseModel):
 ```
 
 If debug provenance requires a second raw multi-query, its duration is `provenance_probe`, never folded into the production-shaped `turbopuffer` timing.
+
+`GET /api/v1/configs` returns the deterministic seeded summaries used by the compare request.
+The Milestone 1 compare implementation executes BM25 and ANN independently, reports only observed
+1-based ranks, typed scores, and separate client-wall-clock embedding/provider timings, and never
+returns query vectors or claims unexposed provider internals.
 
 ## 7. Judged query sets
 

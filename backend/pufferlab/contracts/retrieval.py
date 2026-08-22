@@ -7,7 +7,7 @@ from uuid import UUID
 
 from pydantic import Field, model_validator
 
-from pufferlab.contracts.common import ContractModel
+from pufferlab.contracts.common import ContractModel, ContractVersion
 from pufferlab.contracts.filters import FilterNode
 
 
@@ -94,3 +94,8 @@ class RetrievalConfigSummary(ContractModel):
     name: str
     mode: RetrievalMode
     config_hash: str
+
+
+class RetrievalConfigListResponse(ContractModel):
+    contract_version: ContractVersion = 1
+    configs: list[RetrievalConfigSummary]

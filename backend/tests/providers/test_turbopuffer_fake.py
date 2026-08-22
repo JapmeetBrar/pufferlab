@@ -172,7 +172,7 @@ def test_logical_filters_preserve_nesting_and_not_arity() -> None:
 
 @pytest.mark.parametrize("operation", [PredicateOp.IN, PredicateOp.CONTAINS_ANY])
 def test_collection_filter_rejects_scalar_values(operation: PredicateOp) -> None:
-    predicate = FilterPredicate(field="source", op=operation, value="unix")
+    predicate = FilterPredicate.model_construct(field="source", op=operation, value="unix")
 
     with pytest.raises(ValueError, match="array value"):
         filter_to_turbopuffer(predicate)
