@@ -21,6 +21,9 @@ live-search = [
   "sentence-transformers>=5,<6",
 ]
 
+[project.scripts]
+pufferlab = "pufferlab.cli:main"
+
 [dependency-groups]
 dev = [
   "httpx2>=2.12,<3",
