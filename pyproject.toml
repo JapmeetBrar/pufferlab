@@ -41,7 +41,7 @@ addopts = "-q"
 markers = [
   "live: opt-in tests that create and delete real turbopuffer resources",
 ]
-pythonpath = ["backend"]
+pythonpath = ["backend", "."]
 testpaths = ["backend/tests"]
 
 [tool.ruff]

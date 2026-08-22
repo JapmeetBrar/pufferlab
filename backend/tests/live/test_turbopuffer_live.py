@@ -9,6 +9,9 @@ from time import monotonic
 from typing import cast
 
 import pytest
+from pufferlab.config import Settings
+from pufferlab.contracts.errors import ApiErrorCode
+from pufferlab.providers.errors import ProviderError
 from pufferlab.providers.turbopuffer import TurbopufferProvider
 from pufferlab.providers.types import ProviderSchema, WriteDocument
 
@@ -24,11 +27,13 @@ def _unit_vector(dimensions: int, hot_dimension: int) -> list[float]:
 async def test_live_write_bm25_ann_and_exact_cleanup() -> None:
     if os.environ.get("PUFFERLAB_RUN_LIVE") != "1":
         pytest.skip("set PUFFERLAB_RUN_LIVE=1 to run live turbopuffer tests")
-    api_key = os.environ.get("TURBOPUFFER_API_KEY")
-    if not api_key:
-        pytest.skip("TURBOPUFFER_API_KEY is required for live turbopuffer tests")
+    settings = Settings()
+    secret = settings.turbopuffer_api_key
+    if secret is None or not secret.get_secret_value():
+        pytest.fail("TURBOPUFFER_API_KEY is required in the environment or ignored .env")
 
-    region = os.environ.get("TURBOPUFFER_REGION", "gcp-us-central1")
+    api_key = secret.get_secret_value()
+    region = settings.turbopuffer_region
     namespace_id = f"{_LIVE_NAMESPACE_PREFIX}{secrets.token_hex(12)}"
     created_namespace_id: str | None = None
     provider = TurbopufferProvider(api_key=api_key, region=region)
@@ -132,6 +137,21 @@ async def test_live_write_bm25_ann_and_exact_cleanup() -> None:
             if created_namespace_id is not None:
                 if not created_namespace_id.startswith(_LIVE_NAMESPACE_PREFIX):
                     pytest.fail("refusing to delete a namespace outside the live-test prefix")
-                await provider.delete_namespace(created_namespace_id)
+                try:
+                    await provider.delete_namespace(created_namespace_id)
+                except ProviderError as error:
+                    if error.details.code is not ApiErrorCode.NOT_FOUND:
+                        raise
+                for attempt in range(30):
+                    try:
+                        await provider.namespace_metadata(created_namespace_id)
+                    except ProviderError as error:
+                        if error.details.code is ApiErrorCode.NOT_FOUND:
+                            break
+                        raise
+                    if attempt + 1 < 30:
+                        await asyncio.sleep(0.5)
+                else:
+                    pytest.fail("live namespace cleanup was not confirmed as not found")
         finally:
             await provider.close()
