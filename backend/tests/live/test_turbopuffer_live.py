@@ -54,6 +54,7 @@ async def test_live_write_bm25_ann_and_exact_cleanup() -> None:
                     "max_token_length": 39,
                     "k1": 1.2,
                     "b": 0.75,
+                    "k3": 8.0,
                 },
             },
             "vector": {"type": "[2]f32", "ann": True, "filterable": False},

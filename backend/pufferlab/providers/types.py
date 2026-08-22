@@ -21,6 +21,7 @@ class FullTextSearchSchema(TypedDict, total=False):
     max_token_length: int
     k1: float
     b: float
+    k3: float
 
 
 class AnnIndexSchema(TypedDict, total=False):

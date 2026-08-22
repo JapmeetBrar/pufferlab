@@ -182,7 +182,10 @@ async def test_write_always_sends_explicit_schema_and_complete_rows() -> None:
     schema = cast(
         ProviderSchema,
         {
-            "text": {"type": "string", "full_text_search": True},
+            "text": {
+                "type": "string",
+                "full_text_search": {"k1": 1.2, "b": 0.75, "k3": 8.0},
+            },
             "vector": {"type": "[2]f32", "ann": True},
         },
     )
@@ -209,7 +212,13 @@ async def test_write_always_sends_explicit_schema_and_complete_rows() -> None:
                     {"id": "one", "text": "first", "vector": first_vector},
                     {"id": "two", "text": "second", "vector": second_vector},
                 ],
-                "schema": schema,
+                "schema": {
+                    "text": {
+                        "type": "string",
+                        "full_text_search": {"k1": 1.2, "b": 0.75, "k3": 8.0},
+                    },
+                    "vector": {"type": "[2]f32", "ann": True},
+                },
                 "distance_metric": "cosine_distance",
             },
         )
