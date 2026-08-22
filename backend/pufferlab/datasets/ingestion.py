@@ -63,7 +63,12 @@ class NamespaceWriter(Protocol):
         write_spec: NamespaceWriteSpec,
     ) -> None: ...
 
-    async def inspect_readiness(self, namespace: str) -> NamespaceReadiness: ...
+    async def inspect_readiness(
+        self,
+        namespace: str,
+        *,
+        expected_document_ids: frozenset[UUID],
+    ) -> NamespaceReadiness: ...
 
 
 class IngestionState(StrEnum):
@@ -173,7 +178,13 @@ class IngestionService:
     ) -> IngestionReport:
         if not namespace.strip():
             raise ValueError("namespace must not be blank")
+        if not corpus.documents:
+            raise ValueError("corpus must contain at least one document")
         write_spec = compile_namespace_write_spec(corpus.manifest)
+        expected_document_ids = frozenset(
+            document_uuid(corpus.manifest.version, document.external_id)
+            for document in corpus.documents
+        )
         if self._embedder.dimensions != corpus.manifest.embedding.dimensions:
             report = self._report(corpus, namespace=namespace, state=IngestionState.FAILED)
             raise EmbeddingDimensionMismatch(
@@ -237,7 +248,10 @@ class IngestionService:
         for attempt in range(self._readiness_attempts):
             inspection_failed = False
             try:
-                readiness = await self._writer.inspect_readiness(namespace)
+                readiness = await self._writer.inspect_readiness(
+                    namespace,
+                    expected_document_ids=expected_document_ids,
+                )
             except Exception:
                 inspection_failed = True
             if inspection_failed:
@@ -250,7 +264,12 @@ class IngestionService:
                 )
                 raise ReadinessError("namespace readiness inspection failed", report) from None
             assert readiness is not None
-            ready = self._is_ready(corpus, write_spec, readiness)
+            ready = self._is_ready(
+                corpus,
+                write_spec,
+                expected_document_ids,
+                readiness,
+            )
             if ready:
                 break
             if attempt + 1 < self._readiness_attempts:
@@ -275,12 +294,9 @@ class IngestionService:
     def _is_ready(
         corpus: FixtureCorpus,
         write_spec: NamespaceWriteSpec,
+        expected_document_ids: frozenset[UUID],
         readiness: NamespaceReadiness,
     ) -> bool:
-        expected_document_ids = frozenset(
-            document_uuid(corpus.manifest.version, document.external_id)
-            for document in corpus.documents
-        )
         return (
             readiness.metadata_ready
             and readiness.indexes_ready

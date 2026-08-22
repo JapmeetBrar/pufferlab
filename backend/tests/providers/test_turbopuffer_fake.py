@@ -40,12 +40,14 @@ class FakeMetadata:
 class FakeResponse:
     rows: list[dict[str, object]] | None = None
     rows_affected: int = 0
+    aggregations: dict[str, object] | None = None
 
 
 class FakeNamespace:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, object]]] = []
         self.query_response = FakeResponse()
+        self.query_responses: list[FakeResponse] = []
         self.write_response = FakeResponse(rows_affected=0)
         self.metadata_response = FakeMetadata(
             approx_row_count=0,
@@ -67,6 +69,8 @@ class FakeNamespace:
         self.calls.append(("query", kwargs))
         if self.query_error is not None:
             raise self.query_error
+        if self.query_responses:
+            return self.query_responses.pop(0)
         return self.query_response
 
     async def metadata(self, **kwargs: object) -> object:
@@ -312,6 +316,57 @@ async def test_ann_query_shape_and_distance_score_semantics() -> None:
     assert score.kind is ScoreKind.VECTOR_DISTANCE
     assert score.direction is ScoreDirection.LOWER_IS_BETTER
     assert score.value == 0.125
+
+
+@pytest.mark.asyncio
+async def test_document_id_inventory_is_strong_ordered_and_limit_safe() -> None:
+    namespace = FakeNamespace()
+    namespace.query_responses = [
+        FakeResponse(rows=[{"id": "doc-1"}, {"id": "doc-2"}]),
+        FakeResponse(aggregations={"count": 2}),
+    ]
+    provider, _ = make_provider(namespace, timer=clock(7.0, 7.003))
+
+    inventory = await provider.namespace_document_ids("fixture", max_documents=20)
+
+    assert inventory.document_ids == ("doc-1", "doc-2")
+    assert inventory.document_count == 2
+    assert not inventory.truncated
+    assert inventory.client_duration_ms == pytest.approx(3.0)
+    assert namespace.calls == [
+        (
+            "query",
+            {
+                "rank_by": ("id", "asc"),
+                "top_k": 21,
+                "include_attributes": [],
+                "consistency": {"level": "strong"},
+            },
+        ),
+        (
+            "query",
+            {
+                "aggregate_by": {"count": ("Count",)},
+                "consistency": {"level": "strong"},
+            },
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_document_id_inventory_detects_more_than_expected_limit() -> None:
+    namespace = FakeNamespace()
+    namespace.query_responses = [
+        FakeResponse(rows=[{"id": "doc-1"}, {"id": "doc-2"}, {"id": "doc-3"}]),
+        FakeResponse(aggregations={"count": 40}),
+    ]
+    provider, _ = make_provider(namespace)
+
+    inventory = await provider.namespace_document_ids("fixture", max_documents=2)
+
+    assert inventory.document_ids == ("doc-1", "doc-2", "doc-3")
+    assert inventory.document_count == 40
+    assert inventory.truncated
 
 
 @pytest.mark.asyncio

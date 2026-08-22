@@ -47,7 +47,7 @@ class FtsProfile(StrictModel):
     stemming: bool
     remove_stopwords: bool
     ascii_folding: bool
-    max_token_length: int = Field(ge=1, le=255)
+    max_token_length: int = Field(ge=1, le=254)
     k1: float = Field(gt=0)
     b: float = Field(ge=0, le=1)
     k3: float = Field(gt=0)

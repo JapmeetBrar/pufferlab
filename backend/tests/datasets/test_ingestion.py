@@ -97,8 +97,14 @@ class FakeWriter:
         self.documents.update({str(document.id): document for document in documents})
         self.active -= 1
 
-    async def inspect_readiness(self, namespace: str) -> NamespaceReadiness:
+    async def inspect_readiness(
+        self,
+        namespace: str,
+        *,
+        expected_document_ids: frozenset[UUID],
+    ) -> NamespaceReadiness:
         del namespace
+        del expected_document_ids
         self.readiness_checks += 1
         if self.readiness_error is not None:
             raise self.readiness_error

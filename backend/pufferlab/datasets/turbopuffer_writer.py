@@ -1,9 +1,10 @@
 """Typed integration from dataset ingestion to the turbopuffer provider."""
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Protocol, Self
 from uuid import UUID
 
+from pufferlab.contracts.common import JsonValue
 from pufferlab.datasets.identity import canonical_schema_hash
 from pufferlab.datasets.ingestion import EmbeddedDocument, NamespaceReadiness
 from pufferlab.datasets.schema import NamespaceAttributeWriteSpec, NamespaceWriteSpec
@@ -12,6 +13,7 @@ from pufferlab.providers.types import (
     AttributeSchema,
     DistanceMetric,
     FullTextSearchSchema,
+    ProviderDocumentIdInventory,
     ProviderNamespaceMetadata,
     ProviderSchema,
     ProviderWriteResult,
@@ -31,6 +33,13 @@ class _WriteProvider(Protocol):
 
     async def namespace_metadata(self, namespace: str) -> ProviderNamespaceMetadata: ...
 
+    async def namespace_document_ids(
+        self,
+        namespace: str,
+        *,
+        max_documents: int,
+    ) -> ProviderDocumentIdInventory: ...
+
 
 class TurbopufferNamespaceWriter:
     """Adapt compiled dataset writes without exposing SDK types to the ingestion service."""
@@ -38,7 +47,6 @@ class TurbopufferNamespaceWriter:
     def __init__(self, provider: _WriteProvider) -> None:
         self._provider = provider
         self._specifications: dict[str, NamespaceWriteSpec] = {}
-        self._acknowledged_ids: dict[str, set[UUID]] = {}
 
     @classmethod
     def from_provider(cls, provider: TurbopufferProvider) -> Self:
@@ -71,29 +79,43 @@ class TurbopufferNamespaceWriter:
             schema=_compile_provider_schema(write_spec),
             distance_metric=write_spec.distance_metric,
         )
-        acknowledged = self._acknowledged_ids.setdefault(namespace, set())
-        acknowledged.update(document.id for document in documents)
 
-    async def inspect_readiness(self, namespace: str) -> NamespaceReadiness:
+    async def inspect_readiness(
+        self,
+        namespace: str,
+        *,
+        expected_document_ids: frozenset[UUID],
+    ) -> NamespaceReadiness:
         write_spec = self._specifications.get(namespace)
         if write_spec is None:
-            raise RuntimeError("namespace has no acknowledged dataset write specification")
+            raise RuntimeError("namespace has no dataset write specification")
 
         metadata = await self._provider.namespace_metadata(namespace)
+        inventory = await self._provider.namespace_document_ids(
+            namespace,
+            max_documents=len(expected_document_ids),
+        )
         expected_schema = write_spec.provider_schema
-        actual_schema = dict(metadata.schema)
-        schema_matches = actual_schema == expected_schema
+        actual_schema, actual_distance_metric = _normalize_observed_schema(
+            metadata.schema,
+            vector_attribute=write_spec.vector_attribute,
+        )
+        schema_matches = (
+            actual_schema == expected_schema
+            and actual_distance_metric == write_spec.distance_metric
+        )
         actual_schema_hash = canonical_schema_hash(
             {
                 "schema": actual_schema,
-                "distance_metric": write_spec.distance_metric,
+                "distance_metric": actual_distance_metric,
             }
         )
+        remote_document_ids = frozenset(UUID(str(value)) for value in inventory.document_ids)
         return NamespaceReadiness(
-            document_count=metadata.approx_row_count,
-            document_ids=frozenset(self._acknowledged_ids.get(namespace, set())),
+            document_count=inventory.document_count,
+            document_ids=remote_document_ids,
             schema_hash=actual_schema_hash,
-            metadata_ready=schema_matches,
+            metadata_ready=schema_matches and not inventory.truncated,
             indexes_ready=metadata.ready,
         )
 
@@ -127,3 +149,44 @@ def _compile_attribute(specification: NamespaceAttributeWriteSpec) -> AttributeS
     if specification.ann is not None:
         attribute["ann"] = specification.ann
     return attribute
+
+
+def _normalize_observed_schema(
+    schema: Mapping[str, JsonValue],
+    *,
+    vector_attribute: str,
+) -> tuple[dict[str, JsonValue], DistanceMetric | None]:
+    normalized = _normalize_mapping(schema)
+    vector = normalized.get(vector_attribute)
+    if not isinstance(vector, dict):
+        return normalized, None
+    ann = vector.get("ann")
+    if not isinstance(ann, dict):
+        return normalized, None
+
+    metric_value = ann.get("distance_metric")
+    metric: DistanceMetric | None = None
+    if metric_value == "cosine_distance":
+        metric = "cosine_distance"
+    elif metric_value == "euclidean_squared":
+        metric = "euclidean_squared"
+
+    remaining_ann = {key: value for key, value in ann.items() if key != "distance_metric"}
+    normalized_vector = dict(vector)
+    normalized_vector["ann"] = remaining_ann or True
+    normalized[vector_attribute] = normalized_vector
+    return normalized, metric
+
+
+def _normalize_mapping(value: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
+    return {key: _normalize_value(item) for key, item in value.items() if item is not None}
+
+
+def _normalize_value(value: JsonValue) -> JsonValue:
+    if isinstance(value, dict):
+        return _normalize_mapping(value)
+    if isinstance(value, list):
+        return [_normalize_value(item) for item in value if item is not None]
+    if value is None:  # pragma: no cover - callers filter mapping/list nulls
+        raise ValueError("cannot normalize an unowned null schema value")
+    return value

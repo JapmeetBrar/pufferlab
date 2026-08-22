@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 from pufferlab.datasets.identity import canonical_schema_hash, corpus_hash, document_uuid
 from pufferlab.datasets.loader import DatasetLoadError, load_fixture_corpus
-from pufferlab.datasets.models import SourceDocument
+from pufferlab.datasets.models import FtsProfile, SourceDocument
 from pufferlab.datasets.schema import compile_namespace_write_spec
 from pydantic import ValidationError
 
@@ -33,6 +33,18 @@ def test_document_uuid_includes_dataset_version() -> None:
 
     assert first == document_uuid("version-one", "source-123")
     assert first != document_uuid("version-two", "source-123")
+
+
+def test_fts_max_token_length_accepts_254_and_rejects_255() -> None:
+    profile = load_fixture_corpus(FIXTURE_ROOT).manifest.fts
+    payload = profile.model_dump()
+    payload["max_token_length"] = 254
+
+    assert FtsProfile.model_validate(payload).max_token_length == 254
+
+    payload["max_token_length"] = 255
+    with pytest.raises(ValidationError, match="less than or equal to 254"):
+        FtsProfile.model_validate(payload)
 
 
 def test_all_query_expectations_map_to_loaded_documents() -> None:

@@ -30,6 +30,7 @@ from pufferlab.providers.types import (
     DistanceMetric,
     ProviderDeleteResult,
     ProviderDocument,
+    ProviderDocumentIdInventory,
     ProviderNamespaceMetadata,
     ProviderQueryResult,
     ProviderSchema,
@@ -233,6 +234,54 @@ class TurbopufferProvider:
             client_duration_ms=_elapsed_ms(start, self._clock()),
         )
 
+    async def namespace_document_ids(
+        self,
+        namespace: str,
+        *,
+        max_documents: int,
+    ) -> ProviderDocumentIdInventory:
+        """Observe an exact small-namespace ID inventory with strong consistency.
+
+        Requesting one row beyond the expected maximum proves whether the bounded result is
+        complete. This is intentionally for small fixture namespaces, not general corpus scans.
+        """
+        if max_documents < 1:
+            raise ValueError("max_documents must be at least 1")
+
+        provider_namespace = self._namespace(namespace)
+        start = self._clock()
+        ids_response = await _call_sdk(
+            provider_namespace.query(
+                rank_by=("id", "asc"),
+                top_k=max_documents + 1,
+                include_attributes=[],
+                consistency={"level": "strong"},
+            ),
+            operation="namespace_document_ids",
+        )
+        count_response = await _call_sdk(
+            provider_namespace.query(
+                aggregate_by={"count": ("Count",)},
+                consistency={"level": "strong"},
+            ),
+            operation="namespace_document_count",
+        )
+        rows_value = getattr(ids_response, "rows", None)
+        rows = () if rows_value is None else cast(Sequence[object], rows_value)
+        document_ids = tuple(_row_id(row) for row in rows)
+        document_count = _required_aggregation_count(count_response, "count")
+        expected_returned_ids = min(document_count, max_documents + 1)
+        if len(document_ids) != expected_returned_ids or len(set(document_ids)) != len(
+            document_ids
+        ):
+            raise ValueError("turbopuffer returned an invalid document inventory")
+        return ProviderDocumentIdInventory(
+            document_ids=document_ids,
+            document_count=document_count,
+            truncated=document_count > max_documents,
+            client_duration_ms=_elapsed_ms(start, self._clock()),
+        )
+
     async def delete_namespace(self, namespace: str) -> ProviderDeleteResult:
         provider_namespace = self._namespace(namespace)
         start = self._clock()
@@ -329,6 +378,13 @@ def _row_to_document(
     )
 
 
+def _row_id(row: object) -> str | int:
+    document_id = _object_to_mapping(row).get("id")
+    if not isinstance(document_id, str | int) or isinstance(document_id, bool):
+        raise ValueError("turbopuffer row is missing a valid id")
+    return document_id
+
+
 def _object_to_mapping(value: object) -> dict[str, object]:
     if isinstance(value, Mapping):
         return {str(key): item for key, item in value.items()}
@@ -383,6 +439,18 @@ def _required_str(value: object, name: str) -> str:
     if not isinstance(result, str):
         raise ValueError(f"turbopuffer response has invalid {name}")
     return result
+
+
+def _required_aggregation_count(value: object, name: str) -> int:
+    aggregations = getattr(value, "aggregations", None)
+    if not isinstance(aggregations, Mapping):
+        raise ValueError("turbopuffer response is missing aggregations")
+    count = aggregations.get(name)
+    if isinstance(count, int) and not isinstance(count, bool) and count >= 0:
+        return count
+    if isinstance(count, float) and count.is_integer() and count >= 0:
+        return int(count)
+    raise ValueError(f"turbopuffer response has invalid {name} aggregation")
 
 
 def _elapsed_ms(start: float, end: float) -> float:
