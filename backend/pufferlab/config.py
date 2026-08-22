@@ -16,6 +16,8 @@ class Settings(BaseSettings):
 
     pufferlab_environment: str = "development"
     pufferlab_data_dir: Path = Path("data")
+    pufferlab_fixture_dir: Path = Path("fixtures/tiny-corpus")
+    pufferlab_search_namespace: str | None = None
     pufferlab_cors_origins: str = "http://localhost:5173"
     turbopuffer_api_key: SecretStr | None = None
     turbopuffer_region: str = "gcp-us-central1"

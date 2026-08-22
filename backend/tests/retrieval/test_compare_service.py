@@ -1,6 +1,5 @@
 import json
 import traceback
-from dataclasses import replace
 from uuid import UUID, uuid4
 
 import pytest
@@ -13,8 +12,9 @@ from pufferlab.contracts.common import (
 from pufferlab.contracts.filters import FilterPredicate, PredicateOp
 from pufferlab.contracts.retrieval import RetrievalMode
 from pufferlab.contracts.search import RetrievalStage, SearchCompareRequest, TimingStage
+from pufferlab.datasets.models import DatasetManifest
 from pufferlab.providers.types import ProviderDocument, ProviderQueryResult
-from pufferlab.retrieval.config import SearchCatalogProfile, build_search_catalog
+from pufferlab.retrieval.config import build_search_catalog
 from pufferlab.retrieval.errors import SearchError
 from pufferlab.retrieval.service import SearchCompareService
 from pufferlab.retrieval.types import QueryEmbedding
@@ -27,22 +27,45 @@ DOCUMENT_B = UUID("307a0026-1cd9-58a5-8131-729c329fd068")
 DOCUMENT_C = UUID("fd00f34b-9d23-5655-81f2-b05a1b9f4ea8")
 
 
-def _profile() -> SearchCatalogProfile:
-    return SearchCatalogProfile(
-        dataset_slug="pufferlab-tiny-unix",
-        dataset_version="tiny-unix-v1",
-        namespace_schema_hash="fixture-schema-hash",
-        text_attribute="body",
-        vector_attribute="vector",
-        embedding_model=MODEL,
-        embedding_revision=REVISION,
-        embedding_dimensions=3,
-        distance_metric="cosine_distance",
+def _manifest() -> DatasetManifest:
+    return DatasetManifest.model_validate(
+        {
+            "format_version": 1,
+            "slug": "pufferlab-tiny-unix",
+            "version": "tiny-unix-v1",
+            "title": "Test corpus",
+            "license": "CC0-1.0",
+            "source_url": "https://example.test/corpus",
+            "embedding": {
+                "provider": "sentence_transformers",
+                "model": MODEL,
+                "revision": REVISION,
+                "dimensions": 3,
+            },
+            "vector": {
+                "attribute": "vector",
+                "dtype": "f16",
+                "distance_metric": "cosine_distance",
+            },
+            "fts": {
+                "attributes": ["title", "body"],
+                "tokenizer": "word_v4",
+                "case_sensitive": False,
+                "language": "english",
+                "stemming": False,
+                "remove_stopwords": False,
+                "ascii_folding": False,
+                "max_token_length": 39,
+                "k1": 1.2,
+                "b": 0.75,
+                "k3": 8.0,
+            },
+        }
     )
 
 
 def _catalog():
-    return build_search_catalog(_profile(), result_k=3)
+    return build_search_catalog(_manifest(), result_k=3)
 
 
 def _document(
@@ -153,9 +176,11 @@ def test_catalog_is_deterministic_and_describes_bm25_and_vector() -> None:
     assert len({summary.id for summary in first}) == 2
     assert all(len(summary.config_hash) == 64 for summary in first)
 
-    changed_schema = build_search_catalog(
-        replace(_profile(), namespace_schema_hash="changed-schema-hash"), result_k=3
-    ).summaries()
+    manifest = _manifest()
+    changed_manifest = manifest.model_copy(
+        update={"vector": manifest.vector.model_copy(update={"dtype": "f32"})}
+    )
+    changed_schema = build_search_catalog(changed_manifest, result_k=3).summaries()
     assert [summary.config_hash for summary in changed_schema] != [
         summary.config_hash for summary in first
     ]

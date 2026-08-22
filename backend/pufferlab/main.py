@@ -19,6 +19,7 @@ from pufferlab.api.router import api_router
 from pufferlab.config import Settings, get_settings
 from pufferlab.providers.errors import ProviderError
 from pufferlab.retrieval.errors import SearchError
+from pufferlab.retrieval.runtime import RuntimeSearchBackend
 from pufferlab.retrieval.types import SearchBackend
 
 
@@ -28,6 +29,11 @@ def create_app(
     search_backend: SearchBackend | None = None,
 ) -> FastAPI:
     resolved_settings = settings or get_settings()
+    resolved_search_backend = (
+        search_backend
+        if search_backend is not None
+        else RuntimeSearchBackend.from_settings(resolved_settings)
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -45,7 +51,7 @@ def create_app(
         lifespan=lifespan,
     )
     app.state.settings = resolved_settings
-    app.state.search_backend = search_backend
+    app.state.search_backend = resolved_search_backend
 
     @app.exception_handler(SearchError)
     async def handle_search_error(_: Request, error: SearchError) -> JSONResponse:

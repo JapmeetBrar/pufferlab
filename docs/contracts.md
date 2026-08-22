@@ -271,6 +271,10 @@ class RetrievalConfigSummary(BaseModel):
     mode: RetrievalMode
     config_hash: str
 
+class RetrievalConfigListResponse(BaseModel):
+    contract_version: Literal[1] = 1
+    configs: list[RetrievalConfigSummary]
+
 class RankMovement(BaseModel):
     document_id: UUID
     ranks_by_config: dict[UUID, int | None]
@@ -295,6 +299,11 @@ class SearchCompareResponse(BaseModel):
 ```
 
 If debug provenance requires a second raw multi-query, its duration is `provenance_probe`, never folded into the production-shaped `turbopuffer` timing.
+
+`GET /api/v1/configs` returns the deterministic seeded summaries used by the compare request.
+The Milestone 1 compare implementation executes BM25 and ANN independently, reports only observed
+1-based ranks, typed scores, and separate client-wall-clock embedding/provider timings, and never
+returns query vectors or claims unexposed provider internals.
 
 ## 7. Judged query sets
 

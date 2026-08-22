@@ -9,24 +9,11 @@ from typing import Literal
 from uuid import UUID, uuid5
 
 from pufferlab.contracts.retrieval import RetrievalConfigSummary, RetrievalMode
+from pufferlab.datasets.models import DatasetManifest
+from pufferlab.datasets.schema import compile_namespace_write_spec
 from pufferlab.providers.types import ConsistencyLevel, DistanceMetric
 
 _CONFIG_ID_NAMESPACE = UUID("224ff18e-4b57-55bb-a6ec-4e40384550da")
-
-
-@dataclass(frozen=True, slots=True)
-class SearchCatalogProfile:
-    """Search-relevant fields copied from a validated fixture manifest."""
-
-    dataset_slug: str
-    dataset_version: str
-    namespace_schema_hash: str
-    text_attribute: str
-    vector_attribute: str
-    embedding_model: str
-    embedding_revision: str
-    embedding_dimensions: int
-    distance_metric: DistanceMetric
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,63 +49,63 @@ class SearchConfigCatalog:
 
 
 def build_search_catalog(
-    profile: SearchCatalogProfile,
+    manifest: DatasetManifest,
     *,
     result_k: int = 10,
     consistency: ConsistencyLevel = "strong",
 ) -> SearchConfigCatalog:
     if result_k < 1:
         raise ValueError("result_k must be positive")
-    if profile.embedding_dimensions < 1:
-        raise ValueError("embedding_dimensions must be positive")
+    write_spec = compile_namespace_write_spec(manifest)
+    text_attribute = "body" if "body" in manifest.fts.attributes else manifest.fts.attributes[0]
 
     common = {
-        "dataset_slug": profile.dataset_slug,
-        "dataset_version": profile.dataset_version,
-        "namespace_schema_hash": profile.namespace_schema_hash,
+        "dataset_slug": manifest.slug,
+        "dataset_version": manifest.version,
+        "namespace_schema_hash": write_spec.schema_hash,
         "result_k": result_k,
         "consistency": consistency,
     }
     bm25_payload = {
         **common,
         "mode": RetrievalMode.BM25.value,
-        "text_attribute": profile.text_attribute,
+        "text_attribute": text_attribute,
     }
     vector_payload = {
         **common,
         "mode": RetrievalMode.VECTOR.value,
-        "vector_attribute": profile.vector_attribute,
-        "embedding_model": profile.embedding_model,
-        "embedding_revision": profile.embedding_revision,
-        "embedding_dimensions": profile.embedding_dimensions,
-        "distance_metric": profile.distance_metric,
+        "vector_attribute": manifest.vector.attribute,
+        "embedding_model": manifest.embedding.model,
+        "embedding_revision": manifest.embedding.revision,
+        "embedding_dimensions": manifest.embedding.dimensions,
+        "distance_metric": manifest.vector.distance_metric,
     }
 
     bm25 = SeededSearchConfig(
         summary=_summary(
-            name=f"BM25 · {profile.text_attribute}",
+            name=f"BM25 · {text_attribute}",
             mode=RetrievalMode.BM25,
             payload=bm25_payload,
         ),
         mode=RetrievalMode.BM25,
         result_k=result_k,
         consistency=consistency,
-        text_attribute=profile.text_attribute,
+        text_attribute=text_attribute,
     )
     vector = SeededSearchConfig(
         summary=_summary(
-            name=f"Vector · {profile.embedding_model}",
+            name=f"Vector · {manifest.embedding.model}",
             mode=RetrievalMode.VECTOR,
             payload=vector_payload,
         ),
         mode=RetrievalMode.VECTOR,
         result_k=result_k,
         consistency=consistency,
-        vector_attribute=profile.vector_attribute,
-        embedding_model=profile.embedding_model,
-        embedding_revision=profile.embedding_revision,
-        embedding_dimensions=profile.embedding_dimensions,
-        distance_metric=profile.distance_metric,
+        vector_attribute=manifest.vector.attribute,
+        embedding_model=manifest.embedding.model,
+        embedding_revision=manifest.embedding.revision,
+        embedding_dimensions=manifest.embedding.dimensions,
+        distance_metric=manifest.vector.distance_metric,
     )
     return SearchConfigCatalog((bm25, vector))
 

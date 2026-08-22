@@ -128,8 +128,10 @@ def test_search_error_and_request_validation_use_direct_error_contract() -> None
     assert "detail" not in validation_response.json()
 
 
-def test_unconfigured_search_runtime_returns_safe_503() -> None:
-    response = TestClient(create_app()).get("/api/v1/configs")
+def test_missing_search_backend_dependency_returns_safe_503() -> None:
+    app = create_app()
+    app.state.search_backend = None
+    response = TestClient(app).get("/api/v1/configs")
 
     assert response.status_code == 503
     assert response.json()["code"] == "internal_error"

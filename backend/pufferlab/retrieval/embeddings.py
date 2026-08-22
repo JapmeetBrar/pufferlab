@@ -6,13 +6,14 @@ import asyncio
 import importlib
 from collections.abc import Callable, Sequence
 from time import perf_counter
-from typing import Protocol, cast
+from typing import Protocol, runtime_checkable
 
 from pufferlab.retrieval.types import QueryEmbedding
 
 _RETRIEVAL_QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
 
 
+@runtime_checkable
 class _Encoder(Protocol):
     def encode(
         self,
@@ -27,6 +28,7 @@ class _ModelFactory(Protocol):
     def __call__(self, model_name_or_path: str, *, revision: str) -> _Encoder: ...
 
 
+@runtime_checkable
 class _ListConvertible(Protocol):
     def tolist(self) -> object: ...
 
@@ -84,15 +86,22 @@ class SentenceTransformerQueryEmbedder:
 
 def _load_sentence_transformer_factory() -> _ModelFactory:
     module = importlib.import_module("sentence_transformers")
-    factory = module.SentenceTransformer
-    if not callable(factory):
+    sentence_transformer = module.SentenceTransformer
+    if not callable(sentence_transformer):
         raise TypeError("sentence_transformers.SentenceTransformer is not callable")
-    return cast(_ModelFactory, factory)
+
+    def factory(model_name_or_path: str, *, revision: str) -> _Encoder:
+        encoder = sentence_transformer(model_name_or_path, revision=revision)
+        if not isinstance(encoder, _Encoder):
+            raise TypeError("SentenceTransformer does not implement encode")
+        return encoder
+
+    return factory
 
 
 def _to_float_tuple(value: object) -> tuple[float, ...]:
-    if hasattr(value, "tolist"):
-        value = cast(_ListConvertible, value).tolist()
+    if isinstance(value, _ListConvertible):
+        value = value.tolist()
     if not isinstance(value, Sequence) or isinstance(value, str | bytes | bytearray):
         raise TypeError("embedding model returned a non-vector value")
     values = []
