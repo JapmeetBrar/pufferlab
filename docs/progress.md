@@ -17,7 +17,7 @@ merge, verification result, or blocker. Process details live in
 |---|---|---|---|---|---|
 | F0 | Product brief and implementation plan | foundation_fixes | `codex/pufferlab-plan` / PR #1 | verified | Reviewer approved after fixes and merged as `561a554`; plan is now on `main`. |
 | F1 | Contract-first backend/frontend scaffold | foundation_fixes | `codex/t0-contract-scaffold` / PR #2 | verified | Reviewer reran contract gates, approved, and merged as `6acaf96`; GitHub Backend/Frontend CI passed. |
-| LOOP | Agent policy, review runbook, and progress ledger | root | `codex/engineering-loop` | implementing | Rebase on the reviewed foundation, push, and request independent review. |
+| LOOP | Agent policy, review runbook, and progress ledger | root | `codex/engineering-loop` / PR #3 | review_requested | Rebased on reviewed `main`; dedicated reviewer is auditing the policy and ledger. |
 | M1-A | Narrow turbopuffer provider with fake and opt-in live tests | unassigned | `codex/t2-turbopuffer-provider` | planned | Depends on F1 and LOOP. |
 | M1-B | Deterministic tiny fixture and idempotent ingestion command | unassigned | `codex/t3-tiny-ingestion` | planned | Depends on provider interface from M1-A; fixture preparation may start in parallel. |
 | M1-C | BM25/vector retrieval orchestration and compare API | unassigned | `codex/t5-compare-api` | planned | Depends on M1-A and the T0 contracts. |
