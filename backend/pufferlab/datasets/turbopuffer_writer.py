@@ -157,6 +157,8 @@ def _normalize_observed_schema(
     vector_attribute: str,
 ) -> tuple[dict[str, JsonValue], DistanceMetric | None]:
     normalized = _normalize_mapping(schema)
+    if normalized.get("id") == {"type": "string"}:
+        normalized.pop("id")
     vector = normalized.get(vector_attribute)
     if not isinstance(vector, dict):
         return normalized, None

@@ -10,7 +10,10 @@ from pufferlab.datasets.ingestion import EmbeddedDocument, IngestionService, Rea
 from pufferlab.datasets.loader import load_fixture_corpus
 from pufferlab.datasets.models import FixtureCorpus
 from pufferlab.datasets.schema import NamespaceWriteSpec, compile_namespace_write_spec
-from pufferlab.datasets.turbopuffer_writer import TurbopufferNamespaceWriter
+from pufferlab.datasets.turbopuffer_writer import (
+    TurbopufferNamespaceWriter,
+    _normalize_observed_schema,
+)
 from pufferlab.providers.turbopuffer import TurbopufferProvider
 from pufferlab.providers.types import (
     DistanceMetric,
@@ -181,6 +184,19 @@ async def test_real_sdk_metadata_noise_is_normalized_and_reaches_ready() -> None
     assert report.readiness.document_count == 20
     assert report.readiness.document_ids == _expected_ids(corpus)
     assert report.readiness.schema_hash == compile_namespace_write_spec(corpus.manifest).schema_hash
+
+
+def test_only_the_observed_string_document_id_schema_is_provider_noise() -> None:
+    corpus = load_fixture_corpus(FIXTURE_ROOT)
+    specification = compile_namespace_write_spec(corpus.manifest)
+    observed = _observed_schema(specification, distance_metric="cosine_distance")
+
+    normalized, _ = _normalize_observed_schema(observed, vector_attribute="vector")
+    assert normalized == specification.provider_schema
+
+    observed["id"] = {"type": "uint"}
+    normalized, _ = _normalize_observed_schema(observed, vector_attribute="vector")
+    assert normalized["id"] == {"type": "uint"}
 
 
 @pytest.mark.asyncio
@@ -367,6 +383,7 @@ def _observed_schema(
         attribute["glob"] = None
         attribute["regex"] = None
         attribute["sparse_knn"] = None
+    schema["id"] = {"type": "string"}
     return schema
 
 
