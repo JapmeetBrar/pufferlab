@@ -2,9 +2,12 @@ import traceback
 from pathlib import Path
 
 import pytest
+from fastapi.testclient import TestClient
 from pufferlab.config import Settings
+from pufferlab.contracts.filters import FilterLogical, FilterPredicate, LogicalOp, PredicateOp
 from pufferlab.contracts.search import SearchCompareRequest
 from pufferlab.datasets.loader import load_fixture_corpus
+from pufferlab.main import create_app
 from pufferlab.providers.types import ProviderQueryResult
 from pufferlab.retrieval.errors import SearchError
 from pufferlab.retrieval.runtime import RuntimeSearchBackend
@@ -79,6 +82,23 @@ def _settings(**overrides: object) -> Settings:
     return Settings.model_validate(values)
 
 
+def _runtime_without_credentials() -> tuple[
+    RuntimeSearchBackend,
+    FakeProviderFactory,
+    FakeEmbedderFactory,
+]:
+    corpus = load_fixture_corpus(FIXTURE_DIR)
+    provider_factory = FakeProviderFactory()
+    embedder_factory = FakeEmbedderFactory()
+    runtime = RuntimeSearchBackend(
+        settings=_settings(turbopuffer_api_key=None, pufferlab_search_namespace=None),
+        manifest=corpus.manifest,
+        provider_factory=provider_factory,
+        embedder_factory=embedder_factory,
+    )
+    return runtime, provider_factory, embedder_factory
+
+
 @pytest.mark.asyncio
 async def test_runtime_uses_exact_manifest_and_lazily_reuses_clients() -> None:
     corpus = load_fixture_corpus(FIXTURE_DIR)
@@ -143,6 +163,88 @@ async def test_runtime_discovers_configs_without_server_credentials() -> None:
         )
     assert caught.value.__cause__ is None
     assert caught.value.__context__ is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "filter_override",
+    [
+        FilterPredicate(field="runtime-secret-field", op=PredicateOp.EQ, value="value"),
+        FilterPredicate(field="title", op=PredicateOp.EQ, value="value"),
+        FilterLogical(
+            op=LogicalOp.AND,
+            children=[
+                FilterPredicate(field="external_id", op=PredicateOp.EQ, value="valid"),
+                FilterLogical(
+                    op=LogicalOp.NOT,
+                    children=[FilterPredicate(field="body", op=PredicateOp.EQ, value="invalid")],
+                ),
+            ],
+        ),
+    ],
+)
+async def test_runtime_validates_filters_before_credentials_or_factories(
+    filter_override: FilterPredicate | FilterLogical,
+) -> None:
+    runtime, provider_factory, embedder_factory = _runtime_without_credentials()
+    summaries = runtime.list_configs()
+
+    with pytest.raises(SearchError) as caught:
+        await runtime.compare(
+            SearchCompareRequest(
+                query_text="query",
+                config_ids=[summary.id for summary in summaries],
+                filter_override=filter_override,
+            )
+        )
+
+    formatted = "".join(traceback.format_exception(caught.value))
+    assert caught.value.details.http_status == 422
+    assert caught.value.__context__ is None
+    assert caught.value.__cause__ is None
+    assert "runtime-secret-field" not in repr(caught.value)
+    assert "runtime-secret-field" not in formatted
+    assert provider_factory.calls == []
+    assert embedder_factory.calls == []
+
+
+def test_runtime_api_orders_filter_validation_before_missing_configuration() -> None:
+    runtime, provider_factory, embedder_factory = _runtime_without_credentials()
+    config_ids = [str(summary.id) for summary in runtime.list_configs()]
+    invalid_body = {
+        "query_text": "query",
+        "config_ids": config_ids,
+        "filter_override": {
+            "kind": "predicate",
+            "field": "runtime-api-secret-field",
+            "op": "eq",
+            "value": "value",
+        },
+    }
+    valid_body = {
+        **invalid_body,
+        "filter_override": {
+            "kind": "predicate",
+            "field": "external_id",
+            "op": "eq",
+            "value": "doc-001",
+        },
+    }
+
+    with TestClient(create_app(search_backend=runtime)) as client:
+        invalid_response = client.post("/api/v1/search/compare", json=invalid_body)
+        valid_response = client.post("/api/v1/search/compare", json=valid_body)
+
+    assert invalid_response.status_code == 422
+    assert invalid_response.json()["code"] == "validation_error"
+    assert invalid_response.json()["message"] == "filter field is not available"
+    assert invalid_response.json()["details"] == {"operation": "compare"}
+    assert "detail" not in invalid_response.json()
+    assert "runtime-api-secret-field" not in invalid_response.text
+    assert valid_response.status_code == 503
+    assert valid_response.json()["message"] == "search backend is not configured"
+    assert provider_factory.calls == []
+    assert embedder_factory.calls == []
 
 
 class SecretProviderFactory(FakeProviderFactory):

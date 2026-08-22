@@ -15,6 +15,7 @@ from pufferlab.providers.turbopuffer import TurbopufferProvider
 from pufferlab.retrieval.config import SearchConfigCatalog, build_search_catalog
 from pufferlab.retrieval.embeddings import SentenceTransformerQueryEmbedder
 from pufferlab.retrieval.errors import SearchError, search_unavailable
+from pufferlab.retrieval.filter_validation import FixtureFilterValidator
 from pufferlab.retrieval.service import SearchCompareService
 from pufferlab.retrieval.types import QueryEmbedder, RetrievalProvider
 
@@ -46,6 +47,8 @@ class RuntimeSearchBackend:
     ) -> None:
         self._settings = settings
         self._manifest = manifest
+        self._write_spec = compile_namespace_write_spec(manifest)
+        self._filter_validator = FixtureFilterValidator(self._write_spec)
         self._catalog: SearchConfigCatalog = build_search_catalog(manifest)
         self._provider_factory: _ProviderFactory = provider_factory or TurbopufferProvider
         self._embedder_factory: _EmbedderFactory = (
@@ -64,6 +67,8 @@ class RuntimeSearchBackend:
         return self._catalog.summaries()
 
     async def compare(self, request: SearchCompareRequest) -> SearchCompareResponse:
+        if request.filter_override is not None:
+            self._filter_validator.validate(request.filter_override)
         service = await self._get_service()
         return await service.compare(request)
 
@@ -108,7 +113,7 @@ class RuntimeSearchBackend:
             service = SearchCompareService(
                 namespace=namespace,
                 catalog=self._catalog,
-                write_spec=compile_namespace_write_spec(self._manifest),
+                write_spec=self._write_spec,
                 provider=provider,
                 query_embedder=embedder,
             )
