@@ -79,6 +79,16 @@ class ProviderWriteResult:
 
 
 @dataclass(frozen=True, slots=True)
+class ProviderDocumentIdInventory:
+    """Strong-consistency ID inventory bounded one row beyond the expected corpus size."""
+
+    document_ids: tuple[DocumentId, ...]
+    document_count: int
+    truncated: bool
+    client_duration_ms: float
+
+
+@dataclass(frozen=True, slots=True)
 class ProviderDeleteResult:
     client_duration_ms: float
 

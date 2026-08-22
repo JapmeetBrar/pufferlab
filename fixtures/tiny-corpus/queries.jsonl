@@ -1,0 +1,5 @@
+{"external_id":"query-001","text":"Why does df report more used space than du after deleting a log?","expected_external_ids":["tiny-005"]}
+{"external_id":"query-002","text":"How can I find the program listening on port 8080?","expected_external_ids":["tiny-002"]}
+{"external_id":"query-003","text":"Safely process filenames that contain whitespace","expected_external_ids":["tiny-003"]}
+{"external_id":"query-004","text":"Make a bash pipeline fail if an early command fails","expected_external_ids":["tiny-010"]}
+{"external_id":"query-005","text":"Check if a web health endpoint responds without hanging","expected_external_ids":["tiny-020"]}
