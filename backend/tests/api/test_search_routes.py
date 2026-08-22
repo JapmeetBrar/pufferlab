@@ -1,15 +1,25 @@
+import json
+from pathlib import Path
 from uuid import UUID
 
+import pytest
 from fastapi.testclient import TestClient
 from pufferlab.contracts.errors import ApiErrorCode
 from pufferlab.contracts.retrieval import RetrievalConfigSummary, RetrievalMode
 from pufferlab.contracts.search import SearchCompareRequest, SearchCompareResponse
+from pufferlab.datasets.loader import load_fixture_corpus
+from pufferlab.datasets.schema import compile_namespace_write_spec
 from pufferlab.main import create_app
 from pufferlab.providers.errors import ProviderError, ProviderErrorDetails
+from pufferlab.providers.types import ProviderQueryResult
+from pufferlab.retrieval.config import build_search_catalog
 from pufferlab.retrieval.errors import invalid_search
+from pufferlab.retrieval.service import SearchCompareService
+from pufferlab.retrieval.types import QueryEmbedding
 
 BM25_ID = UUID("a0489c14-a523-58f4-a59d-879a496cdb89")
 VECTOR_ID = UUID("11e1e5c5-8390-5450-b596-51cfd0d6e94c")
+ROOT = Path(__file__).resolve().parents[3]
 
 
 class FakeSearchBackend:
@@ -51,6 +61,61 @@ class FakeSearchBackend:
 
     async def close(self) -> None:
         self.closed = True
+
+
+class FailIfCalledProvider:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    async def query_bm25(self, **kwargs: object) -> ProviderQueryResult:
+        del kwargs
+        self.calls.append("bm25")
+        raise AssertionError("invalid filter reached the provider")
+
+    async def query_ann(self, **kwargs: object) -> ProviderQueryResult:
+        del kwargs
+        self.calls.append("ann")
+        raise AssertionError("invalid filter reached the provider")
+
+    async def close(self) -> None:
+        return None
+
+
+class FailIfCalledEmbedder:
+    def __init__(self, *, model: str, revision: str, dimensions: int) -> None:
+        self.model = model
+        self.revision = revision
+        self.dimensions = dimensions
+        self.queries: list[str] = []
+
+    async def embed_query(self, query_text: str) -> QueryEmbedding:
+        self.queries.append(query_text)
+        raise AssertionError("invalid filter reached the embedder")
+
+
+def _validating_backend() -> tuple[
+    SearchCompareService,
+    FailIfCalledProvider,
+    FailIfCalledEmbedder,
+]:
+    corpus = load_fixture_corpus(ROOT / "fixtures" / "tiny-corpus")
+    provider = FailIfCalledProvider()
+    embedder = FailIfCalledEmbedder(
+        model=corpus.manifest.embedding.model,
+        revision=corpus.manifest.embedding.revision,
+        dimensions=corpus.manifest.embedding.dimensions,
+    )
+    return (
+        SearchCompareService(
+            namespace="pufferlab-route-test",
+            catalog=build_search_catalog(corpus.manifest),
+            write_spec=compile_namespace_write_spec(corpus.manifest),
+            provider=provider,
+            query_embedder=embedder,
+        ),
+        provider,
+        embedder,
+    )
 
 
 def _request_body() -> dict[str, object]:
@@ -126,6 +191,89 @@ def test_search_error_and_request_validation_use_direct_error_contract() -> None
     assert validation_response.json()["code"] == "validation_error"
     assert validation_response.json()["message"] == "request validation failed"
     assert "detail" not in validation_response.json()
+
+
+@pytest.mark.parametrize(
+    ("filter_override", "message", "operation"),
+    [
+        (
+            {
+                "kind": "predicate",
+                "field": "external_id",
+                "op": "in",
+                "value": "not-an-array",
+            },
+            "request validation failed",
+            "validate_request",
+        ),
+        (
+            {
+                "kind": "predicate",
+                "field": "unknown-secret-field",
+                "op": "eq",
+                "value": "value",
+            },
+            "filter field is not available",
+            "compare",
+        ),
+        (
+            {
+                "kind": "predicate",
+                "field": "title",
+                "op": "eq",
+                "value": "value",
+            },
+            "filter field is not filterable",
+            "compare",
+        ),
+    ],
+)
+def test_invalid_filter_returns_direct_422_before_dependencies(
+    filter_override: dict[str, object],
+    message: str,
+    operation: str,
+) -> None:
+    backend, provider, embedder = _validating_backend()
+    config_ids = [str(summary.id) for summary in backend.list_configs()]
+    body = {
+        **_request_body(),
+        "config_ids": config_ids,
+        "filter_override": filter_override,
+    }
+
+    response = TestClient(create_app(search_backend=backend)).post(
+        "/api/v1/search/compare", json=body
+    )
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "validation_error"
+    assert response.json()["message"] == message
+    assert response.json()["details"] == {"operation": operation}
+    assert "detail" not in response.json()
+    assert "unknown-secret-field" not in response.text
+    assert provider.calls == []
+    assert embedder.queries == []
+
+
+def test_nonfinite_nested_filter_json_returns_direct_422_before_backend() -> None:
+    backend = FakeSearchBackend()
+    raw_body = json.dumps(_request_body())[:-1] + (
+        ', "filter_override": {'
+        '"kind": "predicate", "field": "external_id", "op": "in", '
+        '"value": ["valid", [NaN, Infinity, -Infinity]]}}'
+    )
+
+    response = TestClient(create_app(search_backend=backend)).post(
+        "/api/v1/search/compare",
+        content=raw_body,
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "validation_error"
+    assert response.json()["message"] == "request validation failed"
+    assert "detail" not in response.json()
+    assert backend.requests == []
 
 
 def test_missing_search_backend_dependency_returns_safe_503() -> None:

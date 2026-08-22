@@ -101,9 +101,15 @@ class FilterLogical(BaseModel):
 FilterNode = Annotated[FilterPredicate | FilterLogical, Field(discriminator="kind")]
 ```
 
-`not` has exactly one child; `and` and `or` have at least one. Empty field names and unknown dataset attributes fail validation.
+`not` has exactly one child; `and` and `or` have at least one. `in` and `contains_any`
+require array operands; the other P0 comparison operators require a JSON scalar. All numeric values
+must be finite, including values nested inside arrays or objects.
 
-Unknown fields/operators fail validation; they are never passed through as arbitrary expressions.
+Before any query or embedding runs, the complete AST is validated against the active dataset's
+compiled namespace schema. Unknown and non-filterable attributes fail validation; values must match
+the attribute's scalar type, and `contains_any` is valid only for array attributes. The tiny fixture
+marks only `external_id` as filterable. Invalid filters return the direct `422 validation_error`
+contract and are never passed through as arbitrary provider expressions.
 
 ## 4. Dataset and index profile
 

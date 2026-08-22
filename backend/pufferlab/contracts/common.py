@@ -12,7 +12,7 @@ type JsonValue = str | int | float | bool | list[JsonValue] | dict[str, JsonValu
 class ContractModel(BaseModel):
     """Base model with strict input handling."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
 
 class ScoreKind(StrEnum):

@@ -10,6 +10,7 @@ from pufferlab.contracts.retrieval import RetrievalConfigSummary
 from pufferlab.contracts.search import SearchCompareRequest, SearchCompareResponse
 from pufferlab.datasets.loader import load_fixture_corpus
 from pufferlab.datasets.models import DatasetManifest
+from pufferlab.datasets.schema import compile_namespace_write_spec
 from pufferlab.providers.turbopuffer import TurbopufferProvider
 from pufferlab.retrieval.config import SearchConfigCatalog, build_search_catalog
 from pufferlab.retrieval.embeddings import SentenceTransformerQueryEmbedder
@@ -107,6 +108,7 @@ class RuntimeSearchBackend:
             service = SearchCompareService(
                 namespace=namespace,
                 catalog=self._catalog,
+                write_spec=compile_namespace_write_spec(self._manifest),
                 provider=provider,
                 query_embedder=embedder,
             )

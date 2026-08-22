@@ -9,10 +9,11 @@ from pufferlab.contracts.common import (
     ScoreKind,
     ScoreSource,
 )
-from pufferlab.contracts.filters import FilterPredicate, PredicateOp
+from pufferlab.contracts.filters import FilterLogical, FilterPredicate, LogicalOp, PredicateOp
 from pufferlab.contracts.retrieval import RetrievalMode
 from pufferlab.contracts.search import RetrievalStage, SearchCompareRequest, TimingStage
 from pufferlab.datasets.models import DatasetManifest
+from pufferlab.datasets.schema import compile_namespace_write_spec
 from pufferlab.providers.types import ProviderDocument, ProviderQueryResult
 from pufferlab.retrieval.config import build_search_catalog
 from pufferlab.retrieval.errors import SearchError
@@ -160,6 +161,7 @@ def _service(
     service = SearchCompareService(
         namespace="pufferlab-test",
         catalog=_catalog(),
+        write_spec=compile_namespace_write_spec(_manifest()),
         provider=resolved_provider,
         query_embedder=resolved_embedder,
         trace_id_factory=lambda: TRACE_ID,
@@ -271,6 +273,132 @@ async def test_compare_rejects_duplicate_or_unknown_configs() -> None:
         )
     assert missing.value.details.http_status == 404
     assert vector.id != bm25.id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "filter_override",
+    [
+        FilterPredicate.model_construct(
+            field="external_id", op=PredicateOp.IN, value="not-an-array"
+        ),
+        FilterPredicate(field="unknown-secret-field", op=PredicateOp.EQ, value="value"),
+        FilterPredicate(field="title", op=PredicateOp.EQ, value="value"),
+        FilterPredicate(field="external_id", op=PredicateOp.CONTAINS_ANY, value=["value"]),
+        FilterPredicate(field="external_id", op=PredicateOp.IN, value=[1]),
+        FilterPredicate(field="external_id", op=PredicateOp.EQ, value=5),
+        FilterPredicate(field="external_id", op=PredicateOp.LTE, value=True),
+        FilterPredicate.model_construct(field="external_id", op=PredicateOp.EQ, value=["value"]),
+        FilterPredicate.model_construct(
+            field="external_id", op=PredicateOp.EQ, value={"nested": "value"}
+        ),
+        FilterLogical(
+            op=LogicalOp.AND,
+            children=[
+                FilterPredicate(field="external_id", op=PredicateOp.EQ, value="allowed"),
+                FilterLogical(
+                    op=LogicalOp.OR,
+                    children=[
+                        FilterPredicate(field="body", op=PredicateOp.EQ, value="blocked"),
+                    ],
+                ),
+            ],
+        ),
+    ],
+)
+async def test_invalid_filters_are_rejected_before_embedding_or_provider_calls(
+    filter_override: FilterPredicate | FilterLogical,
+) -> None:
+    service, provider, embedder = _service()
+    summaries = service.list_configs()
+
+    with pytest.raises(SearchError) as caught:
+        await service.compare(
+            SearchCompareRequest.model_construct(
+                query_text="query",
+                config_ids=[summary.id for summary in summaries],
+                query_id=None,
+                filter_override=filter_override,
+                expected_document_ids=[],
+                debug_provenance=True,
+            )
+        )
+
+    formatted = "".join(traceback.format_exception(caught.value))
+    assert caught.value.details.http_status == 422
+    assert caught.value.details.code.value == "validation_error"
+    assert caught.value.__context__ is None
+    assert caught.value.__cause__ is None
+    assert "unknown-secret-field" not in repr(caught.value)
+    assert "unknown-secret-field" not in formatted
+    assert provider.bm25_calls == []
+    assert provider.ann_calls == []
+    assert embedder.queries == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("nonfinite", [float("nan"), float("inf"), float("-inf")])
+async def test_nonfinite_nested_filter_values_are_rejected_before_dependencies(
+    nonfinite: float,
+) -> None:
+    service, provider, embedder = _service()
+    summaries = service.list_configs()
+    bypassed_contract = FilterPredicate.model_construct(
+        field="external_id",
+        op=PredicateOp.IN,
+        value=["valid", {"nested": [nonfinite]}],
+    )
+    request = SearchCompareRequest.model_construct(
+        query_text="query",
+        config_ids=[summary.id for summary in summaries],
+        query_id=None,
+        filter_override=bypassed_contract,
+        expected_document_ids=[],
+        debug_provenance=True,
+    )
+
+    with pytest.raises(SearchError, match="finite JSON") as caught:
+        await service.compare(request)
+
+    assert caught.value.__context__ is None
+    assert caught.value.__cause__ is None
+    assert provider.bm25_calls == []
+    assert provider.ann_calls == []
+    assert embedder.queries == []
+
+
+@pytest.mark.asyncio
+async def test_valid_nested_filter_is_forwarded_unchanged_to_both_queries() -> None:
+    service, provider, embedder = _service()
+    summaries = service.list_configs()
+    filter_override = FilterLogical(
+        op=LogicalOp.AND,
+        children=[
+            FilterPredicate(field="external_id", op=PredicateOp.IN, value=["a", "b"]),
+            FilterLogical(
+                op=LogicalOp.NOT,
+                children=[
+                    FilterPredicate(
+                        field="external_id",
+                        op=PredicateOp.GTE,
+                        value="z",
+                    )
+                ],
+            ),
+        ],
+    )
+
+    await service.compare(
+        SearchCompareRequest(
+            query_text="query",
+            config_ids=[summary.id for summary in summaries],
+            filter_override=filter_override,
+        )
+    )
+
+    assert provider.bm25_calls[0]["filters"] == filter_override
+    assert provider.ann_calls[0]["filters"] == filter_override
+    assert embedder.queries == ["query"]
 
 
 class SecretProvider(FakeProvider):

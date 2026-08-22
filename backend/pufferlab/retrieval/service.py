@@ -8,6 +8,7 @@ from itertools import combinations
 from uuid import UUID, uuid4
 
 from pufferlab.contracts.errors import ApiWarning
+from pufferlab.contracts.filters import FilterNode
 from pufferlab.contracts.retrieval import RetrievalConfigSummary, RetrievalMode
 from pufferlab.contracts.search import (
     ConfigSearchResult,
@@ -21,6 +22,7 @@ from pufferlab.contracts.search import (
     StageTiming,
     TimingStage,
 )
+from pufferlab.datasets.schema import NamespaceWriteSpec
 from pufferlab.providers.errors import ProviderError
 from pufferlab.providers.types import ProviderDocument, ProviderQueryResult
 from pufferlab.retrieval.config import SearchConfigCatalog, SeededSearchConfig
@@ -32,6 +34,7 @@ from pufferlab.retrieval.errors import (
     invalid_search,
     provider_failed,
 )
+from pufferlab.retrieval.filter_validation import FixtureFilterValidator
 from pufferlab.retrieval.types import QueryEmbedder, QueryEmbedding, RetrievalProvider
 
 _INCLUDE_ATTRIBUTES = ("external_id", "title", "body", "source_url")
@@ -47,6 +50,7 @@ class SearchCompareService:
         *,
         namespace: str,
         catalog: SearchConfigCatalog,
+        write_spec: NamespaceWriteSpec,
         provider: RetrievalProvider,
         query_embedder: QueryEmbedder,
         trace_id_factory: Callable[[], UUID] = uuid4,
@@ -55,6 +59,7 @@ class SearchCompareService:
             raise ValueError("namespace must not be empty")
         self._namespace = namespace
         self._catalog = catalog
+        self._filter_validator = FixtureFilterValidator(write_spec)
         self._provider = provider
         self._query_embedder = query_embedder
         self._trace_id_factory = trace_id_factory
@@ -64,6 +69,7 @@ class SearchCompareService:
 
     async def compare(self, request: SearchCompareRequest) -> SearchCompareResponse:
         configs = self._resolve_configs(request.config_ids)
+        self._validate_filter(request.filter_override)
         trace_id = self._trace_id_factory()
         results = [
             await self._run_config(config, request=request, trace_id=trace_id) for config in configs
@@ -76,6 +82,10 @@ class SearchCompareService:
             overlap=_pairwise_overlap(results),
             observability_notice=_OBSERVABILITY_NOTICE,
         )
+
+    def _validate_filter(self, filter_override: FilterNode | None) -> None:
+        if filter_override is not None:
+            self._filter_validator.validate(filter_override)
 
     async def close(self) -> None:
         await self._provider.close()
