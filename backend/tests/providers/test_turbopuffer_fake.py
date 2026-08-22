@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import traceback
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -51,10 +52,15 @@ class FakeNamespace:
             index=FakeIndex(),
             schema_={},
         )
+        self.write_error: APIError | None = None
         self.query_error: APIError | None = None
+        self.metadata_error: APIError | None = None
+        self.delete_error: APIError | None = None
 
     async def write(self, **kwargs: object) -> object:
         self.calls.append(("write", kwargs))
+        if self.write_error is not None:
+            raise self.write_error
         return self.write_response
 
     async def query(self, **kwargs: object) -> object:
@@ -65,10 +71,14 @@ class FakeNamespace:
 
     async def metadata(self, **kwargs: object) -> object:
         self.calls.append(("metadata", kwargs))
+        if self.metadata_error is not None:
+            raise self.metadata_error
         return self.metadata_response
 
     async def delete_all(self, **kwargs: object) -> object:
         self.calls.append(("delete_all", kwargs))
+        if self.delete_error is not None:
+            raise self.delete_error
         return object()
 
 
@@ -77,6 +87,7 @@ class FakeClient:
         self.fake_namespace = namespace
         self.namespace_calls: list[str] = []
         self.close_calls = 0
+        self.close_error: APIError | None = None
 
     def namespace(self, namespace: str) -> FakeNamespace:
         self.namespace_calls.append(namespace)
@@ -84,6 +95,8 @@ class FakeClient:
 
     async def close(self) -> None:
         self.close_calls += 1
+        if self.close_error is not None:
+            raise self.close_error
 
 
 def clock(*values: float) -> Callable[[], float]:
@@ -407,4 +420,65 @@ async def test_provider_errors_are_mapped_without_secret_material(
     assert raised.value.details.retryable is retryable
     assert secret not in str(raised.value)
     assert secret not in repr(raised.value)
+    assert raised.value.__context__ is None
     assert raised.value.__cause__ is None
+    formatted_traceback = "".join(traceback.format_exception(raised.value, chain=True))
+    assert secret not in formatted_traceback
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["query", "write", "metadata", "delete", "close"])
+async def test_every_sdk_path_detaches_secret_bearing_exception_context(operation: str) -> None:
+    secret = "path-specific-credential-that-must-not-leak"
+    request = httpx.Request("POST", "https://api.turbopuffer.com/v2/namespaces/test")
+    sdk_error = AuthenticationError(
+        f"invalid credential {secret}",
+        response=httpx.Response(401, request=request),
+        body={"credential": secret},
+    )
+    namespace = FakeNamespace()
+    provider, client = make_provider(namespace)
+
+    if operation == "query":
+        namespace.query_error = sdk_error
+    elif operation == "write":
+        namespace.write_error = sdk_error
+    elif operation == "metadata":
+        namespace.metadata_error = sdk_error
+    elif operation == "delete":
+        namespace.delete_error = sdk_error
+    else:
+        client.close_error = sdk_error
+
+    with pytest.raises(ProviderError) as raised:
+        if operation == "query":
+            await provider.query_bm25(
+                namespace="fixture",
+                text_attribute="body",
+                query_text="safe query",
+                top_k=1,
+                include_attributes=(),
+            )
+        elif operation == "write":
+            await provider.write_documents(
+                namespace="fixture",
+                documents=(WriteDocument(id="one", attributes={"body": "safe document"}),),
+                schema=cast(ProviderSchema, {"body": {"type": "string"}}),
+                distance_metric="cosine_distance",
+            )
+        elif operation == "metadata":
+            await provider.namespace_metadata("fixture")
+        elif operation == "delete":
+            await provider.delete_namespace("fixture")
+        else:
+            await provider.close()
+
+    error = raised.value
+    assert error.details.code is ApiErrorCode.PROVIDER_ERROR
+    assert error.details.retryable is False
+    assert error.__context__ is None
+    assert error.__cause__ is None
+    assert secret not in str(error)
+    assert secret not in repr(error)
+    formatted_traceback = "".join(traceback.format_exception(error, chain=True))
+    assert secret not in formatted_traceback

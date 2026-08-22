@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import date, datetime
 from time import perf_counter
 from typing import Literal, Protocol, cast
@@ -118,9 +118,7 @@ class TurbopufferProvider:
         if self._closed:
             return
         try:
-            await self._client.close()
-        except APIError as error:
-            raise map_turbopuffer_error(error, operation="close") from None
+            await _call_sdk(self._client.close(), operation="close")
         finally:
             self._closed = True
             self._namespaces.clear()
@@ -140,14 +138,14 @@ class TurbopufferProvider:
         ]
         provider_namespace = self._namespace(namespace)
         start = self._clock()
-        try:
-            response = await provider_namespace.write(
+        response = await _call_sdk(
+            provider_namespace.write(
                 upsert_rows=rows,
                 schema=dict(schema),
                 distance_metric=distance_metric,
-            )
-        except APIError as error:
-            raise map_turbopuffer_error(error, operation="write") from None
+            ),
+            operation="write",
+        )
         return ProviderWriteResult(
             rows_affected=_required_int(response, "rows_affected"),
             client_duration_ms=_elapsed_ms(start, self._clock()),
@@ -212,10 +210,7 @@ class TurbopufferProvider:
     async def namespace_metadata(self, namespace: str) -> ProviderNamespaceMetadata:
         provider_namespace = self._namespace(namespace)
         start = self._clock()
-        try:
-            response = await provider_namespace.metadata()
-        except APIError as error:
-            raise map_turbopuffer_error(error, operation="metadata") from None
+        response = await _call_sdk(provider_namespace.metadata(), operation="metadata")
 
         index = _required_attribute(response, "index")
         status = _required_str(index, "status")
@@ -241,10 +236,7 @@ class TurbopufferProvider:
     async def delete_namespace(self, namespace: str) -> ProviderDeleteResult:
         provider_namespace = self._namespace(namespace)
         start = self._clock()
-        try:
-            await provider_namespace.delete_all()
-        except APIError as error:
-            raise map_turbopuffer_error(error, operation="delete_namespace") from None
+        await _call_sdk(provider_namespace.delete_all(), operation="delete_namespace")
         self._namespaces.pop(namespace, None)
         return ProviderDeleteResult(client_duration_ms=_elapsed_ms(start, self._clock()))
 
@@ -259,10 +251,10 @@ class TurbopufferProvider:
     ) -> ProviderQueryResult:
         provider_namespace = self._namespace(namespace)
         start = self._clock()
-        try:
-            response = await provider_namespace.query(**dict(kwargs))
-        except APIError as error:
-            raise map_turbopuffer_error(error, operation=operation) from None
+        response = await _call_sdk(
+            provider_namespace.query(**dict(kwargs)),
+            operation=operation,
+        )
 
         rows_value = getattr(response, "rows", None)
         rows = () if rows_value is None else cast(Sequence[object], rows_value)
@@ -395,3 +387,17 @@ def _required_str(value: object, name: str) -> str:
 
 def _elapsed_ms(start: float, end: float) -> float:
     return max(0.0, (end - start) * 1000.0)
+
+
+async def _call_sdk(awaitable: Awaitable[object], *, operation: str) -> object:
+    """Detach secret-bearing SDK exceptions before raising their safe replacement."""
+
+    safe_error: ProviderError | None = None
+    try:
+        return await awaitable
+    except APIError as error:
+        safe_error = map_turbopuffer_error(error, operation=operation)
+
+    if safe_error is None:  # pragma: no cover - the try either returns or maps an APIError
+        raise RuntimeError("provider error mapping failed")
+    raise safe_error from None
