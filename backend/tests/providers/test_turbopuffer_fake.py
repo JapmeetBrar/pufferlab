@@ -13,7 +13,13 @@ from pufferlab.contracts.filters import FilterLogical, FilterPredicate, LogicalO
 from pufferlab.providers.errors import ProviderError
 from pufferlab.providers.turbopuffer import TurbopufferProvider, filter_to_turbopuffer
 from pufferlab.providers.types import ProviderSchema, WriteDocument
-from turbopuffer import APIError, AuthenticationError, RateLimitError
+from turbopuffer import (
+    APIError,
+    APIResponseValidationError,
+    AuthenticationError,
+    NotFoundError,
+    RateLimitError,
+)
 
 
 @dataclass
@@ -83,6 +89,10 @@ class FakeClient:
 def clock(*values: float) -> Callable[[], float]:
     iterator = iter(values)
     return lambda: next(iterator)
+
+
+def unit_vector(dimensions: int, hot_dimension: int) -> list[float]:
+    return [float(position == hot_dimension) for position in range(dimensions)]
 
 
 def make_provider(
@@ -163,12 +173,14 @@ async def test_write_always_sends_explicit_schema_and_complete_rows() -> None:
             "vector": {"type": "[2]f32", "ann": True},
         },
     )
+    first_vector = unit_vector(2, 0)
+    second_vector = unit_vector(2, 1)
 
     result = await provider.write_documents(
         namespace="fixture",
         documents=(
-            WriteDocument(id="one", attributes={"text": "first", "vector": [1.0, 0.0]}),
-            WriteDocument(id="two", attributes={"text": "second", "vector": [0.0, 1.0]}),
+            WriteDocument(id="one", attributes={"text": "first", "vector": first_vector}),
+            WriteDocument(id="two", attributes={"text": "second", "vector": second_vector}),
         ),
         schema=schema,
         distance_metric="cosine_distance",
@@ -181,8 +193,8 @@ async def test_write_always_sends_explicit_schema_and_complete_rows() -> None:
             "write",
             {
                 "upsert_rows": [
-                    {"id": "one", "text": "first", "vector": [1.0, 0.0]},
-                    {"id": "two", "text": "second", "vector": [0.0, 1.0]},
+                    {"id": "one", "text": "first", "vector": first_vector},
+                    {"id": "two", "text": "second", "vector": second_vector},
                 ],
                 "schema": schema,
                 "distance_metric": "cosine_distance",
@@ -194,6 +206,7 @@ async def test_write_always_sends_explicit_schema_and_complete_rows() -> None:
 @pytest.mark.asyncio
 async def test_bm25_query_shape_and_score_semantics() -> None:
     namespace = FakeNamespace()
+    hidden_vector = unit_vector(2, 0)
     namespace.query_response = FakeResponse(
         rows=[
             {
@@ -201,7 +214,7 @@ async def test_bm25_query_shape_and_score_semantics() -> None:
                 "$dist": 3.75,
                 "title": "Pufferfish",
                 "published_at": datetime(2026, 8, 22, tzinfo=UTC),
-                "vector": [1.0, 0.0],
+                "vector": hidden_vector,
             }
         ]
     )
@@ -244,15 +257,16 @@ async def test_bm25_query_shape_and_score_semantics() -> None:
 @pytest.mark.asyncio
 async def test_ann_query_shape_and_distance_score_semantics() -> None:
     namespace = FakeNamespace()
+    query_vector = unit_vector(2, 1)
     namespace.query_response = FakeResponse(
-        rows=[{"id": "doc-2", "$dist": 0.125, "title": "Nearest", "embedding": [0.0, 1.0]}]
+        rows=[{"id": "doc-2", "$dist": 0.125, "title": "Nearest", "embedding": query_vector}]
     )
     provider, _ = make_provider(namespace)
 
     result = await provider.query_ann(
         namespace="fixture",
         vector_attribute="embedding",
-        query_vector=(0.0, 1.0),
+        query_vector=query_vector,
         top_k=3,
         include_attributes=("title",),
         consistency="eventual",
@@ -263,7 +277,7 @@ async def test_ann_query_shape_and_distance_score_semantics() -> None:
         (
             "query",
             {
-                "rank_by": ("embedding", "ANN", [0.0, 1.0]),
+                "rank_by": ("embedding", "ANN", query_vector),
                 "top_k": 3,
                 "include_attributes": ["title"],
                 "consistency": {"level": "eventual"},
@@ -294,7 +308,7 @@ async def test_client_and_namespace_are_reused_and_close_is_idempotent() -> None
     await provider.query_ann(
         namespace="same",
         vector_attribute="vector",
-        query_vector=(1.0, 0.0),
+        query_vector=unit_vector(2, 0),
         top_k=1,
         include_attributes=(),
     )
@@ -348,6 +362,24 @@ async def test_metadata_exposes_index_readiness_without_sdk_models() -> None:
             ApiErrorCode.RATE_LIMITED,
             True,
         ),
+        (
+            lambda request, response, secret: NotFoundError(
+                f"missing namespace for {secret}",
+                response=httpx.Response(404, request=request),
+                body={"credential": secret},
+            ),
+            ApiErrorCode.NOT_FOUND,
+            False,
+        ),
+        (
+            lambda request, response, secret: APIResponseValidationError(
+                response=httpx.Response(202, request=request),
+                body={"credential": secret},
+                message=f"indexing for {secret}",
+            ),
+            ApiErrorCode.NAMESPACE_NOT_READY,
+            True,
+        ),
     ],
 )
 async def test_provider_errors_are_mapped_without_secret_material(
@@ -355,7 +387,7 @@ async def test_provider_errors_are_mapped_without_secret_material(
     expected_code: ApiErrorCode,
     retryable: bool,
 ) -> None:
-    secret = "tpuf-secret-that-must-not-leak"
+    secret = "credential-material-that-must-not-leak"
     request = httpx.Request("POST", "https://api.turbopuffer.com/v2/namespaces/test/query")
     response = httpx.Response(401, request=request)
     namespace = FakeNamespace()

@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 
-from turbopuffer import APIConnectionError, APIError, APIStatusError, RateLimitError
+from turbopuffer import APIConnectionError, APIError, RateLimitError
 
 from pufferlab.contracts.errors import ApiErrorCode
 
@@ -26,7 +26,8 @@ class ProviderError(Exception):
 def map_turbopuffer_error(error: APIError, *, operation: str) -> ProviderError:
     """Map an SDK failure without copying its potentially sensitive message or body."""
 
-    status_code = error.status_code if isinstance(error, APIStatusError) else None
+    raw_status_code = getattr(error, "status_code", None)
+    status_code = raw_status_code if isinstance(raw_status_code, int) else None
 
     if isinstance(error, RateLimitError) or status_code == 429:
         return ProviderError(

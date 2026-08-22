@@ -15,6 +15,10 @@ from pufferlab.providers.types import ProviderSchema, WriteDocument
 _LIVE_NAMESPACE_PREFIX = "pufferlab-live-test-"
 
 
+def _unit_vector(dimensions: int, hot_dimension: int) -> list[float]:
+    return [float(position == hot_dimension) for position in range(dimensions)]
+
+
 @pytest.mark.live
 @pytest.mark.asyncio
 async def test_live_write_bm25_ann_and_exact_cleanup() -> None:
@@ -28,6 +32,11 @@ async def test_live_write_bm25_ann_and_exact_cleanup() -> None:
     namespace_id = f"{_LIVE_NAMESPACE_PREFIX}{secrets.token_hex(12)}"
     created_namespace_id: str | None = None
     provider = TurbopufferProvider(api_key=api_key, region=region)
+    puffer_vector = _unit_vector(2, 0)
+    walrus_vector = _unit_vector(2, 1)
+    hybrid_vector = [
+        (left + right) / 2 for left, right in zip(puffer_vector, walrus_vector, strict=True)
+    ]
     schema = cast(
         ProviderSchema,
         {
@@ -60,7 +69,7 @@ async def test_live_write_bm25_ann_and_exact_cleanup() -> None:
                     attributes={
                         "title": "Pufferfish storage",
                         "body": "A pufferfish search engine stores indexes on object storage.",
-                        "vector": [1.0, 0.0],
+                        "vector": puffer_vector,
                     },
                 ),
                 WriteDocument(
@@ -68,7 +77,7 @@ async def test_live_write_bm25_ann_and_exact_cleanup() -> None:
                     attributes={
                         "title": "Walrus notes",
                         "body": "A walrus rests near the cold ocean.",
-                        "vector": [0.0, 1.0],
+                        "vector": walrus_vector,
                     },
                 ),
                 WriteDocument(
@@ -76,7 +85,7 @@ async def test_live_write_bm25_ann_and_exact_cleanup() -> None:
                     attributes={
                         "title": "Search comparison",
                         "body": "Compare lexical and vector search for pufferfish queries.",
-                        "vector": [0.8, 0.2],
+                        "vector": hybrid_vector,
                     },
                 ),
             ),
@@ -105,7 +114,7 @@ async def test_live_write_bm25_ann_and_exact_cleanup() -> None:
         ann = await provider.query_ann(
             namespace=namespace_id,
             vector_attribute="vector",
-            query_vector=(1.0, 0.0),
+            query_vector=puffer_vector,
             top_k=3,
             include_attributes=("title", "body"),
             distance_metric="cosine_distance",

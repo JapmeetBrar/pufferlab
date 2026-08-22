@@ -2,16 +2,42 @@
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Literal
-
-from turbopuffer.types import AttributeSchemaParam
+from typing import Literal, Required, TypedDict
 
 from pufferlab.contracts.common import JsonValue, ObservedScore
 
 type ConsistencyLevel = Literal["strong", "eventual"]
 type DistanceMetric = Literal["cosine_distance", "euclidean_squared"]
 type DocumentId = str | int
-type ProviderSchema = Mapping[str, AttributeSchemaParam]
+
+
+class FullTextSearchSchema(TypedDict, total=False):
+    tokenizer: str
+    case_sensitive: bool
+    language: str
+    stemming: bool
+    remove_stopwords: bool
+    ascii_folding: bool
+    max_token_length: int
+    k1: float
+    b: float
+
+
+class AnnIndexSchema(TypedDict, total=False):
+    distance_metric: DistanceMetric
+
+
+class AttributeSchema(TypedDict, total=False):
+    """The supported, provider-neutral subset of turbopuffer attribute schema."""
+
+    type: Required[str]
+    filterable: bool
+    full_text_search: bool | FullTextSearchSchema
+    ann: bool | AnnIndexSchema
+
+
+type ProviderAttributeSchema = str | AttributeSchema
+type ProviderSchema = Mapping[str, ProviderAttributeSchema]
 
 
 @dataclass(frozen=True, slots=True)
