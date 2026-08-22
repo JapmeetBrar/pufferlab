@@ -1,0 +1,31 @@
+{
+  "format_version": 1,
+  "slug": "pufferlab-tiny-unix",
+  "version": "tiny-unix-v1",
+  "title": "PufferLab Synthetic Unix Troubleshooting Corpus",
+  "license": "CC0-1.0",
+  "source_url": "https://github.com/JapmeetBrar/pufferlab/tree/main/fixtures/tiny-corpus",
+  "embedding": {
+    "provider": "sentence_transformers",
+    "model": "BAAI/bge-small-en-v1.5",
+    "revision": "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a",
+    "dimensions": 384
+  },
+  "vector": {
+    "attribute": "vector",
+    "dtype": "f16",
+    "distance_metric": "cosine_distance"
+  },
+  "fts": {
+    "tokenizer": "word_v4",
+    "case_sensitive": false,
+    "language": "english",
+    "stemming": false,
+    "remove_stopwords": false,
+    "ascii_folding": false,
+    "max_token_length": 39,
+    "k1": 1.2,
+    "b": 0.75,
+    "k3": 8.0
+  }
+}
