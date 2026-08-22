@@ -20,16 +20,34 @@ may change by task.
 
 ```text
 planned -> assigned -> implementing -> review_requested
-                                      |             |
-                                      |             v
-                                      +<-- changes_requested
-                                                    |
-                                                    v
-                                  approved -> merged -> verified
+                                        |          |
+                                        |          +-> approved -> merged -> verified
+                                        |
+                                        +-> changes_requested -> implementing -> review_requested
 ```
 
 A task may move to `blocked` from any active state. The ledger must name the blocking condition and
 the next action; “still working” is not a blocker.
+
+Only the reviewer moves `review_requested` to `approved` or `changes_requested`. After requested
+changes, the worker explicitly returns the task to `implementing`, fixes and validates the branch,
+and creates a new `review_requested` handoff. Approval never follows `changes_requested` without
+that implementation and re-review path.
+
+## Finite progress ledger
+
+`docs/progress.md` is a versioned execution snapshot, not a reason to create a new PR after every
+merge. While a task PR is open, its branch records assignment, handoff, review decisions, blockers,
+and the latest evidence. Once that PR merges, GitHub's immutable PR conversation, check runs, merge
+event, and resulting `main` checks are canonical for that merge until the next planned task or
+coordination PR brings the ledger snapshot forward.
+
+The orchestrator batches outstanding merge and verification evidence into that next planned ledger
+update. It must not create recursively self-referential “record the previous ledger merge” PRs. At
+goal completion, the orchestrator opens exactly one finalization PR that records all required tasks
+as verified, links their GitHub evidence, and sets the goal outcome. The finalization PR itself goes
+through the normal independent review and protected merge. Its own PR checks, merge event, and
+post-merge `main` checks remain canonical in GitHub; no second finalization-ledger PR is created.
 
 ## Branch and PR rules
 
@@ -41,8 +59,16 @@ the next action; “still working” is not a blocker.
    and rollback notes when relevant.
 5. Use stacked PRs only when useful work cannot wait. State the review order in every stacked PR.
 6. Never force-push after review starts unless the reviewer explicitly requests history repair.
-7. Merge only through GitHub after required checks and reviewer approval. Prefer squash merge for a
-   focused task; preserve merge commits only when the branch history itself is useful.
+7. Active GitHub repository ruleset `21190317` protects `main`: changes require a pull request,
+   `Backend` and `Frontend` must succeed against the latest base, branch deletion and non-fast-forward
+   updates are blocked, and there are no bypass actors.
+8. All agents share one GitHub identity, so GitHub cannot distinguish worker from reviewer and the
+   ruleset requires zero approving reviews. Extra approval for unattributed changes is explicitly
+   disabled so local agent commit identities cannot introduce an unsatisfiable hidden approval.
+   Independent agent review is recorded in the task handoff/ledger and enforced by role separation:
+   a worker never merges its own PR.
+9. Merge only through GitHub after required checks and the independent reviewer decision. Prefer a
+   squash merge for a focused task; preserve merge commits only when the history itself is useful.
 
 ## Worker loop
 
@@ -52,7 +78,7 @@ the next action; “still working” is not a blocker.
 4. Add or update tests in the same branch.
 5. Run focused checks while iterating, then the full relevant gate before handoff.
 6. Review the local diff for secrets, generated-file drift, unrelated edits, and stale documentation.
-7. Update the progress ledger and open the PR.
+7. Update the progress ledger on the task branch and open the PR.
 8. Respond to every reviewer finding with a fix or evidence-backed explanation.
 
 ## Reviewer loop
@@ -67,7 +93,8 @@ The reviewer does not rely on the worker summary alone.
 5. Request changes with file/line references for every blocking issue.
 6. Re-review the updated head. Do not approve based only on a worker's claim that it is fixed.
 7. Merge only when checks are green and no blocking finding remains.
-8. Verify the default branch checks and update `docs/progress.md` with the merge evidence.
+8. Verify the default branch checks. Treat GitHub as canonical for the merge until the next planned
+   ledger update or the single goal-finalization PR.
 
 ## Standard gates
 
@@ -95,16 +122,29 @@ pnpm test
 pnpm build
 ```
 
-Live turbopuffer tests are opt-in and must use a uniquely owned namespace, redact credentials, and
-clean up in `finally`. A live test may require the user to provide `TURBOPUFFER_API_KEY` locally; the
-key must never be pasted into tracked files or command output.
+Live turbopuffer tests are opt-in and use a test-owned namespace capability, not a caller-provided
+cleanup string:
+
+1. The test generates one immutable namespace ID internally as the reserved
+   `pufferlab-live-test-` prefix plus a cryptographically random suffix, and retains that exact value
+   for the full test. Namespace or cleanup targets must never come from arguments, user input, or
+   environment variables; only credentials and region may come from the environment.
+2. The test records creation success only after creating that exact generated namespace succeeds.
+   Cleanup in `finally` may delete only the retained exact ID, only when creation success is true,
+   and only after rechecking the reserved prefix. Cleanup helpers must not accept arbitrary targets.
+3. Cleanup failure must be raised and visible to the test runner, including when the test body also
+   failed; it must never be swallowed, converted to a warning, or hidden by a return from `finally`.
+
+The API key must never be pasted into tracked files, logs, test output, screenshots, or PR text.
 
 ## Completion definition
 
 The active goal is finished only when all of the following are true:
 
-- Every required task is `verified` in `docs/progress.md`.
+- The finalization PR records every required delivery task as `verified` with linked GitHub evidence.
 - Every required PR was independently reviewed and merged.
 - CI is green on `main`.
 - The documented setup reproduces the intended behavior from a clean checkout.
 - Remaining limitations are explicit and outside the stated goal.
+- The finalization PR was independently reviewed and merged; its own merge and post-merge checks are
+  canonical in GitHub and do not require another ledger PR.
