@@ -1,9 +1,209 @@
 {
   "components": {
     "schemas": {
+      "ApiErrorCode": {
+        "enum": [
+          "validation_error",
+          "not_found",
+          "namespace_not_ready",
+          "provider_error",
+          "rate_limited",
+          "run_conflict",
+          "internal_error"
+        ],
+        "title": "ApiErrorCode",
+        "type": "string"
+      },
+      "ApiErrorDetail": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "$ref": "#/components/schemas/ApiErrorCode"
+          },
+          "details": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/JsonValue-Output"
+            },
+            "title": "Details",
+            "type": "object"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "retryable": {
+            "title": "Retryable",
+            "type": "boolean"
+          },
+          "trace_id": {
+            "format": "uuid",
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message",
+          "retryable",
+          "trace_id"
+        ],
+        "title": "ApiErrorDetail",
+        "type": "object"
+      },
+      "ApiWarning": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "title": "ApiWarning",
+        "type": "object"
+      },
+      "ConfigSearchResult": {
+        "additionalProperties": false,
+        "properties": {
+          "candidate_counts": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Candidate Counts",
+            "type": "object"
+          },
+          "config": {
+            "$ref": "#/components/schemas/RetrievalConfigSummary"
+          },
+          "hits": {
+            "items": {
+              "$ref": "#/components/schemas/SearchHit"
+            },
+            "title": "Hits",
+            "type": "array"
+          },
+          "timings": {
+            "items": {
+              "$ref": "#/components/schemas/StageTiming"
+            },
+            "title": "Timings",
+            "type": "array"
+          },
+          "trace_id": {
+            "format": "uuid",
+            "title": "Trace Id",
+            "type": "string"
+          },
+          "warnings": {
+            "items": {
+              "$ref": "#/components/schemas/ApiWarning"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "config",
+          "hits",
+          "timings",
+          "candidate_counts",
+          "warnings",
+          "trace_id"
+        ],
+        "title": "ConfigSearchResult",
+        "type": "object"
+      },
       "ContractVersion": {
         "const": 1,
         "type": "integer"
+      },
+      "FilterLogical": {
+        "additionalProperties": false,
+        "properties": {
+          "children": {
+            "items": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/FilterPredicate"
+                },
+                {
+                  "$ref": "#/components/schemas/FilterLogical"
+                }
+              ]
+            },
+            "minItems": 1,
+            "title": "Children",
+            "type": "array"
+          },
+          "kind": {
+            "const": "logical",
+            "default": "logical",
+            "title": "Kind",
+            "type": "string"
+          },
+          "op": {
+            "$ref": "#/components/schemas/LogicalOp"
+          }
+        },
+        "required": [
+          "op",
+          "children"
+        ],
+        "title": "FilterLogical",
+        "type": "object"
+      },
+      "FilterNode": {
+        "discriminator": {
+          "mapping": {
+            "logical": "#/components/schemas/FilterLogical",
+            "predicate": "#/components/schemas/FilterPredicate"
+          },
+          "propertyName": "kind"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/FilterPredicate"
+          },
+          {
+            "$ref": "#/components/schemas/FilterLogical"
+          }
+        ]
+      },
+      "FilterPredicate": {
+        "additionalProperties": false,
+        "properties": {
+          "field": {
+            "minLength": 1,
+            "title": "Field",
+            "type": "string"
+          },
+          "kind": {
+            "const": "predicate",
+            "default": "predicate",
+            "title": "Kind",
+            "type": "string"
+          },
+          "op": {
+            "$ref": "#/components/schemas/PredicateOp"
+          },
+          "value": {
+            "$ref": "#/components/schemas/JsonValue-Input"
+          }
+        },
+        "required": [
+          "field",
+          "op",
+          "value"
+        ],
+        "title": "FilterPredicate",
+        "type": "object"
       },
       "HealthResponse": {
         "additionalProperties": false,
@@ -28,6 +228,661 @@
         ],
         "title": "HealthResponse",
         "type": "object"
+      },
+      "HighlightFragment": {
+        "additionalProperties": false,
+        "properties": {
+          "fragment_end": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fragment End"
+          },
+          "fragment_start": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fragment Start"
+          },
+          "match_offsets": {
+            "items": {
+              "$ref": "#/components/schemas/HighlightOffset"
+            },
+            "title": "Match Offsets",
+            "type": "array"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "title": "HighlightFragment",
+        "type": "object"
+      },
+      "HighlightOffset": {
+        "additionalProperties": false,
+        "properties": {
+          "end": {
+            "minimum": 0.0,
+            "title": "End",
+            "type": "integer"
+          },
+          "start": {
+            "minimum": 0.0,
+            "title": "Start",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "start",
+          "end"
+        ],
+        "title": "HighlightOffset",
+        "type": "object"
+      },
+      "JsonValue-Input": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "integer"
+          },
+          {
+            "type": "number"
+          },
+          {
+            "type": "boolean"
+          },
+          {
+            "items": {
+              "$ref": "#/components/schemas/JsonValue-Input"
+            },
+            "type": "array"
+          },
+          {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/JsonValue-Input"
+            },
+            "type": "object"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "JsonValue-Output": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "integer"
+          },
+          {
+            "type": "number"
+          },
+          {
+            "type": "boolean"
+          },
+          {
+            "items": {
+              "$ref": "#/components/schemas/JsonValue-Output"
+            },
+            "type": "array"
+          },
+          {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/JsonValue-Output"
+            },
+            "type": "object"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "LogicalOp": {
+        "enum": [
+          "and",
+          "or",
+          "not"
+        ],
+        "title": "LogicalOp",
+        "type": "string"
+      },
+      "ObservedScore": {
+        "additionalProperties": false,
+        "properties": {
+          "direction": {
+            "$ref": "#/components/schemas/ScoreDirection"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/ScoreKind"
+          },
+          "source": {
+            "$ref": "#/components/schemas/ScoreSource"
+          },
+          "value": {
+            "title": "Value",
+            "type": "number"
+          }
+        },
+        "required": [
+          "kind",
+          "value",
+          "direction",
+          "source"
+        ],
+        "title": "ObservedScore",
+        "type": "object"
+      },
+      "PairwiseOverlap": {
+        "additionalProperties": false,
+        "properties": {
+          "intersection_count": {
+            "minimum": 0.0,
+            "title": "Intersection Count",
+            "type": "integer"
+          },
+          "jaccard": {
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Jaccard",
+            "type": "number"
+          },
+          "left_config_id": {
+            "format": "uuid",
+            "title": "Left Config Id",
+            "type": "string"
+          },
+          "left_count": {
+            "minimum": 0.0,
+            "title": "Left Count",
+            "type": "integer"
+          },
+          "right_config_id": {
+            "format": "uuid",
+            "title": "Right Config Id",
+            "type": "string"
+          },
+          "right_count": {
+            "minimum": 0.0,
+            "title": "Right Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "left_config_id",
+          "right_config_id",
+          "left_count",
+          "right_count",
+          "intersection_count",
+          "jaccard"
+        ],
+        "title": "PairwiseOverlap",
+        "type": "object"
+      },
+      "PredicateOp": {
+        "enum": [
+          "eq",
+          "not_eq",
+          "lt",
+          "lte",
+          "gt",
+          "gte",
+          "in",
+          "contains_any"
+        ],
+        "title": "PredicateOp",
+        "type": "string"
+      },
+      "RankMovement": {
+        "additionalProperties": false,
+        "properties": {
+          "document_id": {
+            "format": "uuid",
+            "title": "Document Id",
+            "type": "string"
+          },
+          "max_absolute_delta": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Absolute Delta"
+          },
+          "ranks_by_config": {
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "propertyNames": {
+              "format": "uuid"
+            },
+            "title": "Ranks By Config",
+            "type": "object"
+          }
+        },
+        "required": [
+          "document_id",
+          "ranks_by_config"
+        ],
+        "title": "RankMovement",
+        "type": "object"
+      },
+      "RetrievalConfigListResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "configs": {
+            "items": {
+              "$ref": "#/components/schemas/RetrievalConfigSummary"
+            },
+            "title": "Configs",
+            "type": "array"
+          },
+          "contract_version": {
+            "$ref": "#/components/schemas/ContractVersion",
+            "default": 1
+          }
+        },
+        "required": [
+          "configs"
+        ],
+        "title": "RetrievalConfigListResponse",
+        "type": "object"
+      },
+      "RetrievalConfigSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "config_hash": {
+            "title": "Config Hash",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "mode": {
+            "$ref": "#/components/schemas/RetrievalMode"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "revision": {
+            "minimum": 1.0,
+            "title": "Revision",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "revision",
+          "name",
+          "mode",
+          "config_hash"
+        ],
+        "title": "RetrievalConfigSummary",
+        "type": "object"
+      },
+      "RetrievalMode": {
+        "enum": [
+          "bm25",
+          "vector",
+          "hybrid_rrf",
+          "hybrid_rerank"
+        ],
+        "title": "RetrievalMode",
+        "type": "string"
+      },
+      "RetrievalStage": {
+        "enum": [
+          "bm25_candidates",
+          "vector_candidates",
+          "rrf",
+          "reranker",
+          "final"
+        ],
+        "title": "RetrievalStage",
+        "type": "string"
+      },
+      "ScoreDirection": {
+        "enum": [
+          "higher_is_better",
+          "lower_is_better"
+        ],
+        "title": "ScoreDirection",
+        "type": "string"
+      },
+      "ScoreKind": {
+        "enum": [
+          "bm25",
+          "vector_distance",
+          "rrf",
+          "reranker"
+        ],
+        "title": "ScoreKind",
+        "type": "string"
+      },
+      "ScoreSource": {
+        "enum": [
+          "turbopuffer_dist",
+          "compute_attribute",
+          "client_computed",
+          "reranker"
+        ],
+        "title": "ScoreSource",
+        "type": "string"
+      },
+      "SearchCompareRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "config_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "maxItems": 4,
+            "minItems": 2,
+            "title": "Config Ids",
+            "type": "array"
+          },
+          "contract_version": {
+            "$ref": "#/components/schemas/ContractVersion",
+            "default": 1
+          },
+          "debug_provenance": {
+            "default": true,
+            "title": "Debug Provenance",
+            "type": "boolean"
+          },
+          "expected_document_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "title": "Expected Document Ids",
+            "type": "array"
+          },
+          "filter_override": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FilterNode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "query_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Query Id"
+          },
+          "query_text": {
+            "minLength": 1,
+            "title": "Query Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "query_text",
+          "config_ids"
+        ],
+        "title": "SearchCompareRequest",
+        "type": "object"
+      },
+      "SearchCompareResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "contract_version": {
+            "$ref": "#/components/schemas/ContractVersion",
+            "default": 1
+          },
+          "observability_notice": {
+            "title": "Observability Notice",
+            "type": "string"
+          },
+          "overlap": {
+            "items": {
+              "$ref": "#/components/schemas/PairwiseOverlap"
+            },
+            "title": "Overlap",
+            "type": "array"
+          },
+          "query_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Query Id"
+          },
+          "query_text": {
+            "title": "Query Text",
+            "type": "string"
+          },
+          "rank_movements": {
+            "items": {
+              "$ref": "#/components/schemas/RankMovement"
+            },
+            "title": "Rank Movements",
+            "type": "array"
+          },
+          "results": {
+            "items": {
+              "$ref": "#/components/schemas/ConfigSearchResult"
+            },
+            "title": "Results",
+            "type": "array"
+          }
+        },
+        "required": [
+          "query_text",
+          "query_id",
+          "results",
+          "rank_movements",
+          "overlap",
+          "observability_notice"
+        ],
+        "title": "SearchCompareResponse",
+        "type": "object"
+      },
+      "SearchHit": {
+        "additionalProperties": false,
+        "properties": {
+          "attributes": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/JsonValue-Output"
+            },
+            "title": "Attributes",
+            "type": "object"
+          },
+          "body_excerpt": {
+            "title": "Body Excerpt",
+            "type": "string"
+          },
+          "document_id": {
+            "format": "uuid",
+            "title": "Document Id",
+            "type": "string"
+          },
+          "external_id": {
+            "title": "External Id",
+            "type": "string"
+          },
+          "final_rank": {
+            "minimum": 1.0,
+            "title": "Final Rank",
+            "type": "integer"
+          },
+          "final_score": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ObservedScore"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "highlights": {
+            "items": {
+              "$ref": "#/components/schemas/HighlightFragment"
+            },
+            "title": "Highlights",
+            "type": "array"
+          },
+          "relevance_grade": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Relevance Grade"
+          },
+          "stage_membership": {
+            "items": {
+              "$ref": "#/components/schemas/StageMembership"
+            },
+            "title": "Stage Membership",
+            "type": "array"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url"
+          }
+        },
+        "required": [
+          "document_id",
+          "external_id",
+          "title",
+          "body_excerpt",
+          "final_rank",
+          "stage_membership"
+        ],
+        "title": "SearchHit",
+        "type": "object"
+      },
+      "StageMembership": {
+        "additionalProperties": false,
+        "properties": {
+          "rank": {
+            "minimum": 1.0,
+            "title": "Rank",
+            "type": "integer"
+          },
+          "score": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ObservedScore"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "stage": {
+            "$ref": "#/components/schemas/RetrievalStage"
+          }
+        },
+        "required": [
+          "stage",
+          "rank"
+        ],
+        "title": "StageMembership",
+        "type": "object"
+      },
+      "StageTiming": {
+        "additionalProperties": false,
+        "properties": {
+          "duration_ms": {
+            "minimum": 0.0,
+            "title": "Duration Ms",
+            "type": "number"
+          },
+          "measurement": {
+            "const": "client_wall_clock",
+            "default": "client_wall_clock",
+            "title": "Measurement",
+            "type": "string"
+          },
+          "stage": {
+            "$ref": "#/components/schemas/TimingStage"
+          }
+        },
+        "required": [
+          "stage",
+          "duration_ms"
+        ],
+        "title": "StageTiming",
+        "type": "object"
+      },
+      "TimingStage": {
+        "enum": [
+          "embed",
+          "turbopuffer",
+          "provenance_probe",
+          "fusion",
+          "rerank",
+          "total"
+        ],
+        "title": "TimingStage",
+        "type": "string"
       }
     }
   },
@@ -38,6 +893,47 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/api/v1/configs": {
+      "get": {
+        "operationId": "list_retrieval_configs",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RetrievalConfigListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "The request failed unexpectedly."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "Search runtime is unavailable."
+          }
+        },
+        "summary": "List Retrieval Configs",
+        "tags": [
+          "retrieval"
+        ]
+      }
+    },
     "/api/v1/health": {
       "get": {
         "operationId": "get_health",
@@ -56,6 +952,97 @@
         "summary": "Get Health",
         "tags": [
           "system"
+        ]
+      }
+    },
+    "/api/v1/search/compare": {
+      "post": {
+        "operationId": "compare_search_configs",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SearchCompareRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SearchCompareResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "A retrieval config or namespace was not found."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "The comparison request is invalid."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "The provider rate limit was exceeded."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "The request failed unexpectedly."
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "The provider request failed."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "Search is temporarily unavailable."
+          }
+        },
+        "summary": "Compare Search Configs",
+        "tags": [
+          "search"
         ]
       }
     }
