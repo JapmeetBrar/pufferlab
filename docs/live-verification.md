@@ -35,9 +35,13 @@ session owns it:
 
 ```dotenv
 TURBOPUFFER_API_KEY=<local-only>
-TURBOPUFFER_REGION=gcp-us-central1
+TURBOPUFFER_REGION=gcp-us-west1
 PUFFERLAB_SEARCH_NAMESPACE=
 ```
+
+[`gcp-us-west1`](https://turbopuffer.com/docs/regions) is the supported public region selected for
+the San Francisco verification run. Use the region that owns the account's target namespace for a
+different operator or environment.
 
 Confirm `.env` is ignored without printing it:
 
@@ -263,13 +267,17 @@ is already registered for error/cancellation:
 
 ```bash
 cleanup_live
+trap - EXIT INT TERM HUP
 test ! -e data/m1-live-session.json
 ```
 
 Require `status=not_found_verified`. The coordinator validates the exact recorded random name,
 deletes only that namespace, polls its metadata for the specific provider `NOT_FOUND` code, closes
-the provider in `finally`, and removes the session record only after confirmation. If cleanup fails,
-the record remains: do not start a new session; repair connectivity and rerun the cleanup command.
+the provider in `finally`, and removes the session record only after confirmation. Run the second
+`trap` command at the coordinator shell's top level: Zsh restores an outer trap after a function
+returns, so the top-level command prevents a successful explicit cleanup from being attempted again
+when that shell later exits. If cleanup fails, `set -e` leaves the registered trap and session record
+in place: do not start a new session; repair connectivity and rerun the cleanup command.
 
 ## 10. Record evidence and complete the review loop
 
@@ -288,3 +296,34 @@ post-merge `main` run. GitHub's review, merge event, and protected-main checks a
 those events. Mark the draft ready only after every live item above is complete, then require the
 dedicated reviewer to inspect and test the exact immutable head, merge it, and verify `main`. Do not
 open a recursive ledger PR solely to record that final merge.
+
+## 2026-08-22 sanitized verification record
+
+The finalization run used `gcp-us-west1` and an isolated namespace whose SHA-256 fingerprint prefix
+was `860a0799992d`. The full namespace and credentials are intentionally absent from this record.
+
+- The pinned real-model verifier passed for `BAAI/bge-small-en-v1.5` revision
+  `5c38ec7c405ec4b44b94cc5a9bb96e735b38267a`: 384 dimensions, finite unit-normalized query and
+  passage vectors, and no vector values printed.
+- The opt-in provider smoke test passed its real write, BM25, and ANN path and confirmed its own
+  generated test namespace as `NOT_FOUND` during cleanup.
+- The first ingest and same-namespace rerun each independently observed exactly 20 fixture IDs and
+  Count 20, schema hash `0251f57f6166bf8f1ab8351ae0a4a797cfcf691fb0699bcfc59a4083945eea1d`,
+  `cosine_distance`, ready metadata, and ready indexes. The identical rerun proves stable-ID
+  idempotence.
+- The direct API verifier sent the four-field public request, received 10 BM25 and 10 vector hits,
+  and observed `tiny-002` at rank 1 in both. It validated typed score direction plus measured BM25
+  provider timing and vector embedding/provider timings, and recursively rejected credential and
+  raw-vector fields.
+- The in-app browser submitted the live comparison successfully. At 1280 pixels it rendered two
+  result columns with 20 total visible ranks; at 390 pixels the columns stacked, document width
+  remained exactly 390 pixels, and there was no horizontal overflow. Reload restored the query and
+  both config IDs from `q`, `left`, and `right`. Sanitized screenshots are locally retained under
+  ignored `data/m1-live-browser-desktop-results.png` and `data/m1-live-browser-mobile.png`.
+- At live implementation head `9293155`, the secret-boundary verifier passed across 108 tracked
+  files, 220 Git-history blobs (1,932,408 bytes), and 11 browser source/build files. Backend gates
+  passed with 163 tests and one intentional opt-in-live skip; frontend lint, typecheck, six tests,
+  and production build passed; generated OpenAPI and formatting checks were clean.
+- After both local servers stopped, cleanup deleted only the recorded namespace and provider
+  metadata returned the required `NOT_FOUND`. The ignored session record was removed. The fixture is
+  reproducible, but that remote test namespace is not recoverable.
