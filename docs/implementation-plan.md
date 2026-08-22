@@ -120,6 +120,7 @@ Maximum useful initial parallelism after T0 is four workstreams: platform, turbo
 
 ---
 
+<a id="task-t2"></a>
 ### T2 — turbopuffer provider and live test harness
 
 **Objective:** provide a narrow, fakeable adapter around the official async SDK.
@@ -151,6 +152,7 @@ Maximum useful initial parallelism after T0 is four workstreams: platform, turbo
 
 ---
 
+<a id="task-t3"></a>
 ### T3 — Dataset pack, preprocessing, embedding, and ingestion
 
 **Objective:** turn CQADupStack Unix into a deterministic turbopuffer namespace plus local judged query sets.
@@ -212,6 +214,7 @@ Maximum useful initial parallelism after T0 is four workstreams: platform, turbo
 
 ---
 
+<a id="task-t5"></a>
 ### T5 — Retrieval orchestration, hybrid, reranking, and provenance
 
 **Objective:** execute all four seeded configurations with production-shaped calls and honest instrumentation.
@@ -297,6 +300,7 @@ Maximum useful initial parallelism after T0 is four workstreams: platform, turbo
 
 ---
 
+<a id="task-t8"></a>
 ### T8 — Thin vertical integration and compare API
 
 **Objective:** achieve the first real end-to-end slice before building the eval dashboard.
@@ -387,6 +391,7 @@ Maximum useful initial parallelism after T0 is four workstreams: platform, turbo
 
 ---
 
+<a id="task-t11"></a>
 ### T11 — QA, demo selection, documentation, and release
 
 **Objective:** make the project reliable under interview conditions and understandable to an external engineer.
