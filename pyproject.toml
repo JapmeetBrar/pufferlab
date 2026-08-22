@@ -12,6 +12,7 @@ dependencies = [
   "fastapi>=0.116,<1",
   "pydantic>=2.11,<3",
   "pydantic-settings>=2.10,<3",
+  "turbopuffer>=2.8,<3",
   "uvicorn[standard]>=0.35,<1",
 ]
 
@@ -29,6 +30,9 @@ packages = ["backend/pufferlab"]
 
 [tool.pytest.ini_options]
 addopts = "-q"
+markers = [
+  "live: opt-in tests that create and delete real turbopuffer resources",
+]
 pythonpath = ["backend"]
 testpaths = ["backend/tests"]
 
