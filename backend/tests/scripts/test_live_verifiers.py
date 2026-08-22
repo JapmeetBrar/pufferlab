@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import math
 import stat
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -30,17 +32,23 @@ def _hit(*, mode: str, external_id: str) -> dict[str, object]:
 
 
 def _result(*, mode: str, identifier: str, external_id: str) -> dict[str, object]:
+    timings = [
+        {
+            "stage": "turbopuffer",
+            "duration_ms": 2.5,
+            "measurement": "client_wall_clock",
+        },
+        {"stage": "total", "duration_ms": 4.0, "measurement": "client_wall_clock"},
+    ]
+    if mode == "vector":
+        timings.insert(
+            0,
+            {"stage": "embed", "duration_ms": 1.5, "measurement": "client_wall_clock"},
+        )
     return {
         "config": {"id": identifier, "mode": mode},
         "hits": [_hit(mode=mode, external_id=external_id)],
-        "timings": [
-            {
-                "stage": "turbopuffer",
-                "duration_ms": 2.5,
-                "measurement": "client_wall_clock",
-            },
-            {"stage": "total", "duration_ms": 4.0, "measurement": "client_wall_clock"},
-        ],
+        "timings": timings,
     }
 
 
@@ -93,6 +101,38 @@ def test_live_api_verifier_rejects_remote_origins_and_private_fields() -> None:
         verify_live_api.verify("https://example.com")
     with pytest.raises(verify_live_api.VerificationError, match="private field"):
         verify_live_api._reject_private_fields({"attributes": {"vector": [0.1]}})
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("config_id", "identity"),
+        ("nan_score", "not numeric"),
+        ("wrong_source", "semantics"),
+        ("missing_embed", "missing a required timing stage"),
+        ("nan_timing", "timing semantics"),
+    ],
+)
+def test_live_api_verifier_rejects_weak_vector_evidence(mutation: str, message: str) -> None:
+    identifier = "dd99afdb-d427-5aa1-b2b4-fbaae665be69"
+    result = deepcopy(_result(mode="vector", identifier=identifier, external_id="tiny-002"))
+    if mutation == "config_id":
+        result["config"]["id"] = "c90061ae-ec7a-518c-a215-043304c0be57"
+    elif mutation == "nan_score":
+        result["hits"][0]["final_score"]["value"] = math.nan
+    elif mutation == "wrong_source":
+        result["hits"][0]["final_score"]["source"] = "fixture"
+    elif mutation == "missing_embed":
+        result["timings"] = [timing for timing in result["timings"] if timing["stage"] != "embed"]
+    else:
+        result["timings"][0]["duration_ms"] = math.nan
+
+    with pytest.raises(verify_live_api.VerificationError, match=message):
+        verify_live_api._validate_result(
+            result,
+            expected_mode="vector",
+            expected_id=identifier,
+        )
 
 
 class _DeletedProvider:

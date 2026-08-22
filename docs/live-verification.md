@@ -98,24 +98,51 @@ In the coordinator shell, enable exit-on-error before creating any resource:
 
 ```bash
 set -Eeuo pipefail
+[[ ! -e data/m1-live-session.json ]]
+
+_cleanup_namespace() {
+  uv run --extra live-search python scripts/live_namespace_session.py cleanup
+}
+cleanup_live() {
+  trap - EXIT INT TERM HUP
+  _cleanup_namespace
+}
+_cleanup_on_exit() {
+  local prior_status=$?
+  trap - EXIT INT TERM HUP
+  if ! _cleanup_namespace; then
+    exit 1
+  fi
+  exit "$prior_status"
+}
+_cleanup_on_signal() {
+  local signal_status="$1"
+  trap - EXIT INT TERM HUP
+  if ! _cleanup_namespace; then
+    exit 1
+  fi
+  exit "$signal_status"
+}
+
 uv run python scripts/live_namespace_session.py start
+trap _cleanup_on_exit EXIT
+trap '_cleanup_on_signal 130' INT
+trap '_cleanup_on_signal 143' TERM
+trap '_cleanup_on_signal 129' HUP
 LIVE_NAMESPACE="$(
   uv run python scripts/live_namespace_session.py show |
     awk -F= '/^PUFFERLAB_SEARCH_NAMESPACE=/{print $2}'
 )"
 readonly LIVE_NAMESPACE
 [[ "$LIVE_NAMESPACE" =~ ^pufferlab-tiny-[0-9a-f]{24}$ ]]
-
-cleanup_live() {
-  trap - EXIT INT TERM HUP
-  uv run --extra live-search python scripts/live_namespace_session.py cleanup
-}
-trap cleanup_live EXIT INT TERM HUP
 ```
 
-Keep this shell open. Any ordinary error, cancellation, or shell exit now invokes guarded cleanup.
-A power loss cannot run a trap, so the ignored session record remains for the recovery command in
-step 1. Never delete that record manually.
+Keep this shell open. Any ordinary error, cancellation, signal, or shell exit now invokes guarded
+cleanup. Successful cleanup preserves the original nonzero exit/signal status; failed cleanup
+forces exit 1 and retains the session record. The short interval between local session creation and
+trap registration cannot create a remote resource because ingestion has not started. A power loss
+cannot run a trap, so the ignored session record remains for the recovery command in step 1. Never
+delete that record manually.
 
 ## 5. Ingest once and rerun idempotently
 

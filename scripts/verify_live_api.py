@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from typing import cast
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
@@ -102,11 +103,16 @@ def _config_ids(config_payload: JsonObject) -> tuple[str, str]:
         raise VerificationError("config response is missing BM25 or vector") from None
 
 
-def _validate_result(result_value: JsonValue, *, expected_mode: str) -> JsonObject:
+def _validate_result(
+    result_value: JsonValue,
+    *,
+    expected_mode: str,
+    expected_id: str,
+) -> JsonObject:
     result = _as_object(result_value, label=f"{expected_mode} result")
     config = _as_object(result.get("config"), label=f"{expected_mode} config")
-    if config.get("mode") != expected_mode:
-        raise VerificationError(f"result order does not preserve {expected_mode}")
+    if config.get("mode") != expected_mode or config.get("id") != expected_id:
+        raise VerificationError(f"result identity does not preserve discovered {expected_mode}")
     hits = _as_list(result.get("hits"), label=f"{expected_mode} hits")
     if not hits:
         raise VerificationError(f"{expected_mode} returned no hits")
@@ -117,11 +123,20 @@ def _validate_result(result_value: JsonValue, *, expected_mode: str) -> JsonObje
         if hit.get("final_rank") != expected_rank:
             raise VerificationError(f"{expected_mode} hit ranks are not contiguous and 1-based")
         score = _as_object(hit.get("final_score"), label=f"{expected_mode} score")
-        if not isinstance(score.get("value"), int | float):
+        score_value = score.get("value")
+        if (
+            not isinstance(score_value, int | float)
+            or isinstance(score_value, bool)
+            or not math.isfinite(score_value)
+        ):
             raise VerificationError(f"{expected_mode} score is not numeric")
         expected_kind = "bm25" if expected_mode == "bm25" else "vector_distance"
         expected_direction = "higher_is_better" if expected_mode == "bm25" else "lower_is_better"
-        if score.get("kind") != expected_kind or score.get("direction") != expected_direction:
+        if (
+            score.get("kind") != expected_kind
+            or score.get("direction") != expected_direction
+            or score.get("source") != "turbopuffer_dist"
+        ):
             raise VerificationError(f"{expected_mode} score semantics are incorrect")
     timings = _as_list(result.get("timings"), label=f"{expected_mode} timings")
     timing_stages: set[str] = set()
@@ -132,12 +147,16 @@ def _validate_result(result_value: JsonValue, *, expected_mode: str) -> JsonObje
         if (
             not isinstance(duration, int | float)
             or isinstance(duration, bool)
+            or not math.isfinite(duration)
             or duration < 0
             or timing.get("measurement") != "client_wall_clock"
         ):
             raise VerificationError(f"{expected_mode} timing semantics are incorrect")
-    if not {"turbopuffer", "total"}.issubset(timing_stages):
-        raise VerificationError(f"{expected_mode} is missing provider or total timing")
+    required_stages = {"turbopuffer", "total"}
+    if expected_mode == "vector":
+        required_stages.add("embed")
+    if not required_stages.issubset(timing_stages):
+        raise VerificationError(f"{expected_mode} is missing a required timing stage")
     return result
 
 
@@ -169,8 +188,8 @@ def verify(base_url: str) -> JsonObject:
     results = _as_list(response.get("results"), label="results")
     if len(results) != 2:
         raise VerificationError("compare response does not contain exactly two results")
-    bm25 = _validate_result(results[0], expected_mode="bm25")
-    vector = _validate_result(results[1], expected_mode="vector")
+    bm25 = _validate_result(results[0], expected_mode="bm25", expected_id=bm25_id)
+    vector = _validate_result(results[1], expected_mode="vector", expected_id=vector_id)
 
     def summary(result: JsonObject) -> JsonObject:
         hits = _as_list(result.get("hits"), label="summary hits")
