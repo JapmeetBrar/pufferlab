@@ -39,7 +39,7 @@ h1 { max-width: 710px; margin: 0; font-family: Georgia, "Times New Roman", serif
 .query-field label, .query-console legend, .config-grid label span { display: block; margin-bottom: 9px; color: #273229; font-size: 12px; font-weight: 750; letter-spacing: 0.03em; text-transform: uppercase; }
 .query-field textarea, .config-grid select { width: 100%; border: 1px solid #aeb5ac; border-radius: 10px; background: #fffef9; }
 .query-field textarea { min-height: 104px; padding: 14px 15px; resize: vertical; font-size: 17px; line-height: 1.5; }
-.query-field textarea::placeholder { color: #757d77; }
+.query-field textarea::placeholder { color: #68716b; }
 .query-console fieldset { padding: 0; margin: 24px 0 0; border: 0; }
 .query-console fieldset:disabled { opacity: 0.58; }
 .config-grid { display: grid; grid-template-columns: 1fr auto 1fr; gap: 14px; align-items: end; }
@@ -69,7 +69,7 @@ h1 { max-width: 710px; margin: 0; font-family: Georgia, "Times New Roman", serif
 .evidence-summary h2 { font-size: 27px; }
 .evidence-summary dl { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; margin: 0; }
 .evidence-summary dl div { padding-left: 14px; border-left: 1px solid #b9c0b5; }
-.evidence-summary dt { color: #657067; font-size: 11px; text-transform: uppercase; }
+.evidence-summary dt { color: #59645c; font-size: 11px; text-transform: uppercase; }
 .evidence-summary dd { margin: 7px 0 0; font-family: Georgia, "Times New Roman", serif; font-size: 20px; }
 .observability-notice { grid-column: 1 / -1; padding-top: 18px; margin: 0; border-top: 1px solid #c3cabf; color: #4f5e53; font-size: 13px; line-height: 1.5; }
 .result-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
