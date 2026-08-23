@@ -1,5 +1,7 @@
 """Application services that compose reviewed domain boundaries."""
 
+from pufferlab.application.evaluation_controls import ProviderFreeEvaluationControls
+from pufferlab.application.evaluation_views import EvaluationViewService
 from pufferlab.application.evaluations import (
     EvaluationApplicationService,
     EvaluationRunError,
@@ -10,4 +12,6 @@ __all__ = [
     "EvaluationApplicationService",
     "EvaluationRunError",
     "EvaluationSeedResult",
+    "EvaluationViewService",
+    "ProviderFreeEvaluationControls",
 ]

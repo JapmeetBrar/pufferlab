@@ -21,6 +21,177 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/datasets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Evaluation Datasets */
+        get: operations["list_evaluation_datasets"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/datasets/{dataset_version_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Evaluation Dataset */
+        get: operations["get_evaluation_dataset"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/datasets/{dataset_version_id}/configs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Dataset Evaluation Configs */
+        get: operations["list_dataset_evaluation_configs"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/eval-runs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Evaluation Runs */
+        get: operations["list_evaluation_runs"];
+        put?: never;
+        /** Create Evaluation Run */
+        post: operations["create_evaluation_run"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/eval-runs/{run_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Evaluation Run */
+        get: operations["get_evaluation_run"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/eval-runs/{run_id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Cancel Evaluation Run */
+        post: operations["cancel_evaluation_run"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/eval-runs/{run_id}/export": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Export Evaluation Run */
+        get: operations["export_evaluation_run"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/eval-runs/{run_id}/queries/{query_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Evaluation Run Query */
+        get: operations["get_evaluation_run_query"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/eval-runs/{run_id}/queries/{query_id}/replay": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Replay Evaluation Run Query */
+        post: operations["replay_evaluation_run_query"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/eval-runs/{run_id}/regressions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Evaluation Regressions */
+        get: operations["get_evaluation_regressions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/health": {
         parameters: {
             query?: never;
@@ -30,6 +201,23 @@ export interface paths {
         };
         /** Get Health */
         get: operations["get_health"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/query-sets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Evaluation Query Sets */
+        get: operations["list_evaluation_query_sets"];
         put?: never;
         post?: never;
         delete?: never;
@@ -88,6 +276,47 @@ export interface components {
             /** Message */
             message: string;
         };
+        /** CancelEvalRunResponse */
+        CancelEvalRunResponse: {
+            /** @default 1 */
+            contract_version: components["schemas"]["ContractVersion"];
+            result: components["schemas"]["EvalRunView"];
+        };
+        /** CandidateCountEvidenceValue */
+        CandidateCountEvidenceValue: {
+            /** Count */
+            count: number;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "candidate_count";
+            stage: components["schemas"]["RetrievalStage"];
+        };
+        /** CandidateRelevantRankChanges */
+        CandidateRelevantRankChanges: {
+            /**
+             * Candidate Config Id
+             * Format: uuid
+             */
+            candidate_config_id: string;
+            /** Changes */
+            changes: components["schemas"]["RelevantRankChange"][];
+        };
+        /** ConfigRunSummary */
+        ConfigRunSummary: {
+            /** Completed Queries */
+            completed_queries: number;
+            /**
+             * Config Id
+             * Format: uuid
+             */
+            config_id: string;
+            /** Failed Queries */
+            failed_queries: number;
+            /** Metrics */
+            metrics: components["schemas"]["MetricAggregate"][];
+        };
         /** ConfigSearchResult */
         ConfigSearchResult: {
             /** Candidate Counts */
@@ -109,10 +338,438 @@ export interface components {
         };
         /** @constant */
         ContractVersion: 1;
+        /** CreateEvalRunRequest */
+        CreateEvalRunRequest: {
+            /**
+             * Baseline Config Id
+             * Format: uuid
+             */
+            baseline_config_id: string;
+            /** Candidate Config Ids */
+            candidate_config_ids: string[];
+            /** @default 1 */
+            contract_version: components["schemas"]["ContractVersion"];
+            /**
+             * Max Concurrency
+             * @default 4
+             */
+            max_concurrency: number;
+            /**
+             * Query Set Id
+             * Format: uuid
+             */
+            query_set_id: string;
+            /**
+             * Random Seed
+             * @default 20260822
+             */
+            random_seed: number;
+            /**
+             * Warmup Query Count
+             * @default 5
+             */
+            warmup_query_count: number;
+        };
+        /** CreateEvalRunResponse */
+        CreateEvalRunResponse: {
+            /** @default 1 */
+            contract_version: components["schemas"]["ContractVersion"];
+            result: components["schemas"]["EvalRunView"];
+        };
+        /**
+         * DataOrigin
+         * @description Whether persisted catalog data came from provider-backed work or the offline demo.
+         * @enum {string}
+         */
+        DataOrigin: "live" | "synthetic_demo";
+        /** DatasetAttribution */
+        DatasetAttribution: {
+            /** License Name */
+            license_name?: string | null;
+            /** License Url */
+            license_url?: string | null;
+            /** Source Name */
+            source_name: string;
+            /** Source Url */
+            source_url?: string | null;
+        };
+        /** DatasetCatalogItem */
+        DatasetCatalogItem: {
+            data_origin: components["schemas"]["DataOrigin"];
+            dataset: components["schemas"]["DatasetVersion"];
+        };
+        /** DatasetDetailResponse */
+        DatasetDetailResponse: {
+            /** @default 1 */
+            contract_version: components["schemas"]["ContractVersion"];
+            data_origin: components["schemas"]["DataOrigin"];
+            dataset: components["schemas"]["DatasetVersion"];
+        };
+        /** DatasetListResponse */
+        DatasetListResponse: {
+            /** @default 1 */
+            contract_version: components["schemas"]["ContractVersion"];
+            /** Datasets */
+            datasets: components["schemas"]["DatasetCatalogItem"][];
+        };
+        /**
+         * DatasetStatus
+         * @enum {string}
+         */
+        DatasetStatus: "pending" | "ingesting" | "indexing" | "ready" | "failed";
+        /** DatasetVersion */
+        DatasetVersion: {
+            /** Corpus Hash */
+            corpus_hash: string;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** @default live */
+            data_origin: components["schemas"]["DataOrigin"];
+            /** Document Count */
+            document_count: number;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            index_profile: components["schemas"]["IndexProfile"];
+            /** Namespace */
+            namespace: string;
+            /** Slug */
+            slug: string;
+            status: components["schemas"]["DatasetStatus"];
+            /** Version */
+            version: string;
+        };
+        /**
+         * EvalFailurePayload
+         * @description Redacted durable evidence for an expected operational retrieval failure.
+         */
+        EvalFailurePayload: {
+            code: components["schemas"]["ApiErrorCode"];
+            /** @default 1 */
+            contract_version: components["schemas"]["ContractVersion"];
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "failure";
+            /** Message */
+            message: string;
+            /** Operation */
+            operation: string;
+            /** Retryable */
+            retryable: boolean;
+            /** Total Client Wall Latency Ms */
+            total_client_wall_latency_ms: number;
+            /**
+             * Trace Id
+             * Format: uuid
+             */
+            trace_id: string;
+        };
+        EvalOutcomePayload: components["schemas"]["EvalSuccessPayload"] | components["schemas"]["EvalFailurePayload"];
+        /**
+         * EvalOutcomeRecord
+         * @description Typed identity envelope around one durable payload.
+         */
+        EvalOutcomeRecord: {
+            /**
+             * Config Id
+             * Format: uuid
+             */
+            config_id: string;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            outcome: components["schemas"]["EvalOutcomePayload"];
+            /**
+             * Query Id
+             * Format: uuid
+             */
+            query_id: string;
+            /**
+             * Run Id
+             * Format: uuid
+             */
+            run_id: string;
+        };
+        /**
+         * EvalOutcomeWarning
+         * @description Public-safe warning retained with an evaluated query outcome.
+         */
+        EvalOutcomeWarning: {
+            /** Code */
+            code: string;
+            /** Message */
+            message: string;
+        };
+        /** EvalRun */
+        EvalRun: {
+            /**
+             * Baseline Config Id
+             * Format: uuid
+             */
+            baseline_config_id: string;
+            /** Candidate Config Ids */
+            candidate_config_ids: string[];
+            /** Completed At */
+            completed_at: string | null;
+            /** Completed Queries */
+            completed_queries: number;
+            /** @default 1 */
+            contract_version: components["schemas"]["ContractVersion"];
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            environment: components["schemas"]["RunEnvironment"];
+            error: components["schemas"]["ApiErrorDetail"] | null;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            query_set: components["schemas"]["QuerySetSummary"];
+            /** Random Seed */
+            random_seed: number;
+            /** Started At */
+            started_at: string | null;
+            status: components["schemas"]["EvalRunStatus"];
+            /** Summaries */
+            summaries: components["schemas"]["ConfigRunSummary"][];
+            /** Total Queries */
+            total_queries: number;
+        };
+        /** EvalRunDetailResponse */
+        EvalRunDetailResponse: {
+            /** @default 1 */
+            contract_version: components["schemas"]["ContractVersion"];
+            result: components["schemas"]["EvalRunView"];
+        };
+        /**
+         * EvalRunExport
+         * @description Canonical, partial-state-safe JSON export of one run and its durable outcomes.
+         */
+        EvalRunExport: {
+            /** @default 1 */
+            contract_version: components["schemas"]["ContractVersion"];
+            /** Outcomes */
+            outcomes: components["schemas"]["EvalOutcomeRecord"][];
+            run: components["schemas"]["EvalRun"];
+        };
+        /** EvalRunExportResponse */
+        EvalRunExportResponse: {
+            /** @default 1 */
+            contract_version: components["schemas"]["ContractVersion"];
+            data_origin: components["schemas"]["DataOrigin"];
+            export: components["schemas"]["EvalRunExport"];
+        };
+        /** EvalRunListResponse */
+        EvalRunListResponse: {
+            /** @default 1 */
+            contract_version: components["schemas"]["ContractVersion"];
+            /** Runs */
+            runs: components["schemas"]["EvalRunView"][];
+        };
+        /** EvalRunQueryDetailResponse */
+        EvalRunQueryDetailResponse: {
+            attribution: components["schemas"]["DatasetAttribution"];
+            /**
+             * Baseline Config Id
+             * Format: uuid
+             */
+            baseline_config_id: string;
+            /** Candidate Config Ids */
+            candidate_config_ids: string[];
+            /** Configs */
+            configs: components["schemas"]["RetrievalConfigSummary"][];
+            /** @default 1 */
+            contract_version: components["schemas"]["ContractVersion"];
+            data_origin: components["schemas"]["DataOrigin"];
+            /** Live Replay Policy Permitted */
+            live_replay_policy_permitted: boolean;
+            /**
+             * Original Stage Evidence Available
+             * @default false
+             * @constant
+             */
+            original_stage_evidence_available: false;
+            /** Outcomes */
+            outcomes: components["schemas"]["EvalOutcomeRecord"][];
+            query: components["schemas"]["JudgedQuery"];
+            /** Rank Changes */
+            rank_changes: components["schemas"]["CandidateRelevantRankChanges"][];
+            /**
+             * Run Id
+             * Format: uuid
+             */
+            run_id: string;
+        };
+        /** EvalRunQueryReplayRequest */
+        EvalRunQueryReplayRequest: {
+            /** Config Ids */
+            config_ids: string[];
+            /** @default 1 */
+            contract_version: components["schemas"]["ContractVersion"];
+            /**
+             * Include Counterfactual Probe
+             * @default false
+             */
+            include_counterfactual_probe: boolean;
+        };
+        /** EvalRunQueryReplayResponse */
+        EvalRunQueryReplayResponse: {
+            /** Config Ids */
+            config_ids: string[];
+            /** @default 1 */
+            contract_version: components["schemas"]["ContractVersion"];
+            /** Counterfactual Probes */
+            counterfactual_probes: components["schemas"]["ReplayCounterfactualProbe"][];
+            /**
+             * Data Origin
+             * @default live
+             * @constant
+             */
+            data_origin: "live";
+            /** Observability Notice */
+            observability_notice: string;
+            /** Observations */
+            observations: components["schemas"]["ForensicObservation"][];
+            /**
+             * Original Stage Evidence Available
+             * @default false
+             * @constant
+             */
+            original_stage_evidence_available: false;
+            primary: components["schemas"]["SearchCompareResponse"];
+            /**
+             * Primary Observed At
+             * Format: date-time
+             */
+            primary_observed_at: string;
+            /**
+             * Primary Origin
+             * @default live_replay_primary
+             * @constant
+             */
+            primary_origin: "live_replay_primary";
+            /**
+             * Query Id
+             * Format: uuid
+             */
+            query_id: string;
+            /**
+             * Run Id
+             * Format: uuid
+             */
+            run_id: string;
+        };
+        /**
+         * EvalRunStatus
+         * @enum {string}
+         */
+        EvalRunStatus: "queued" | "running" | "completed" | "failed" | "cancelled" | "interrupted";
+        /**
+         * EvalRunView
+         * @description Provider-free projection metadata around one durable run revision.
+         */
+        EvalRunView: {
+            /** Completed Attempts */
+            completed_attempts: number;
+            /** Configs */
+            configs: components["schemas"]["RetrievalConfigSummary"][];
+            data_origin: components["schemas"]["DataOrigin"];
+            /**
+             * Dataset Version Id
+             * Format: uuid
+             */
+            dataset_version_id: string;
+            /** Live Replay Policy Permitted */
+            live_replay_policy_permitted: boolean;
+            /**
+             * Original Stage Evidence Available
+             * @default false
+             * @constant
+             */
+            original_stage_evidence_available: false;
+            run: components["schemas"]["EvalRun"];
+            /**
+             * Total Attempts
+             * @default 200
+             */
+            total_attempts: number;
+        };
+        /**
+         * EvalSuccessPayload
+         * @description Versioned durable evidence for one successful config/query attempt.
+         *
+         *     Deliberately excluded fields include query/document text, vectors, credentials, request headers,
+         *     and raw provider responses.
+         */
+        EvalSuccessPayload: {
+            /** Candidate Counts */
+            candidate_counts: {
+                [key: string]: number;
+            };
+            /** @default 1 */
+            contract_version: components["schemas"]["ContractVersion"];
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "success";
+            metrics: components["schemas"]["PerQueryMetrics"];
+            /** Ranked Document Ids */
+            ranked_document_ids: string[];
+            /** Stage Timings */
+            stage_timings: components["schemas"]["StageTiming"][];
+            /** @default perf_counter */
+            timing_source: components["schemas"]["TimingSource"];
+            /** Total Client Wall Latency Ms */
+            total_client_wall_latency_ms: number | null;
+            /** Trace Id */
+            trace_id: string | null;
+            /** Warnings */
+            warnings: components["schemas"]["EvalOutcomeWarning"][];
+        };
+        /**
+         * EvidenceCertainty
+         * @enum {string}
+         */
+        EvidenceCertainty: "observed" | "counterfactual" | "insufficient";
+        /** EvidenceItem */
+        EvidenceItem: {
+            /** Label */
+            label: string;
+            /** Observed At */
+            observed_at: string | null;
+            origin: components["schemas"]["EvidenceOrigin"];
+            /** Trace Id */
+            trace_id: string | null;
+            value: components["schemas"]["ForensicEvidenceValue"];
+        };
+        /**
+         * EvidenceOrigin
+         * @enum {string}
+         */
+        EvidenceOrigin: "stored_run" | "live_replay_primary" | "live_replay_counterfactual_probe" | "client_computed";
+        /** ExcludedPairCount */
+        ExcludedPairCount: {
+            /** Count */
+            count: number;
+            status: components["schemas"]["RegressionPairStatus"];
+        };
         /** FilterLogical */
-        FilterLogical: {
+        "FilterLogical-Input": {
             /** Children */
-            children: (components["schemas"]["FilterPredicate"] | components["schemas"]["FilterLogical"])[];
+            children: (components["schemas"]["FilterPredicate-Input"] | components["schemas"]["FilterLogical-Input"])[];
             /**
              * @description discriminator enum property added by openapi-typescript
              * @enum {string}
@@ -120,9 +777,21 @@ export interface components {
             kind: "logical";
             op: components["schemas"]["LogicalOp"];
         };
-        FilterNode: components["schemas"]["FilterPredicate"] | components["schemas"]["FilterLogical"];
+        /** FilterLogical */
+        "FilterLogical-Output": {
+            /** Children */
+            children: (components["schemas"]["FilterPredicate-Output"] | components["schemas"]["FilterLogical-Output"])[];
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "logical";
+            op: components["schemas"]["LogicalOp"];
+        };
+        "FilterNode-Input": components["schemas"]["FilterPredicate-Input"] | components["schemas"]["FilterLogical-Input"];
+        "FilterNode-Output": components["schemas"]["FilterPredicate-Output"] | components["schemas"]["FilterLogical-Output"];
         /** FilterPredicate */
-        FilterPredicate: {
+        "FilterPredicate-Input": {
             /** Field */
             field: string;
             /**
@@ -132,6 +801,114 @@ export interface components {
             kind: "predicate";
             op: components["schemas"]["PredicateOp"];
             value: components["schemas"]["JsonValue-Input"];
+        };
+        /** FilterPredicate */
+        "FilterPredicate-Output": {
+            /** Field */
+            field: string;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "predicate";
+            op: components["schemas"]["PredicateOp"];
+            value: components["schemas"]["JsonValue-Output"];
+        };
+        /** FilterResultEvidenceValue */
+        FilterResultEvidenceValue: {
+            /** Field */
+            field: string;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "filter_result";
+            /** Matched */
+            matched: boolean;
+        };
+        /**
+         * ForensicCode
+         * @enum {string}
+         */
+        ForensicCode: "filter_predicate_failed" | "no_lexical_score" | "outside_lexical_candidates" | "outside_vector_candidates" | "outside_fusion_top_k" | "reranked_down" | "not_observable";
+        ForensicEvidenceValue: components["schemas"]["RankEvidenceValue"] | components["schemas"]["ScoreEvidenceValue"] | components["schemas"]["CandidateCountEvidenceValue"] | components["schemas"]["PresenceEvidenceValue"] | components["schemas"]["FilterResultEvidenceValue"] | components["schemas"]["RrfContributionEvidenceValue"] | components["schemas"]["WarningEvidenceValue"];
+        /** ForensicObservation */
+        ForensicObservation: {
+            certainty: components["schemas"]["EvidenceCertainty"];
+            code: components["schemas"]["ForensicCode"];
+            /** Evidence */
+            evidence: components["schemas"]["EvidenceItem"][];
+            /** Observed At */
+            observed_at: string | null;
+            origin: components["schemas"]["EvidenceOrigin"];
+            /** Statement */
+            statement: string;
+            /** Trace Id */
+            trace_id: string | null;
+        };
+        /** ForensicWarning */
+        ForensicWarning: {
+            code: components["schemas"]["ForensicWarningCode"];
+            /** Message */
+            message: string;
+        };
+        /**
+         * ForensicWarningCode
+         * @enum {string}
+         */
+        ForensicWarningCode: "original_stage_evidence_unavailable" | "provenance_probe_failed" | "provenance_snapshot_differs" | "namespace_unavailable";
+        /** FtsProfile */
+        FtsProfile: {
+            /**
+             * Ascii Folding
+             * @default false
+             */
+            ascii_folding: boolean;
+            /**
+             * B
+             * @default 0.75
+             */
+            b: number;
+            /**
+             * Case Sensitive
+             * @default false
+             */
+            case_sensitive: boolean;
+            /**
+             * K1
+             * @default 1.2
+             */
+            k1: number;
+            /**
+             * K3
+             * @default 8
+             */
+            k3: number;
+            /**
+             * Language
+             * @default english
+             */
+            language: string;
+            /**
+             * Max Token Length
+             * @default 39
+             */
+            max_token_length: number;
+            /**
+             * Remove Stopwords
+             * @default false
+             */
+            remove_stopwords: boolean;
+            /**
+             * Stemming
+             * @default false
+             */
+            stemming: boolean;
+            /**
+             * Tokenizer
+             * @default word_v4
+             */
+            tokenizer: string;
         };
         /** HealthResponse */
         HealthResponse: {
@@ -164,17 +941,81 @@ export interface components {
             /** Start */
             start: number;
         };
+        /** IndexProfile */
+        IndexProfile: {
+            /**
+             * Distance Metric
+             * @enum {string}
+             */
+            distance_metric: "cosine_distance" | "euclidean_squared";
+            /** Embedding Model */
+            embedding_model: string;
+            /**
+             * Embedding Provider
+             * @constant
+             */
+            embedding_provider: "sentence_transformers";
+            /** Embedding Revision */
+            embedding_revision: string;
+            fts_profile: components["schemas"]["FtsProfile"];
+            /** Id */
+            id: string;
+            /** Schema Hash */
+            schema_hash: string;
+            /**
+             * Vector Attribute
+             * @default vector
+             */
+            vector_attribute: string;
+            /** Vector Dimensions */
+            vector_dimensions: number;
+            /**
+             * Vector Dtype
+             * @enum {string}
+             */
+            vector_dtype: "f16" | "f32" | "i8";
+        };
         "JsonValue-Input": string | number | boolean | components["schemas"]["JsonValue-Input"][] | {
             [key: string]: components["schemas"]["JsonValue-Input"];
         } | null;
         "JsonValue-Output": string | number | boolean | components["schemas"]["JsonValue-Output"][] | {
             [key: string]: components["schemas"]["JsonValue-Output"];
         } | null;
+        /** JudgedQuery */
+        JudgedQuery: {
+            /** External Id */
+            external_id: string;
+            filters?: components["schemas"]["FilterNode-Output"] | null;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Qrels */
+            qrels: components["schemas"]["Qrel"][];
+            /** Tags */
+            tags?: string[];
+            /** Text */
+            text: string;
+        };
         /**
          * LogicalOp
          * @enum {string}
          */
         LogicalOp: "and" | "or" | "not";
+        /** MetricAggregate */
+        MetricAggregate: {
+            name: components["schemas"]["MetricName"];
+            /** Sample Count */
+            sample_count: number;
+            /** Value */
+            value: number | null;
+        };
+        /**
+         * MetricName
+         * @enum {string}
+         */
+        MetricName: "ndcg@10" | "recall@50" | "mrr@10" | "latency_p50_ms" | "latency_p95_ms" | "error_rate";
         /** ObservedScore */
         ObservedScore: {
             direction: components["schemas"]["ScoreDirection"];
@@ -205,10 +1046,124 @@ export interface components {
             right_count: number;
         };
         /**
+         * PerQueryMetrics
+         * @description The judged quality values for one successful retrieval attempt.
+         */
+        PerQueryMetrics: {
+            /** Mrr At 10 */
+            mrr_at_10?: number | null;
+            /** Ndcg At 10 */
+            ndcg_at_10?: number | null;
+            /** Recall At 50 */
+            recall_at_50?: number | null;
+        };
+        /**
          * PredicateOp
          * @enum {string}
          */
         PredicateOp: "eq" | "not_eq" | "lt" | "lte" | "gt" | "gte" | "in" | "contains_any";
+        /** PresenceEvidenceValue */
+        PresenceEvidenceValue: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "presence";
+            /** Present */
+            present: boolean;
+            stage: components["schemas"]["RetrievalStage"];
+        };
+        /** ProbeStageMembership */
+        ProbeStageMembership: {
+            /** Rank */
+            rank: number;
+            score?: components["schemas"]["ObservedScore"] | null;
+            /**
+             * Stage
+             * @enum {string}
+             */
+            stage: "bm25_candidates" | "vector_candidates";
+        };
+        /** Qrel */
+        Qrel: {
+            /**
+             * Document Id
+             * Format: uuid
+             */
+            document_id: string;
+            /** Relevance Grade */
+            relevance_grade: number;
+        };
+        /** QuerySet */
+        QuerySet: {
+            /** Content Hash */
+            content_hash: string;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Dataset Version Id
+             * Format: uuid
+             */
+            dataset_version_id: string;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Name */
+            name: string;
+            /** Query Count */
+            query_count: number;
+            /** Version */
+            version: string;
+        };
+        /** QuerySetCatalogItem */
+        QuerySetCatalogItem: {
+            data_origin: components["schemas"]["DataOrigin"];
+            query_set: components["schemas"]["QuerySet"];
+        };
+        /** QuerySetListResponse */
+        QuerySetListResponse: {
+            /** @default 1 */
+            contract_version: components["schemas"]["ContractVersion"];
+            /**
+             * Dataset Version Id
+             * Format: uuid
+             */
+            dataset_version_id: string;
+            /** Query Sets */
+            query_sets: components["schemas"]["QuerySetCatalogItem"][];
+        };
+        /** QuerySetSummary */
+        QuerySetSummary: {
+            /** Content Hash */
+            content_hash: string;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Name */
+            name: string;
+            /** Query Count */
+            query_count: number;
+            /** Version */
+            version: string;
+        };
+        /** RankEvidenceValue */
+        RankEvidenceValue: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "rank";
+            /** Rank */
+            rank: number;
+            stage: components["schemas"]["RetrievalStage"];
+        };
         /** RankMovement */
         RankMovement: {
             /**
@@ -222,6 +1177,164 @@ export interface components {
             ranks_by_config: {
                 [key: string]: number | null;
             };
+        };
+        /** RegressionCoverage */
+        RegressionCoverage: {
+            /** Excluded */
+            excluded: components["schemas"]["ExcludedPairCount"][];
+            /** Paired Queries */
+            paired_queries: number;
+            /**
+             * Total Queries
+             * @default 50
+             */
+            total_queries: number;
+        };
+        /**
+         * RegressionOrder
+         * @enum {string}
+         */
+        RegressionOrder: "regressions" | "gains";
+        /**
+         * RegressionPairStatus
+         * @enum {string}
+         */
+        RegressionPairStatus: "paired" | "baseline_missing" | "candidate_missing" | "baseline_failed" | "candidate_failed" | "both_failed" | "no_positive_qrels";
+        /** RegressionResponse */
+        RegressionResponse: {
+            /**
+             * Baseline Config Id
+             * Format: uuid
+             */
+            baseline_config_id: string;
+            /**
+             * Candidate Config Id
+             * Format: uuid
+             */
+            candidate_config_id: string;
+            /** @default 1 */
+            contract_version: components["schemas"]["ContractVersion"];
+            coverage: components["schemas"]["RegressionCoverage"];
+            data_origin: components["schemas"]["DataOrigin"];
+            /** Limit */
+            limit: number;
+            order: components["schemas"]["RegressionOrder"];
+            /** Rows */
+            rows: components["schemas"]["RegressionRow"][];
+            /**
+             * Run Id
+             * Format: uuid
+             */
+            run_id: string;
+        };
+        /** RegressionRow */
+        RegressionRow: {
+            /**
+             * Baseline Config Id
+             * Format: uuid
+             */
+            baseline_config_id: string;
+            /** Baseline Latency Ms */
+            baseline_latency_ms?: number | null;
+            /** Baseline Ndcg At 10 */
+            baseline_ndcg_at_10: number;
+            /**
+             * Candidate Config Id
+             * Format: uuid
+             */
+            candidate_config_id: string;
+            /** Candidate Latency Ms */
+            candidate_latency_ms?: number | null;
+            /** Candidate Ndcg At 10 */
+            candidate_ndcg_at_10: number;
+            /** Mrr Delta */
+            mrr_delta: number;
+            /** Ndcg Delta */
+            ndcg_delta: number;
+            /** Playground Url */
+            playground_url: string;
+            /**
+             * Query Id
+             * Format: uuid
+             */
+            query_id: string;
+            /** Query Text */
+            query_text: string;
+            /** Recall Delta */
+            recall_delta: number;
+            /** Relevant Rank Changes */
+            relevant_rank_changes: components["schemas"]["RelevantRankChange"][];
+        };
+        /** RelevantRankChange */
+        RelevantRankChange: {
+            /** Baseline Rank */
+            baseline_rank?: number | null;
+            /** Candidate Rank */
+            candidate_rank?: number | null;
+            /**
+             * Document Id
+             * Format: uuid
+             */
+            document_id: string;
+            /** Relevance Grade */
+            relevance_grade: number;
+        };
+        /** ReplayCounterfactualProbe */
+        ReplayCounterfactualProbe: {
+            /** Bm25 Candidate Count */
+            bm25_candidate_count: number;
+            /** Candidates */
+            candidates: components["schemas"]["ReplayProbeCandidate"][];
+            /**
+             * Config Id
+             * Format: uuid
+             */
+            config_id: string;
+            /** Duration Ms */
+            duration_ms: number;
+            /**
+             * Observed At
+             * Format: date-time
+             */
+            observed_at: string;
+            /**
+             * Origin
+             * @default live_replay_counterfactual_probe
+             * @constant
+             */
+            origin: "live_replay_counterfactual_probe";
+            /**
+             * Trace Id
+             * Format: uuid
+             */
+            trace_id: string;
+            /** Vector Candidate Count */
+            vector_candidate_count: number;
+            /** Warnings */
+            warnings: components["schemas"]["ForensicWarning"][];
+        };
+        /** ReplayProbeCandidate */
+        ReplayProbeCandidate: {
+            /**
+             * Document Id
+             * Format: uuid
+             */
+            document_id: string;
+            /** Stage Membership */
+            stage_membership: components["schemas"]["ProbeStageMembership"][];
+        };
+        /** RetrievalConfigCatalogResponse */
+        RetrievalConfigCatalogResponse: {
+            /** Configs */
+            configs: components["schemas"]["RetrievalConfigSummary"][];
+            /** @default 1 */
+            contract_version: components["schemas"]["ContractVersion"];
+            data_origin: components["schemas"]["DataOrigin"];
+            /**
+             * Dataset Version Id
+             * Format: uuid
+             */
+            dataset_version_id: string;
         };
         /** RetrievalConfigListResponse */
         RetrievalConfigListResponse: {
@@ -255,11 +1368,64 @@ export interface components {
          * @enum {string}
          */
         RetrievalStage: "bm25_candidates" | "vector_candidates" | "rrf" | "reranker" | "final";
+        /** RrfContributionEvidenceValue */
+        RrfContributionEvidenceValue: {
+            /** Contribution */
+            contribution: number;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "rrf_contribution";
+            /** Rank */
+            rank: number;
+            /** Rank Constant */
+            rank_constant: number;
+            /**
+             * Stage
+             * @enum {string}
+             */
+            stage: "bm25_candidates" | "vector_candidates";
+            /** Weight */
+            weight: number;
+        };
+        /** RunEnvironment */
+        RunEnvironment: {
+            /** Max Concurrency */
+            max_concurrency: number;
+            /** Platform */
+            platform: string;
+            /** Pufferlab Git Revision */
+            pufferlab_git_revision: string;
+            /** Python Version */
+            python_version: string;
+            /** Query Embedding Cache Enabled */
+            query_embedding_cache_enabled: boolean;
+            /** @default perf_counter */
+            timing_source: components["schemas"]["TimingSource"];
+            /** Turbopuffer Region */
+            turbopuffer_region: string;
+            /**
+             * Warmup Query Count
+             * @default 0
+             */
+            warmup_query_count: number;
+        };
         /**
          * ScoreDirection
          * @enum {string}
          */
         ScoreDirection: "higher_is_better" | "lower_is_better";
+        /** ScoreEvidenceValue */
+        ScoreEvidenceValue: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "score";
+            score: components["schemas"]["ObservedScore"];
+            stage: components["schemas"]["RetrievalStage"];
+        };
         /**
          * ScoreKind
          * @enum {string}
@@ -283,7 +1449,7 @@ export interface components {
             debug_provenance: boolean;
             /** Expected Document Ids */
             expected_document_ids?: string[];
-            filter_override?: components["schemas"]["FilterNode"] | null;
+            filter_override?: components["schemas"]["FilterNode-Input"] | null;
             /** Query Id */
             query_id?: string | null;
             /** Query Text */
@@ -355,10 +1521,24 @@ export interface components {
             stage: components["schemas"]["TimingStage"];
         };
         /**
+         * TimingSource
+         * @enum {string}
+         */
+        TimingSource: "perf_counter" | "synthetic_unavailable";
+        /**
          * TimingStage
          * @enum {string}
          */
         TimingStage: "embed" | "turbopuffer" | "provenance_probe" | "fusion" | "rerank" | "total";
+        /** WarningEvidenceValue */
+        WarningEvidenceValue: {
+            code: components["schemas"]["ForensicWarningCode"];
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "warning";
+        };
     };
     responses: never;
     parameters: never;
@@ -406,6 +1586,753 @@ export interface operations {
             };
         };
     };
+    list_evaluation_datasets: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DatasetListResponse"];
+                };
+            };
+            /** @description The requested revision was not found. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
+                };
+            };
+            /** @description The persisted catalog is not canonical. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
+                };
+            };
+            /** @description The catalog request is invalid. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
+                };
+            };
+            /** @description The request failed unexpectedly. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
+                };
+            };
+            /** @description Stored catalog data is unavailable. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
+                };
+            };
+        };
+    };
+    get_evaluation_dataset: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                dataset_version_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DatasetDetailResponse"];
+                };
+            };
+            /** @description The requested revision was not found. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
+                };
+            };
+            /** @description The persisted catalog is not canonical. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
+                };
+            };
+            /** @description The catalog request is invalid. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
+                };
+            };
+            /** @description The request failed unexpectedly. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
+                };
+            };
+            /** @description Stored catalog data is unavailable. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
+                };
+            };
+        };
+    };
+    list_dataset_evaluation_configs: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                dataset_version_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RetrievalConfigCatalogResponse"];
+                };
+            };
+            /** @description The requested revision was not found. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
+                };
+            };
+            /** @description The persisted catalog is not canonical. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
+                };
+            };
+            /** @description The catalog request is invalid. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
+                };
+            };
+            /** @description The request failed unexpectedly. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
+                };
+            };
+            /** @description Stored catalog data is unavailable. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
+                };
+            };
+        };
+    };
+    list_evaluation_runs: {
+        parameters: {
+            query?: {
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EvalRunListResponse"];
+                };
+            };
+            /** @description The requested evaluation record was not found. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
+                };
+            };
+            /** @description The requested evaluation action conflicts. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
+                };
+            };
+            /** @description The evaluation request is invalid. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
+                };
+            };
+            /** @description The request failed unexpectedly. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
+                };
+            };
+            /** @description Evaluation data or runtime is unavailable. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
+                };
+            };
+        };
+    };
+    create_evaluation_run: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateEvalRunRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CreateEvalRunResponse"];
+                };
+            };
+            /** @description The requested evaluation record was not found. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
+                };
+            };
+            /** @description The requested evaluation action conflicts. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
+                };
+            };
+            /** @description The evaluation request is invalid. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
+                };
+            };
+            /** @description The request failed unexpectedly. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
+                };
+            };
+            /** @description Evaluation data or runtime is unavailable. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
+                };
+            };
+        };
+    };
+    get_evaluation_run: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EvalRunDetailResponse"];
+                };
+            };
+            /** @description The requested evaluation record was not found. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
+                };
+            };
+            /** @description The requested evaluation action conflicts. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
+                };
+            };
+            /** @description The evaluation request is invalid. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
+                };
+            };
+            /** @description The request failed unexpectedly. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
+                };
+            };
+            /** @description Evaluation data or runtime is unavailable. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
+                };
+            };
+        };
+    };
+    cancel_evaluation_run: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CancelEvalRunResponse"];
+                };
+            };
+            /** @description The requested evaluation record was not found. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
+                };
+            };
+            /** @description The requested evaluation action conflicts. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
+                };
+            };
+            /** @description The evaluation request is invalid. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
+                };
+            };
+            /** @description The request failed unexpectedly. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
+                };
+            };
+            /** @description Evaluation data or runtime is unavailable. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
+                };
+            };
+        };
+    };
+    export_evaluation_run: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EvalRunExportResponse"];
+                };
+            };
+            /** @description The requested evaluation record was not found. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
+                };
+            };
+            /** @description The requested evaluation action conflicts. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
+                };
+            };
+            /** @description The evaluation request is invalid. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
+                };
+            };
+            /** @description The request failed unexpectedly. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
+                };
+            };
+            /** @description Evaluation data or runtime is unavailable. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
+                };
+            };
+        };
+    };
+    get_evaluation_run_query: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: string;
+                query_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EvalRunQueryDetailResponse"];
+                };
+            };
+            /** @description The requested evaluation record was not found. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
+                };
+            };
+            /** @description The requested evaluation action conflicts. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
+                };
+            };
+            /** @description The evaluation request is invalid. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
+                };
+            };
+            /** @description The request failed unexpectedly. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
+                };
+            };
+            /** @description Evaluation data or runtime is unavailable. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
+                };
+            };
+        };
+    };
+    replay_evaluation_run_query: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: string;
+                query_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["EvalRunQueryReplayRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EvalRunQueryReplayResponse"];
+                };
+            };
+            /** @description The requested evaluation record was not found. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
+                };
+            };
+            /** @description The requested evaluation action conflicts. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
+                };
+            };
+            /** @description The evaluation request is invalid. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
+                };
+            };
+            /** @description The request failed unexpectedly. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
+                };
+            };
+            /** @description Evaluation data or runtime is unavailable. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
+                };
+            };
+        };
+    };
+    get_evaluation_regressions: {
+        parameters: {
+            query: {
+                candidate_config_id: string;
+                order?: components["schemas"]["RegressionOrder"];
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RegressionResponse"];
+                };
+            };
+            /** @description The requested evaluation record was not found. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
+                };
+            };
+            /** @description The requested evaluation action conflicts. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
+                };
+            };
+            /** @description The evaluation request is invalid. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
+                };
+            };
+            /** @description The request failed unexpectedly. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
+                };
+            };
+            /** @description Evaluation data or runtime is unavailable. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
+                };
+            };
+        };
+    };
     get_health: {
         parameters: {
             query?: never;
@@ -422,6 +2349,73 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HealthResponse"];
+                };
+            };
+        };
+    };
+    list_evaluation_query_sets: {
+        parameters: {
+            query: {
+                dataset_version_id: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["QuerySetListResponse"];
+                };
+            };
+            /** @description The requested revision was not found. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
+                };
+            };
+            /** @description The persisted catalog is not canonical. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
+                };
+            };
+            /** @description The catalog request is invalid. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
+                };
+            };
+            /** @description The request failed unexpectedly. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
+                };
+            };
+            /** @description Stored catalog data is unavailable. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
                 };
             };
         };

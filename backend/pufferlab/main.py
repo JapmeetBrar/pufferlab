@@ -10,13 +10,20 @@ from fastapi.responses import JSONResponse
 
 from pufferlab import __version__
 from pufferlab.api.errors import (
+    evaluation_error_response,
     internal_error_response,
     provider_error_response,
     search_error_response,
     validation_error_response,
 )
+from pufferlab.api.evaluation_facades import EvaluationControlFacade, EvaluationViewFacade
 from pufferlab.api.router import api_router
+from pufferlab.application.evaluation_controls import ProviderFreeEvaluationControls
+from pufferlab.application.evaluation_views import EvaluationViewService
+from pufferlab.application.view_errors import EvaluationViewError
 from pufferlab.config import Settings, get_settings
+from pufferlab.persistence.database import Database
+from pufferlab.persistence.repository import PufferLabRepository
 from pufferlab.providers.errors import ProviderError
 from pufferlab.retrieval.errors import SearchError
 from pufferlab.retrieval.runtime import RuntimeSearchBackend
@@ -27,12 +34,21 @@ def create_app(
     settings: Settings | None = None,
     *,
     search_backend: SearchBackend | None = None,
+    evaluation_views: EvaluationViewFacade | None = None,
+    evaluation_controls: EvaluationControlFacade | None = None,
 ) -> FastAPI:
     resolved_settings = settings or get_settings()
     resolved_search_backend = (
         search_backend
         if search_backend is not None
         else RuntimeSearchBackend.from_settings(resolved_settings)
+    )
+    database: Database | None = None
+    if evaluation_views is None:
+        database = Database.from_settings(resolved_settings)
+        evaluation_views = EvaluationViewService(PufferLabRepository(database.session_factory))
+    resolved_evaluation_controls = evaluation_controls or ProviderFreeEvaluationControls(
+        evaluation_views
     )
 
     @asynccontextmanager
@@ -43,6 +59,9 @@ def create_app(
             backend: SearchBackend | None = app.state.search_backend
             if backend is not None:
                 await backend.close()
+            owned_database: Database | None = app.state.database
+            if owned_database is not None:
+                owned_database.dispose()
 
     app = FastAPI(
         title="PufferLab API",
@@ -52,6 +71,9 @@ def create_app(
     )
     app.state.settings = resolved_settings
     app.state.search_backend = resolved_search_backend
+    app.state.evaluation_views = evaluation_views
+    app.state.evaluation_controls = resolved_evaluation_controls
+    app.state.database = database
 
     @app.exception_handler(SearchError)
     async def handle_search_error(_: Request, error: SearchError) -> JSONResponse:
@@ -64,6 +86,10 @@ def create_app(
     @app.exception_handler(RequestValidationError)
     async def handle_validation_error(_: Request, __: RequestValidationError) -> JSONResponse:
         return validation_error_response()
+
+    @app.exception_handler(EvaluationViewError)
+    async def handle_evaluation_error(_: Request, error: EvaluationViewError) -> JSONResponse:
+        return evaluation_error_response(error)
 
     @app.exception_handler(Exception)
     async def handle_unexpected_error(_: Request, __: Exception) -> JSONResponse:
