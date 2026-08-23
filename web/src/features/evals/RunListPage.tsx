@@ -240,7 +240,7 @@ export function RunListPage({ routeKey }: { routeKey: string }) {
           </div>
         )}
         {runs.isSuccess && runs.data.runs.length > 0 && (
-          <div className="table-scroll">
+          <div className="table-scroll" role="region" aria-label="Run history table" tabIndex={0}>
             <table className="run-table">
               <caption className="visually-hidden">Persisted evaluation runs</caption>
               <thead>

@@ -4,13 +4,70 @@ import { type FormEvent, useEffect, useRef, useState } from "react";
 import {
   ApiRequestError,
   compareSearchConfigs,
+  getCapabilities,
   getRetrievalConfigs,
+  type CapabilitiesResponse,
   type RetrievalConfigListResponse,
   type SearchCompareRequest,
 } from "../../api/client";
 import { ComparisonResults } from "./ComparisonResults";
+import { currentCapabilityReadiness } from "./capabilityState";
 
 type Config = RetrievalConfigListResponse["configs"][number];
+type LivePlaygroundCapability = CapabilitiesResponse["live_playground"];
+type CapabilityAction = NonNullable<LivePlaygroundCapability["next_action"]>;
+
+const requirementLabels: Record<LivePlaygroundCapability["requirements"][number], string> = {
+  api_key: "Server API key",
+  search_namespace: "Search namespace",
+  region: "Provider region",
+  live_search_runtime: "Local live-search runtime",
+  owned_tiny_receipt_invalid: "Valid owned-tiny receipt",
+  owned_tiny_credential_mismatch: "Creating credential",
+  owned_tiny_region_mismatch: "Creating region",
+};
+
+const actionGuidance: Record<CapabilityAction, { heading: string; instruction: string; command: string }> = {
+  configure_api_key: {
+    heading: "Configure the server API key",
+    instruction: "Set the turbopuffer API key only in the server environment, then restart PufferLab.",
+    command: "uv run pufferlab doctor --mode live-tiny",
+  },
+  configure_search_namespace: {
+    heading: "Create or select the owned tiny namespace",
+    instruction:
+      "Run the generated tiny ingestion, copy the authenticated show-tiny assignment into the server environment, then restart PufferLab.",
+    command: "uv run pufferlab dataset ingest-tiny",
+  },
+  configure_region: {
+    heading: "Configure the provider region",
+    instruction: "Set TURBOPUFFER_REGION in the server environment, then restart PufferLab.",
+    command: "uv run pufferlab doctor --mode live-tiny",
+  },
+  install_live_search_runtime: {
+    heading: "Install the local live-search runtime",
+    instruction: "Install the locked optional model dependencies, then restart PufferLab.",
+    command: "uv sync --locked --extra live-search",
+  },
+  resolve_owned_tiny_receipt: {
+    heading: "Resolve the owned-tiny receipt",
+    instruction:
+      "The fixed local ownership receipt is invalid. Stop before live comparison and follow the receipt recovery guidance.",
+    command: "uv run pufferlab doctor --mode live-tiny",
+  },
+  use_owned_tiny_credential: {
+    heading: "Use the namespace's creating credential",
+    instruction:
+      "Configure the exact API credential that created the authenticated owned-tiny receipt, then restart PufferLab.",
+    command: "uv run pufferlab doctor --mode live-tiny",
+  },
+  use_owned_tiny_region: {
+    heading: "Use the namespace's creating region",
+    instruction:
+      "Use namespace show-tiny to recover the authenticated region assignment, update the server environment, then restart PufferLab.",
+    command: "uv run pufferlab namespace show-tiny",
+  },
+};
 
 function configLabel(config: Config): string {
   return `${config.name} · ${config.mode.replaceAll("_", " ")}`;
@@ -61,9 +118,22 @@ export function Playground() {
   const [rightConfigId, setRightConfigId] = useState(
     () => new URLSearchParams(window.location.search).get("right") ?? "",
   );
+  const capabilities = useQuery({
+    queryKey: ["capabilities"],
+    queryFn: ({ signal }) => getCapabilities(signal),
+    retry: false,
+  });
+  const capabilityReadiness = currentCapabilityReadiness(capabilities);
+  const livePlayground =
+    capabilityReadiness.state === "action_required" ||
+    capabilityReadiness.state === "locally_configured"
+      ? capabilityReadiness.capability
+      : undefined;
+  const locallyConfigured = capabilityReadiness.state === "locally_configured";
   const configs = useQuery({
     queryKey: ["retrieval-configs"],
     queryFn: ({ signal }) => getRetrievalConfigs(signal),
+    enabled: locallyConfigured,
     retry: false,
   });
   const comparison = useMutation({ mutationFn: compareSearchConfigs });
@@ -76,6 +146,7 @@ export function Playground() {
     resolvedLeftId,
   );
   const canCompare =
+    locallyConfigured &&
     !comparison.isPending &&
     queryText.trim().length > 0 &&
     resolvedLeftId.length > 0 &&
@@ -115,6 +186,44 @@ export function Playground() {
           </p>
         </div>
         <form className="query-console" onSubmit={submit}>
+          {capabilityReadiness.state === "checking" && (
+            <p className="capability-loading" role="status">
+              Checking local live-search setup before enabling comparison…
+            </p>
+          )}
+          {capabilityReadiness.state === "unavailable" && (
+            <div className="capability-guidance capability-error" role="alert">
+              <div>
+                <strong>Local live-search setup could not be checked.</strong>
+                <span>Comparison stays disabled until the provider-free capability check succeeds.</span>
+              </div>
+              <button type="button" onClick={() => void capabilities.refetch()}>
+                Check again
+              </button>
+            </div>
+          )}
+          {livePlayground?.state === "action_required" && livePlayground.next_action !== null && (
+            <section className="capability-guidance" aria-labelledby="capability-guidance-heading">
+              <p className="eyebrow">Local setup required</p>
+              <h2 id="capability-guidance-heading">
+                {actionGuidance[livePlayground.next_action].heading}
+              </h2>
+              <p>{actionGuidance[livePlayground.next_action].instruction}</p>
+              <code>{actionGuidance[livePlayground.next_action].command}</code>
+              <p className="requirement-summary">
+                Still needed: {livePlayground.requirements.map((requirement) => requirementLabels[requirement]).join(", ")}.
+              </p>
+            </section>
+          )}
+          {locallyConfigured && (
+            <div className="capability-ready" role="note">
+              <strong>Live search is locally configured.</strong>
+              <span>
+                Remote namespace health and authentication have not been checked. Comparing may load
+                local models and contact turbopuffer.
+              </span>
+            </div>
+          )}
           <div className="query-field">
             <label htmlFor="query-text">Search query</label>
             <textarea
@@ -127,12 +236,12 @@ export function Playground() {
               required
             />
           </div>
-          {configs.isPending && (
+          {locallyConfigured && configs.isPending && (
             <p className="connection-message" role="status">
               Loading retrieval configurations…
             </p>
           )}
-          {configs.isError && (
+          {locallyConfigured && configs.isError && (
             <div className="config-error" role="alert">
               <span>Retrieval configurations are unavailable.</span>
               <button type="button" onClick={() => void configs.refetch()}>
@@ -140,7 +249,7 @@ export function Playground() {
               </button>
             </div>
           )}
-          {configs.isSuccess && availableConfigs.length === 0 && (
+          {locallyConfigured && configs.isSuccess && availableConfigs.length === 0 && (
             <div className="config-error" role="status">
               <span>No retrieval configurations have been seeded yet.</span>
               <button type="button" onClick={() => void configs.refetch()}>
@@ -149,7 +258,12 @@ export function Playground() {
             </div>
           )}
           <fieldset
-            disabled={!configs.isSuccess || availableConfigs.length < 2 || comparison.isPending}
+            disabled={
+              !locallyConfigured ||
+              !configs.isSuccess ||
+              availableConfigs.length < 2 ||
+              comparison.isPending
+            }
           >
             <legend>Configurations to compare</legend>
             <div className="config-grid">

@@ -50,8 +50,16 @@ jobs:
           node-version: 22
           cache: pnpm
           cache-dependency-path: web/pnpm-lock.yaml
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Install Python dependencies
+        working-directory: ${{ github.workspace }}
+        run: uv sync --locked
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
+      - name: Install pinned Chromium
+        run: pnpm exec playwright install --with-deps chromium
       - name: Check generated API types
         run: |
           pnpm generate:api
@@ -64,3 +72,13 @@ jobs:
         run: pnpm test
       - name: Build
         run: pnpm build
+      - name: Provider-free browser and accessibility smoke
+        run: pnpm test:e2e
+      - name: Upload browser failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-failure-${{ github.run_id }}-${{ github.run_attempt }}
+          path: web/test-results
+          if-no-files-found: ignore
+          retention-days: 7

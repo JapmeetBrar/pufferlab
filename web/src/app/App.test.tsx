@@ -3,6 +3,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type {
+  CapabilitiesResponse,
   RetrievalConfigListResponse,
   SearchCompareResponse,
 } from "../api/client";
@@ -41,6 +42,15 @@ const vectorConfig: Config = {
 const configs: RetrievalConfigListResponse = {
   contract_version: 1,
   configs: [bm25Config, vectorConfig],
+};
+
+const locallyConfiguredCapabilities: CapabilitiesResponse = {
+  contract_version: 1,
+  live_playground: {
+    state: "locally_configured",
+    requirements: [],
+    next_action: null,
+  },
 };
 
 const comparison: SearchCompareResponse = {
@@ -165,6 +175,9 @@ function defaultFetch(compareBody: SearchCompareResponse = comparison) {
     if (url.endsWith("/api/v1/health")) {
       return Promise.resolve(jsonResponse({ contract_version: 1, status: "ok", version: "0.1.0" }));
     }
+    if (url.endsWith("/api/v1/capabilities")) {
+      return Promise.resolve(jsonResponse(locallyConfiguredCapabilities));
+    }
     if (url.endsWith("/api/v1/configs")) {
       return Promise.resolve(jsonResponse(configs));
     }
@@ -198,7 +211,9 @@ describe("App playground", () => {
 
     expect(screen.getByRole("heading", { name: "One query. Two retrieval instincts." })).toBeVisible();
     expect(screen.getByRole("button", { name: "Compare results" })).toBeDisabled();
-    expect(await screen.findByText("API 0.1.0 ready")).toBeVisible();
+    expect(await screen.findByText("API 0.1.0 alive")).toBeVisible();
+    expect(await screen.findByText("Live search locally configured · remote unchecked")).toBeVisible();
+    expect(screen.getByText(/Remote namespace health and authentication have not been checked/)).toBeVisible();
     expect(await screen.findAllByRole("option", { name: "Exact terms · bm25" })).toHaveLength(2);
 
     fireEvent.change(screen.getByLabelText("Search query"), { target: { value: "permission mode" } });
@@ -265,6 +280,9 @@ describe("App playground", () => {
       if (url.endsWith("/api/v1/health")) {
         return Promise.resolve(jsonResponse({ contract_version: 1, status: "ok", version: "0.1.0" }));
       }
+      if (url.endsWith("/api/v1/capabilities")) {
+        return Promise.resolve(jsonResponse(locallyConfiguredCapabilities));
+      }
       if (url.endsWith("/api/v1/configs")) {
         return new Promise<Response>((resolve) => { resolveConfigs = resolve; });
       }
@@ -273,11 +291,109 @@ describe("App playground", () => {
     vi.stubGlobal("fetch", fetchMock);
     renderApp();
 
-    expect(screen.getByText("Loading retrieval configurations…")).toBeVisible();
+    expect(await screen.findByText("Loading retrieval configurations…")).toBeVisible();
     expect(screen.getByRole("button", { name: "Compare results" })).toBeDisabled();
     resolveConfigs?.(jsonResponse({ contract_version: 1, configs: [] }));
     expect(await screen.findByText("No retrieval configurations have been seeded yet.")).toBeVisible();
     expect(screen.getByRole("button", { name: "Compare results" })).toBeDisabled();
+  });
+
+  it("does not request configs until the provider-free capability check completes", async () => {
+    let resolveCapabilities: ((value: Response) => void) | undefined;
+    const fetchMock = vi.fn((input: string | URL | Request) => {
+      const url = requestUrl(input);
+      if (url.endsWith("/api/v1/health")) {
+        return Promise.resolve(jsonResponse({ contract_version: 1, status: "ok", version: "0.1.0" }));
+      }
+      if (url.endsWith("/api/v1/capabilities")) {
+        return new Promise<Response>((resolve) => { resolveCapabilities = resolve; });
+      }
+      if (url.endsWith("/api/v1/configs")) return Promise.resolve(jsonResponse(configs));
+      return Promise.reject(new Error(`Unexpected request: ${url}`));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    renderApp();
+
+    expect(screen.getByText(/Checking local live-search setup/)).toBeVisible();
+    expect(fetchMock.mock.calls.some(([input]) => requestUrl(input).endsWith("/api/v1/configs"))).toBe(false);
+    expect(screen.getByRole("button", { name: "Compare results" })).toBeDisabled();
+
+    resolveCapabilities?.(jsonResponse(locallyConfiguredCapabilities));
+    expect(await screen.findAllByRole("option", { name: "Exact terms · bm25" })).toHaveLength(2);
+    const requestedPaths = fetchMock.mock.calls.map(([input]) => new URL(requestUrl(input), window.location.origin).pathname);
+    expect(requestedPaths.indexOf("/api/v1/capabilities")).toBeLessThan(
+      requestedPaths.indexOf("/api/v1/configs"),
+    );
+  });
+
+  it("invalidates stale configured readiness while a navigation refetch fails", async () => {
+    let capabilityCount = 0;
+    let resolveFailedRefetch: ((value: Response) => void) | undefined;
+    const fetchMock = vi.fn((...args: [input: string | URL | Request, init?: RequestInit]) => {
+      const url = requestUrl(args[0]);
+      if (url.endsWith("/api/v1/health")) {
+        return Promise.resolve(jsonResponse({ contract_version: 1, status: "ok", version: "0.1.0" }));
+      }
+      if (url.endsWith("/api/v1/capabilities")) {
+        capabilityCount += 1;
+        if (capabilityCount === 1) {
+          return Promise.resolve(jsonResponse(locallyConfiguredCapabilities));
+        }
+        return new Promise<Response>((resolve) => { resolveFailedRefetch = resolve; });
+      }
+      if (url.endsWith("/api/v1/configs")) return Promise.resolve(jsonResponse(configs));
+      if (url.endsWith("/api/v1/eval-runs?limit=50")) {
+        return Promise.resolve(jsonResponse({ contract_version: 1, runs: [] }));
+      }
+      if (url.endsWith("/api/v1/datasets")) {
+        return Promise.resolve(jsonResponse({ contract_version: 1, datasets: [] }));
+      }
+      return Promise.reject(new Error(`Unexpected request: ${url}`));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    renderApp();
+
+    await screen.findAllByRole("option", { name: "Exact terms · bm25" });
+    expect(screen.getByText("Live search locally configured · remote unchecked")).toBeVisible();
+    const initialConfigRequests = fetchMock.mock.calls.filter(([input]) =>
+      requestUrl(input).endsWith("/api/v1/configs"),
+    ).length;
+
+    const navigation = screen.getByRole("navigation", { name: "Primary navigation" });
+    fireEvent.click(within(navigation).getByRole("link", { name: "Evaluation runs" }));
+    await screen.findByRole("heading", { name: "Evaluation runs", level: 1 });
+    fireEvent.click(within(navigation).getByRole("link", { name: "Playground" }));
+
+    expect(await screen.findByText(/Checking local live-search setup/)).toBeVisible();
+    expect(screen.getByText("Checking live-search setup")).toBeVisible();
+    expect(screen.queryByText("Live search locally configured · remote unchecked")).not.toBeInTheDocument();
+    expect(screen.queryByText("Live-search setup needed")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Compare results" })).toBeDisabled();
+
+    resolveFailedRefetch?.(
+      jsonResponse(
+        {
+          code: "configuration_required",
+          message: "The local capability check is unavailable.",
+          retryable: true,
+          trace_id: "capability-refetch-503",
+        },
+        503,
+      ),
+    );
+
+    expect(await screen.findByText("Live-search setup unavailable")).toBeVisible();
+    expect(screen.getByText("Local live-search setup could not be checked.")).toBeVisible();
+    expect(screen.queryByText("Live search locally configured · remote unchecked")).not.toBeInTheDocument();
+    expect(screen.queryByText("Live-search setup needed")).not.toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Search query"), { target: { value: "permission mode" } });
+    fireEvent.click(screen.getByRole("button", { name: "Compare results" }));
+
+    expect(screen.getByRole("button", { name: "Compare results" })).toBeDisabled();
+    expect(fetchMock.mock.calls.filter(([input]) =>
+      requestUrl(input).endsWith("/api/v1/configs"),
+    )).toHaveLength(initialConfigRequests);
+    expect(fetchMock.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
   });
 
   it("disables the form and announces an in-flight comparison", async () => {
@@ -286,6 +402,9 @@ describe("App playground", () => {
       const url = requestUrl(input);
       if (url.endsWith("/api/v1/health")) {
         return Promise.resolve(jsonResponse({ contract_version: 1, status: "ok", version: "0.1.0" }));
+      }
+      if (url.endsWith("/api/v1/capabilities")) {
+        return Promise.resolve(jsonResponse(locallyConfiguredCapabilities));
       }
       if (url.endsWith("/api/v1/configs")) return Promise.resolve(jsonResponse(configs));
       if (url.endsWith("/api/v1/search/compare")) {
@@ -313,6 +432,9 @@ describe("App playground", () => {
       const url = requestUrl(input);
       if (url.endsWith("/api/v1/health")) {
         return Promise.resolve(jsonResponse({ contract_version: 1, status: "ok", version: "0.1.0" }));
+      }
+      if (url.endsWith("/api/v1/capabilities")) {
+        return Promise.resolve(jsonResponse(locallyConfiguredCapabilities));
       }
       if (url.endsWith("/api/v1/configs")) return Promise.resolve(jsonResponse(configs));
       if (url.endsWith("/api/v1/search/compare")) {
@@ -346,6 +468,9 @@ describe("App playground", () => {
       if (url.endsWith("/api/v1/health")) {
         return Promise.resolve(jsonResponse({ contract_version: 1, status: "ok", version: "0.1.0" }));
       }
+      if (url.endsWith("/api/v1/capabilities")) {
+        return Promise.resolve(jsonResponse(locallyConfiguredCapabilities));
+      }
       if (url.endsWith("/api/v1/configs")) {
         configCount += 1;
         return Promise.resolve(configCount === 1 ? jsonResponse({ message: "bad gateway" }, 502) : jsonResponse(configs));
@@ -366,6 +491,41 @@ describe("App playground", () => {
     fireEvent.click(screen.getByRole("button", { name: "Compare results" }));
     expect(await screen.findByText("No comparison results were returned.")).toBeVisible();
   });
+
+  it("fetches capabilities first, renders checked-in setup guidance, and sends no comparison POST", async () => {
+    const fetchMock = vi.fn((...args: [input: string | URL | Request, init?: RequestInit]) => {
+      const url = requestUrl(args[0]);
+      if (url.endsWith("/api/v1/health")) {
+        return Promise.resolve(jsonResponse({ contract_version: 1, status: "ok", version: "0.1.0" }));
+      }
+      if (url.endsWith("/api/v1/capabilities")) {
+        return Promise.resolve(
+          jsonResponse({
+            contract_version: 1,
+            live_playground: {
+              state: "action_required",
+              requirements: ["api_key", "search_namespace", "live_search_runtime"],
+              next_action: "configure_api_key",
+            },
+          } satisfies CapabilitiesResponse),
+        );
+      }
+      return Promise.reject(new Error(`Unexpected request: ${url}`));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    renderApp();
+
+    expect(await screen.findByRole("heading", { name: "Configure the server API key" })).toBeVisible();
+    expect(screen.getByText("uv run pufferlab doctor --mode live-tiny")).toBeVisible();
+    expect(screen.getByText(/Server API key, Search namespace, Local live-search runtime/)).toBeVisible();
+    expect(screen.getByText("Live-search setup needed")).toBeVisible();
+    fireEvent.change(screen.getByLabelText("Search query"), { target: { value: "permission mode" } });
+    expect(screen.getByRole("button", { name: "Compare results" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Compare results" }));
+
+    expect(fetchMock.mock.calls.some(([input]) => requestUrl(input).endsWith("/api/v1/configs"))).toBe(false);
+    expect(fetchMock.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
+  });
 });
 
 describe("App routing", () => {
@@ -374,6 +534,9 @@ describe("App routing", () => {
       const url = requestUrl(args[0]);
       if (url.endsWith("/api/v1/health")) {
         return Promise.resolve(jsonResponse({ contract_version: 1, status: "ok", version: "0.1.0" }));
+      }
+      if (url.endsWith("/api/v1/capabilities")) {
+        return Promise.resolve(jsonResponse(locallyConfiguredCapabilities));
       }
       if (url.endsWith(`/api/v1/eval-runs/${runId}/queries/${queryId}`)) {
         return Promise.resolve(jsonResponse(queryDetail()));
@@ -442,6 +605,9 @@ describe("App routing", () => {
       const url = requestUrl(input);
       if (url.endsWith("/api/v1/health")) {
         return Promise.resolve(jsonResponse({ contract_version: 1, status: "ok", version: "0.1.0" }));
+      }
+      if (url.endsWith("/api/v1/capabilities")) {
+        return Promise.resolve(jsonResponse(locallyConfiguredCapabilities));
       }
       if (url.endsWith("/api/v1/eval-runs?limit=50")) {
         return Promise.resolve(jsonResponse({ contract_version: 1, runs: [] }));

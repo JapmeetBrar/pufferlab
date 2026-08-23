@@ -101,7 +101,7 @@ function MetricsTable({
           Latency is observed PufferLab client-wall time, not provider service time or a benchmark.
         </span>
       </div>
-      <div className="table-scroll">
+      <div className="table-scroll" role="region" aria-label="Quality metrics table" tabIndex={0}>
         <table className="metrics-table">
           <caption className="visually-hidden">
             {complete ? "Final" : "Partial"} metrics by retrieval configuration
@@ -273,7 +273,12 @@ function RegressionSection({
                   <p>Review the explicit exclusion counts above; missing evidence is not scored as zero.</p>
                 </div>
               ) : (
-                <div className="table-scroll">
+                <div
+                  className="table-scroll"
+                  role="region"
+                  aria-label="Per-query regression table"
+                  tabIndex={0}
+                >
                   <table className="regression-table">
                     <caption className="visually-hidden">
                       Per-query {regressions.data.order} for the selected candidate
