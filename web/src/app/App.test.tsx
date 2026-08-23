@@ -6,6 +6,13 @@ import type {
   RetrievalConfigListResponse,
   SearchCompareResponse,
 } from "../api/client";
+import {
+  candidateIds,
+  makeRunView,
+  regressionResponse,
+  runDetail,
+  runId,
+} from "../test/evalFixtures";
 import { App } from "./App";
 
 const leftId = "11111111-1111-4111-8111-111111111111";
@@ -354,5 +361,126 @@ describe("App playground", () => {
     fireEvent.change(screen.getByLabelText("Search query"), { target: { value: "no matches" } });
     fireEvent.click(screen.getByRole("button", { name: "Compare results" }));
     expect(await screen.findByText("No comparison results were returned.")).toBeVisible();
+  });
+});
+
+describe("App routing", () => {
+  it("uses semantic navigation, moves focus, and restores history without reloading", async () => {
+    const fetchMock = vi.fn((input: string | URL | Request) => {
+      const url = requestUrl(input);
+      if (url.endsWith("/api/v1/health")) {
+        return Promise.resolve(jsonResponse({ contract_version: 1, status: "ok", version: "0.1.0" }));
+      }
+      if (url.endsWith("/api/v1/eval-runs?limit=50")) {
+        return Promise.resolve(jsonResponse({ contract_version: 1, runs: [] }));
+      }
+      if (url.endsWith("/api/v1/datasets")) {
+        return Promise.resolve(jsonResponse({ contract_version: 1, datasets: [] }));
+      }
+      if (url.endsWith("/api/v1/configs")) return Promise.resolve(jsonResponse(configs));
+      return Promise.reject(new Error(`Unexpected request: ${url}`));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    window.history.replaceState(null, "", "/");
+    renderApp();
+
+    const playgroundHeading = screen.getByRole("heading", {
+      name: "One query. Two retrieval instincts.",
+      level: 1,
+    });
+    expect(playgroundHeading).toHaveFocus();
+    const navigation = screen.getByRole("navigation", { name: "Primary navigation" });
+    fireEvent.click(within(navigation).getByRole("link", { name: "Evaluation runs" }));
+
+    const runsHeading = await screen.findByRole("heading", { name: "Evaluation runs", level: 1 });
+    expect(runsHeading).toHaveFocus();
+    expect(window.location.pathname).toBe("/runs");
+    expect(within(navigation).getByRole("link", { name: "Evaluation runs" })).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
+
+    window.history.back();
+    await waitFor(() => expect(window.location.pathname).toBe("/"));
+    expect(await screen.findByRole("heading", { name: "One query. Two retrieval instincts." })).toHaveFocus();
+  });
+
+  it("keeps regression candidate, order, and limit in navigable URL state", async () => {
+    const view = makeRunView("completed", { synthetic: true });
+    const fetchMock = vi.fn((input: string | URL | Request) => {
+      const url = requestUrl(input);
+      if (url.endsWith("/api/v1/health")) {
+        return Promise.resolve(jsonResponse({ contract_version: 1, status: "ok", version: "0.1.0" }));
+      }
+      if (url.includes(`/api/v1/eval-runs/${runId}/regressions?`)) {
+        const parsed = new URL(url, window.location.origin);
+        const order = parsed.searchParams.get("order") === "gains" ? "gains" : "regressions";
+        return Promise.resolve(jsonResponse({ ...regressionResponse, order }));
+      }
+      if (url.endsWith(`/api/v1/eval-runs/${runId}`)) {
+        return Promise.resolve(jsonResponse(runDetail(view)));
+      }
+      return Promise.reject(new Error(`Unexpected request: ${url}`));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    window.history.replaceState(
+      null,
+      "",
+      `/runs/${runId}?candidate=${candidateIds[0]}&order=regressions&limit=10`,
+    );
+    renderApp();
+
+    expect(await screen.findByRole("heading", { name: "Evaluation run", level: 1 })).toHaveFocus();
+    const order = await screen.findByLabelText("Order");
+    fireEvent.change(order, { target: { value: "gains" } });
+    await waitFor(() => expect(new URLSearchParams(window.location.search).get("order")).toBe("gains"));
+    expect(new URLSearchParams(window.location.search).get("candidate")).toBe(candidateIds[0]);
+    expect(new URLSearchParams(window.location.search).get("limit")).toBe("10");
+
+    window.history.back();
+    await waitFor(() => expect(new URLSearchParams(window.location.search).get("order")).toBe("regressions"));
+    expect(screen.getByLabelText("Order")).toHaveValue("regressions");
+  });
+
+  it("renders and focuses a route-level not-found state", () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL | Request) => {
+        if (requestUrl(input).endsWith("/api/v1/health")) {
+          return Promise.resolve(jsonResponse({ contract_version: 1, status: "ok", version: "0.1.0" }));
+        }
+        return Promise.reject(new Error("Unexpected request"));
+      }),
+    );
+    window.history.replaceState(null, "", "/missing");
+    renderApp();
+
+    expect(screen.getByRole("main")).toHaveAttribute("id", "main-content");
+    expect(screen.getByRole("heading", { name: "Page not found", level: 1 })).toHaveFocus();
+    expect(screen.getByRole("link", { name: "View evaluation runs" })).toHaveAttribute("href", "/runs");
+  });
+
+  it("never fetches mutation routes while displaying a synthetic run", async () => {
+    const fetchMock = vi.fn((...args: [input: string | URL | Request, init?: RequestInit]) => {
+      const url = requestUrl(args[0]);
+      if (url.endsWith("/api/v1/health")) {
+        return Promise.resolve(jsonResponse({ contract_version: 1, status: "ok", version: "0.1.0" }));
+      }
+      if (url.endsWith(`/api/v1/eval-runs/${runId}`)) {
+        return Promise.resolve(jsonResponse(runDetail(makeRunView("completed", { synthetic: true }))));
+      }
+      if (url.includes(`/api/v1/eval-runs/${runId}/regressions?`)) {
+        return Promise.resolve(jsonResponse(regressionResponse));
+      }
+      return Promise.reject(new Error(`Unexpected request: ${url}`));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    window.history.replaceState(null, "", `/runs/${runId}`);
+    renderApp();
+
+    expect(await screen.findByText(/create and replay actions are disabled/i)).toBeVisible();
+    expect(screen.queryByRole("button", { name: /replay/i })).not.toBeInTheDocument();
+    expect(fetchMock.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
+    expect(fetchMock.mock.calls.every(([, init]) => init?.body === undefined)).toBe(true);
   });
 });
