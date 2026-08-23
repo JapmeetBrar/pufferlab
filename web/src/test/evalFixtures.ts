@@ -4,6 +4,8 @@ import type {
   EvaluationQuerySetListResponse,
   EvaluationRunDetailResponse,
   EvaluationRunListResponse,
+  EvaluationRunQueryDetailResponse,
+  EvaluationRunQueryReplayResponse,
   RegressionResponse,
 } from "../api/evaluations";
 
@@ -18,6 +20,12 @@ export const candidateIds = [
 ] as const;
 export const queryId = "80000000-0000-4000-8000-000000000008";
 export const documentId = "90000000-0000-4000-8000-000000000009";
+export const secondDocumentId = "91000000-0000-4000-8000-000000000009";
+export const primaryObservedAt = "2026-08-23T13:00:00Z";
+export const primaryTrace = "a1000000-0000-4000-8000-000000000001";
+export const rightPrimaryTrace = "a2000000-0000-4000-8000-000000000002";
+export const probeTrace = "a3000000-0000-4000-8000-000000000003";
+export const failedProbeTrace = "a4000000-0000-4000-8000-000000000004";
 
 type RunView = EvaluationRunListResponse["runs"][number];
 type RunStatus = RunView["run"]["status"];
@@ -236,6 +244,260 @@ export const regressionResponse: RegressionResponse = {
         { document_id: documentId, relevance_grade: 2, baseline_rank: 1, candidate_rank: 8 },
       ],
       playground_url: `/playground?run=${runId}&query=${queryId}&left=${baselineId}&right=${candidateIds[0]}&document=${documentId}`,
+    },
+  ],
+};
+
+function successOutcome(configId: string, rank: number): EvaluationRunQueryDetailResponse["outcomes"][number] {
+  return {
+    run_id: runId,
+    query_id: queryId,
+    config_id: configId,
+    created_at: "2026-08-23T12:05:00Z",
+    outcome: {
+      contract_version: 1,
+      kind: "success",
+      ranked_document_ids: rank === 1 ? [documentId, secondDocumentId] : [secondDocumentId, documentId],
+      metrics: { ndcg_at_10: 0.75, recall_at_50: 1, mrr_at_10: 0.5 },
+      timing_source: "perf_counter",
+      total_client_wall_latency_ms: 12.5,
+      stage_timings: [{ stage: "total", duration_ms: 12.5, measurement: "client_wall_clock" }],
+      candidate_counts: { final: 2 },
+      warnings: [],
+      trace_id: configId === baselineId ? primaryTrace : rightPrimaryTrace,
+    },
+  };
+}
+
+export function queryDetail(
+  origin: "live" | "synthetic_demo" = "live",
+): EvaluationRunQueryDetailResponse {
+  return {
+    contract_version: 1,
+    run_id: runId,
+    data_origin: origin,
+    query: {
+      id: queryId,
+      external_id: "authored-query-8",
+      text: "authored local query text",
+      qrels: [
+        { document_id: documentId, relevance_grade: 2 },
+        { document_id: secondDocumentId, relevance_grade: 1 },
+      ],
+      tags: ["authored"],
+      filters: null,
+    },
+    baseline_config_id: baselineId,
+    candidate_config_ids: [...candidateIds],
+    configs: evaluationConfigs,
+    outcomes: origin === "synthetic_demo" ? [] : [
+      successOutcome(baselineId, 1),
+      successOutcome(candidateIds[0], 2),
+      {
+        run_id: runId,
+        query_id: queryId,
+        config_id: candidateIds[1],
+        created_at: "2026-08-23T12:05:00Z",
+        outcome: {
+          contract_version: 1,
+          kind: "failure",
+          code: "provider_error",
+          message: "A safe recorded failure.",
+          operation: "evaluate_query",
+          retryable: true,
+          total_client_wall_latency_ms: 9,
+          trace_id: "a5000000-0000-4000-8000-000000000005",
+        },
+      },
+    ],
+    rank_changes: candidateIds.map((candidateConfigId, index) => ({
+      candidate_config_id: candidateConfigId,
+      changes: [{
+        document_id: documentId,
+        relevance_grade: 2,
+        baseline_rank: 1,
+        candidate_rank: index === 0 ? 2 : null,
+      }],
+    })),
+    attribution: {
+      source_name: "PufferLab authored test data",
+      source_url: "https://example.com/source",
+      license_name: "Test license",
+      license_url: "https://example.com/license",
+    },
+    original_stage_evidence_available: false,
+    live_replay_policy_permitted: origin === "live",
+  };
+}
+
+function evaluationConfig(configId: string): (typeof evaluationConfigs)[number] {
+  const config = evaluationConfigs.find((item) => item.id === configId);
+  if (config === undefined) throw new Error(`Missing authored config fixture ${configId}`);
+  return config;
+}
+
+export const replayResponse: EvaluationRunQueryReplayResponse = {
+  contract_version: 1,
+  run_id: runId,
+  query_id: queryId,
+  data_origin: "live",
+  config_ids: [baselineId, candidateIds[0]],
+  primary_origin: "live_replay_primary",
+  primary_observed_at: primaryObservedAt,
+  original_stage_evidence_available: false,
+  observability_notice: "Primary and probe evidence are separate observations.",
+  primary: {
+    contract_version: 1,
+    query_id: queryId,
+    query_text: "authored local query text",
+    observability_notice: "Only returned ranks, scores, and stages are displayed.",
+    overlap: [{
+      left_config_id: baselineId,
+      right_config_id: candidateIds[0],
+      intersection_count: 1,
+      left_count: 1,
+      right_count: 1,
+      jaccard: 1,
+    }],
+    rank_movements: [{
+      document_id: documentId,
+      ranks_by_config: { [baselineId]: 1, [candidateIds[0]]: 2 },
+      max_absolute_delta: 1,
+    }],
+    results: [
+      {
+        config: evaluationConfig(baselineId),
+        trace_id: primaryTrace,
+        candidate_counts: { final: 1 },
+        timings: [{ stage: "total", duration_ms: 11, measurement: "client_wall_clock" }],
+        warnings: [],
+        hits: [{
+          document_id: documentId,
+          external_id: "authored-doc-9",
+          title: "Authored relevant document",
+          body_excerpt: "A locally authored excerpt for deterministic browser tests.",
+          url: "https://example.com/document",
+          final_rank: 1,
+          relevance_grade: 2,
+          final_score: {
+            value: 8.5,
+            kind: "bm25",
+            direction: "higher_is_better",
+            source: "turbopuffer_dist",
+          },
+          highlights: [],
+          stage_membership: [{
+            stage: "final",
+            rank: 1,
+            score: {
+              value: 8.5,
+              kind: "bm25",
+              direction: "higher_is_better",
+              source: "turbopuffer_dist",
+            },
+          }],
+          attributes: {},
+        }],
+      },
+      {
+        config: evaluationConfig(candidateIds[0]),
+        trace_id: rightPrimaryTrace,
+        candidate_counts: { final: 1 },
+        timings: [{ stage: "total", duration_ms: 14, measurement: "client_wall_clock" }],
+        warnings: [],
+        hits: [{
+          document_id: documentId,
+          external_id: "authored-doc-9",
+          title: "Authored relevant document",
+          body_excerpt: "A locally authored excerpt for deterministic browser tests.",
+          url: null,
+          final_rank: 2,
+          relevance_grade: 2,
+          final_score: {
+            value: 0.12,
+            kind: "vector_distance",
+            direction: "lower_is_better",
+            source: "turbopuffer_dist",
+          },
+          highlights: [],
+          stage_membership: [],
+          attributes: {},
+        }],
+      },
+    ],
+  },
+  counterfactual_probes: [{
+    origin: "live_replay_counterfactual_probe",
+    config_id: candidateIds[0],
+    observed_at: "2026-08-23T13:00:01Z",
+    trace_id: probeTrace,
+    duration_ms: 3.5,
+    bm25_candidate_count: 20,
+    vector_candidate_count: 20,
+    candidates: [{
+      document_id: documentId,
+      stage_membership: [{
+        stage: "vector_candidates",
+        rank: 3,
+        score: {
+          value: 0.12,
+          kind: "vector_distance",
+          direction: "lower_is_better",
+          source: "turbopuffer_dist",
+        },
+      }],
+    }],
+    warnings: [],
+  }],
+  failed_counterfactual_probes: [{
+    origin: "live_replay_counterfactual_probe",
+    config_id: baselineId,
+    observed_at: "2026-08-23T13:00:02Z",
+    trace_id: failedProbeTrace,
+    warning: { code: "provenance_probe_failed", message: "The separate probe was unavailable." },
+  }],
+  observations: [
+    {
+      code: "outside_vector_candidates",
+      statement: "The target was absent from the returned bounded vector candidates.",
+      config_id: candidateIds[0],
+      document_id: documentId,
+      origin: "live_replay_counterfactual_probe",
+      observed_at: "2026-08-23T13:00:01Z",
+      trace_id: probeTrace,
+      certainty: "counterfactual",
+      evidence: [
+        { label: "rank", value: { kind: "rank", stage: "vector_candidates", rank: 3 }, origin: "live_replay_counterfactual_probe", observed_at: "2026-08-23T13:00:01Z", trace_id: probeTrace },
+        { label: "score", value: { kind: "score", stage: "vector_candidates", score: { value: 0.12, kind: "vector_distance", direction: "lower_is_better", source: "turbopuffer_dist" } }, origin: "live_replay_counterfactual_probe", observed_at: "2026-08-23T13:00:01Z", trace_id: probeTrace },
+        { label: "count", value: { kind: "candidate_count", stage: "vector_candidates", count: 20 }, origin: "live_replay_counterfactual_probe", observed_at: "2026-08-23T13:00:01Z", trace_id: probeTrace },
+        { label: "presence", value: { kind: "presence", stage: "vector_candidates", present: true }, origin: "live_replay_counterfactual_probe", observed_at: "2026-08-23T13:00:01Z", trace_id: probeTrace },
+        { label: "filter", value: { kind: "filter_result", field: "source", matched: true }, origin: "live_replay_counterfactual_probe", observed_at: "2026-08-23T13:00:01Z", trace_id: probeTrace },
+        { label: "warning", value: { kind: "warning", code: "provenance_snapshot_differs" }, origin: "live_replay_counterfactual_probe", observed_at: "2026-08-23T13:00:01Z", trace_id: probeTrace },
+      ],
+    },
+    {
+      code: "outside_fusion_top_k",
+      statement: "The bounded returned inputs support this arithmetic only.",
+      config_id: candidateIds[0],
+      document_id: documentId,
+      origin: "client_computed",
+      observed_at: "2026-08-23T13:00:01Z",
+      trace_id: probeTrace,
+      certainty: "counterfactual",
+      evidence: [{
+        label: "rrf_contribution",
+        value: {
+          kind: "rrf_contribution",
+          stage: "vector_candidates",
+          rank: 3,
+          weight: 1,
+          rank_constant: 60,
+          contribution: 1 / 63,
+        },
+        origin: "live_replay_counterfactual_probe",
+        observed_at: "2026-08-23T13:00:01Z",
+        trace_id: probeTrace,
+      }],
     },
   ],
 };

@@ -33,6 +33,18 @@ export type CancelEvaluationRunResponse = JsonResponse<
   "post",
   200
 >;
+export type EvaluationRunQueryDetailResponse = JsonResponse<
+  "/api/v1/eval-runs/{run_id}/queries/{query_id}",
+  "get",
+  200
+>;
+export type EvaluationRunQueryReplayRequest =
+  paths["/api/v1/eval-runs/{run_id}/queries/{query_id}/replay"]["post"]["requestBody"]["content"]["application/json"];
+export type EvaluationRunQueryReplayResponse = JsonResponse<
+  "/api/v1/eval-runs/{run_id}/queries/{query_id}/replay",
+  "post",
+  200
+>;
 export type RegressionQuery =
   paths["/api/v1/eval-runs/{run_id}/regressions"]["get"]["parameters"]["query"];
 
@@ -123,4 +135,34 @@ export async function cancelEvaluationRun(
     signal,
   });
   return readJsonResponse<CancelEvaluationRunResponse>(response);
+}
+
+export async function getEvaluationRunQuery(
+  runId: string,
+  queryId: string,
+  signal?: AbortSignal,
+): Promise<EvaluationRunQueryDetailResponse> {
+  const response = await fetch(
+    apiUrl(`/api/v1/eval-runs/${encoded(runId)}/queries/${encoded(queryId)}`),
+    { signal },
+  );
+  return readJsonResponse<EvaluationRunQueryDetailResponse>(response);
+}
+
+export async function replayEvaluationRunQuery(
+  runId: string,
+  queryId: string,
+  request: EvaluationRunQueryReplayRequest,
+  signal?: AbortSignal,
+): Promise<EvaluationRunQueryReplayResponse> {
+  const response = await fetch(
+    apiUrl(`/api/v1/eval-runs/${encoded(runId)}/queries/${encoded(queryId)}/replay`),
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request),
+      signal,
+    },
+  );
+  return readJsonResponse<EvaluationRunQueryReplayResponse>(response);
 }
