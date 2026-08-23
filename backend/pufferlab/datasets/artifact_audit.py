@@ -11,15 +11,30 @@ from pathlib import Path, PurePosixPath
 from pufferlab.datasets.cqadupstack import ForbiddenTokenWindow, SourceLock
 
 _FORBIDDEN_SUFFIXES = {
+    ".7z",
+    ".arrow",
+    ".bin",
+    ".bz2",
+    ".csv",
     ".db",
+    ".feather",
+    ".gz",
     ".log",
     ".npy",
     ".npz",
+    ".parquet",
     ".partial",
+    ".pickle",
+    ".pkl",
+    ".safetensors",
     ".sqlite",
     ".sqlite3",
+    ".tar",
     ".tsv",
+    ".tgz",
+    ".xz",
     ".zip",
+    ".zst",
 }
 _FORBIDDEN_PATH_PARTS = {"cache", "evidence", "exports", "processed", "raw"}
 _ALLOWED_JSONL = {
@@ -148,6 +163,10 @@ def _path_violation(relative: str) -> str | None:
         return "non-synthetic JSONL must remain outside Git"
     if suffix in _FORBIDDEN_SUFFIXES:
         return f"{suffix} artifacts must remain outside Git"
+    if re.search(r"(?:\.db|\.sqlite3?)(?:-(?:journal|shm|wal))$", path.name.lower()):
+        return "database journal artifacts must remain outside Git"
+    if re.search(r"\.log(?:\.\d+)?$", path.name.lower()):
+        return "log artifacts must remain outside Git"
     if _FORBIDDEN_PATH_PARTS.intersection(part.lower() for part in path.parts):
         return "raw/processed/cache/export/evidence directories must remain outside Git"
     return None

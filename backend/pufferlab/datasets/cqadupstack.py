@@ -294,6 +294,16 @@ class ProcessedPackManifest(_StrictModel):
     content_sha256: Sha256
     files: tuple[ProcessedFile, ...] = Field(min_length=3, max_length=3)
 
+    @model_validator(mode="after")
+    def file_inventory_is_canonical(self) -> ProcessedPackManifest:
+        if tuple(file.name for file in self.files) != (
+            "documents.jsonl",
+            "queries.jsonl",
+            "qrels.jsonl",
+        ):
+            raise ValueError("processed pack file inventory must be canonical")
+        return self
+
 
 type CurationTag = Literal["exact_token", "semantic", "hybrid", "reranker"]
 

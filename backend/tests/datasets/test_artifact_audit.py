@@ -27,6 +27,12 @@ def test_path_inventory_rejects_real_dataset_artifact_shapes() -> None:
     )
     assert _path_violation("fixtures/tiny-corpus/documents.jsonl") is None
     assert _path_violation("datasets/cqadupstack-unix/source-lock.json") is None
+    assert _path_violation("outside/embeddings.bin") == (".bin artifacts must remain outside Git")
+    assert _path_violation("outside/archive.tar.gz") == (".gz artifacts must remain outside Git")
+    assert _path_violation("outside/pufferlab.sqlite3-wal") == (
+        "database journal artifacts must remain outside Git"
+    )
+    assert _path_violation("outside/evaluation.log.1") == ("log artifacts must remain outside Git")
 
 
 def test_content_inventory_rejects_archives_and_casefolded_hashed_source_windows() -> None:

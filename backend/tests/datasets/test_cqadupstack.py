@@ -20,6 +20,8 @@ from pufferlab.datasets.cqadupstack import (
     ForbiddenTokenWindow,
     MemberLock,
     PreprocessingLock,
+    ProcessedFile,
+    ProcessedPackManifest,
     RepositoryLock,
     SourceLock,
     curate_query_ids,
@@ -155,6 +157,24 @@ def test_curated_manifest_rejects_text_bearing_or_hash_drift() -> None:
 
     with pytest.raises(ValueError, match="Extra inputs are not permitted"):
         CuratedQueryManifest.model_validate(payload)
+
+
+def test_processed_manifest_rejects_noncanonical_file_inventory() -> None:
+    file = ProcessedFile(name="documents.jsonl", records=1, sha256="a" * 64)
+    payload = {
+        "format_version": 1,
+        "dataset": "CQADupStack",
+        "subset": "unix",
+        "archive_sha256": "b" * 64,
+        "source_lock_sha256": "c" * 64,
+        "preprocessing_version": "pufferlab-cqadupstack-unix-v1",
+        "preprocessing_sha256": "d" * 64,
+        "content_sha256": "e" * 64,
+        "files": (file, file, file),
+    }
+
+    with pytest.raises(ValueError, match="file inventory must be canonical"):
+        ProcessedPackManifest.model_validate(payload)
 
 
 def test_processed_pack_and_id_only_manifest_load_for_ingestion(tmp_path: Path) -> None:
