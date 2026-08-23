@@ -2,12 +2,14 @@
 
 PufferLab is a search evaluation and query-forensics workbench for turbopuffer. It compares lexical, vector, hybrid, and reranked retrieval; runs judged query sets; surfaces regressions; and opens failures in an evidence-based debugger.
 
-The project is currently completing its first live vertical-slice milestone. See:
+The project has completed its first live vertical slice and is building its durable judged-evaluation
+milestone. See:
 
 - [Project decision and implementation brief](docs/project-decision-and-implementation-brief.md)
 - [Shared contracts](docs/contracts.md)
 - [Implementation plan](docs/implementation-plan.md)
 - [Milestone 1 live-verification runbook](docs/live-verification.md)
+- [CQADupStack Unix local-pack runbook](docs/datasets/cqadupstack-unix.md)
 
 ## Prerequisites
 
@@ -82,6 +84,7 @@ uv run ruff format --check backend scripts
 uv run mypy
 uv run pytest
 uv run python scripts/generate_openapi.py --check
+uv run python scripts/audit_dataset_artifacts.py
 
 cd web
 pnpm lint

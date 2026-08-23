@@ -1,0 +1,507 @@
+{
+  "format_version": 1,
+  "selection_version": "pufferlab-curated-50-v1",
+  "source_lock_sha256": "85484de1703c8754e67ddf5e9658df2728a0adae8656b8876f9244b56538f095",
+  "query_count": 50,
+  "selection_sha256": "4613bf82f4e8cc4e856fc9c087719407445df96586ff9d690035691a62b9c4bc",
+  "entries": [
+    {
+      "query_id": "4561",
+      "primary_tag": "hybrid",
+      "tags": [
+        "exact_token",
+        "semantic",
+        "hybrid",
+        "reranker"
+      ],
+      "reason": "Selected for lexical anchors plus broader intent that make fusion observable."
+    },
+    {
+      "query_id": "4595",
+      "primary_tag": "exact_token",
+      "tags": [
+        "exact_token",
+        "semantic",
+        "hybrid"
+      ],
+      "reason": "Selected for lexical structure that makes exact-token retrieval observable."
+    },
+    {
+      "query_id": "4770",
+      "primary_tag": "reranker",
+      "tags": [
+        "exact_token",
+        "semantic",
+        "hybrid",
+        "reranker"
+      ],
+      "reason": "Selected because multiple judgments make second-stage ordering measurable."
+    },
+    {
+      "query_id": "4961",
+      "primary_tag": "hybrid",
+      "tags": [
+        "exact_token",
+        "semantic",
+        "hybrid"
+      ],
+      "reason": "Selected for lexical anchors plus broader intent that make fusion observable."
+    },
+    {
+      "query_id": "5478",
+      "primary_tag": "semantic",
+      "tags": [
+        "exact_token",
+        "semantic",
+        "hybrid",
+        "reranker"
+      ],
+      "reason": "Selected for multi-token natural-language intent suited to semantic retrieval."
+    },
+    {
+      "query_id": "6790",
+      "primary_tag": "reranker",
+      "tags": [
+        "exact_token",
+        "semantic",
+        "hybrid",
+        "reranker"
+      ],
+      "reason": "Selected because multiple judgments make second-stage ordering measurable."
+    },
+    {
+      "query_id": "9053",
+      "primary_tag": "semantic",
+      "tags": [
+        "exact_token",
+        "semantic",
+        "hybrid"
+      ],
+      "reason": "Selected for multi-token natural-language intent suited to semantic retrieval."
+    },
+    {
+      "query_id": "9971",
+      "primary_tag": "exact_token",
+      "tags": [
+        "exact_token",
+        "semantic",
+        "hybrid",
+        "reranker"
+      ],
+      "reason": "Selected for lexical structure that makes exact-token retrieval observable."
+    },
+    {
+      "query_id": "10692",
+      "primary_tag": "reranker",
+      "tags": [
+        "semantic",
+        "reranker"
+      ],
+      "reason": "Selected because multiple judgments make second-stage ordering measurable."
+    },
+    {
+      "query_id": "12949",
+      "primary_tag": "hybrid",
+      "tags": [
+        "exact_token",
+        "semantic",
+        "hybrid"
+      ],
+      "reason": "Selected for lexical anchors plus broader intent that make fusion observable."
+    },
+    {
+      "query_id": "13157",
+      "primary_tag": "semantic",
+      "tags": [
+        "semantic"
+      ],
+      "reason": "Selected for multi-token natural-language intent suited to semantic retrieval."
+    },
+    {
+      "query_id": "13214",
+      "primary_tag": "hybrid",
+      "tags": [
+        "exact_token",
+        "semantic",
+        "hybrid"
+      ],
+      "reason": "Selected for lexical anchors plus broader intent that make fusion observable."
+    },
+    {
+      "query_id": "13996",
+      "primary_tag": "exact_token",
+      "tags": [
+        "exact_token",
+        "semantic",
+        "hybrid",
+        "reranker"
+      ],
+      "reason": "Selected for lexical structure that makes exact-token retrieval observable."
+    },
+    {
+      "query_id": "16120",
+      "primary_tag": "exact_token",
+      "tags": [
+        "exact_token",
+        "semantic",
+        "hybrid",
+        "reranker"
+      ],
+      "reason": "Selected for lexical structure that makes exact-token retrieval observable."
+    },
+    {
+      "query_id": "19520",
+      "primary_tag": "reranker",
+      "tags": [
+        "semantic",
+        "reranker"
+      ],
+      "reason": "Selected because multiple judgments make second-stage ordering measurable."
+    },
+    {
+      "query_id": "26035",
+      "primary_tag": "exact_token",
+      "tags": [
+        "exact_token",
+        "semantic",
+        "hybrid"
+      ],
+      "reason": "Selected for lexical structure that makes exact-token retrieval observable."
+    },
+    {
+      "query_id": "30925",
+      "primary_tag": "hybrid",
+      "tags": [
+        "exact_token",
+        "semantic",
+        "hybrid",
+        "reranker"
+      ],
+      "reason": "Selected for lexical anchors plus broader intent that make fusion observable."
+    },
+    {
+      "query_id": "32210",
+      "primary_tag": "reranker",
+      "tags": [
+        "exact_token",
+        "semantic",
+        "hybrid",
+        "reranker"
+      ],
+      "reason": "Selected because multiple judgments make second-stage ordering measurable."
+    },
+    {
+      "query_id": "34970",
+      "primary_tag": "reranker",
+      "tags": [
+        "semantic",
+        "reranker"
+      ],
+      "reason": "Selected because multiple judgments make second-stage ordering measurable."
+    },
+    {
+      "query_id": "35416",
+      "primary_tag": "exact_token",
+      "tags": [
+        "exact_token",
+        "semantic",
+        "hybrid",
+        "reranker"
+      ],
+      "reason": "Selected for lexical structure that makes exact-token retrieval observable."
+    },
+    {
+      "query_id": "41336",
+      "primary_tag": "hybrid",
+      "tags": [
+        "exact_token",
+        "semantic",
+        "hybrid",
+        "reranker"
+      ],
+      "reason": "Selected for lexical anchors plus broader intent that make fusion observable."
+    },
+    {
+      "query_id": "41770",
+      "primary_tag": "semantic",
+      "tags": [
+        "semantic"
+      ],
+      "reason": "Selected for multi-token natural-language intent suited to semantic retrieval."
+    },
+    {
+      "query_id": "43481",
+      "primary_tag": "reranker",
+      "tags": [
+        "semantic",
+        "reranker"
+      ],
+      "reason": "Selected because multiple judgments make second-stage ordering measurable."
+    },
+    {
+      "query_id": "43617",
+      "primary_tag": "semantic",
+      "tags": [
+        "semantic",
+        "reranker"
+      ],
+      "reason": "Selected for multi-token natural-language intent suited to semantic retrieval."
+    },
+    {
+      "query_id": "46796",
+      "primary_tag": "semantic",
+      "tags": [
+        "semantic"
+      ],
+      "reason": "Selected for multi-token natural-language intent suited to semantic retrieval."
+    },
+    {
+      "query_id": "47330",
+      "primary_tag": "semantic",
+      "tags": [
+        "exact_token",
+        "semantic",
+        "hybrid"
+      ],
+      "reason": "Selected for multi-token natural-language intent suited to semantic retrieval."
+    },
+    {
+      "query_id": "50508",
+      "primary_tag": "exact_token",
+      "tags": [
+        "exact_token",
+        "semantic",
+        "hybrid",
+        "reranker"
+      ],
+      "reason": "Selected for lexical structure that makes exact-token retrieval observable."
+    },
+    {
+      "query_id": "52268",
+      "primary_tag": "semantic",
+      "tags": [
+        "semantic"
+      ],
+      "reason": "Selected for multi-token natural-language intent suited to semantic retrieval."
+    },
+    {
+      "query_id": "55875",
+      "primary_tag": "reranker",
+      "tags": [
+        "semantic",
+        "reranker"
+      ],
+      "reason": "Selected because multiple judgments make second-stage ordering measurable."
+    },
+    {
+      "query_id": "57239",
+      "primary_tag": "hybrid",
+      "tags": [
+        "exact_token",
+        "semantic",
+        "hybrid"
+      ],
+      "reason": "Selected for lexical anchors plus broader intent that make fusion observable."
+    },
+    {
+      "query_id": "71585",
+      "primary_tag": "semantic",
+      "tags": [
+        "exact_token",
+        "semantic",
+        "hybrid",
+        "reranker"
+      ],
+      "reason": "Selected for multi-token natural-language intent suited to semantic retrieval."
+    },
+    {
+      "query_id": "78182",
+      "primary_tag": "hybrid",
+      "tags": [
+        "exact_token",
+        "semantic",
+        "hybrid"
+      ],
+      "reason": "Selected for lexical anchors plus broader intent that make fusion observable."
+    },
+    {
+      "query_id": "80088",
+      "primary_tag": "reranker",
+      "tags": [
+        "exact_token",
+        "semantic",
+        "hybrid",
+        "reranker"
+      ],
+      "reason": "Selected because multiple judgments make second-stage ordering measurable."
+    },
+    {
+      "query_id": "85757",
+      "primary_tag": "exact_token",
+      "tags": [
+        "exact_token",
+        "semantic",
+        "hybrid"
+      ],
+      "reason": "Selected for lexical structure that makes exact-token retrieval observable."
+    },
+    {
+      "query_id": "88602",
+      "primary_tag": "exact_token",
+      "tags": [
+        "exact_token",
+        "semantic",
+        "hybrid"
+      ],
+      "reason": "Selected for lexical structure that makes exact-token retrieval observable."
+    },
+    {
+      "query_id": "90244",
+      "primary_tag": "reranker",
+      "tags": [
+        "exact_token",
+        "semantic",
+        "hybrid",
+        "reranker"
+      ],
+      "reason": "Selected because multiple judgments make second-stage ordering measurable."
+    },
+    {
+      "query_id": "92920",
+      "primary_tag": "exact_token",
+      "tags": [
+        "exact_token",
+        "semantic",
+        "hybrid"
+      ],
+      "reason": "Selected for lexical structure that makes exact-token retrieval observable."
+    },
+    {
+      "query_id": "98029",
+      "primary_tag": "hybrid",
+      "tags": [
+        "exact_token",
+        "semantic",
+        "hybrid"
+      ],
+      "reason": "Selected for lexical anchors plus broader intent that make fusion observable."
+    },
+    {
+      "query_id": "98353",
+      "primary_tag": "exact_token",
+      "tags": [
+        "exact_token",
+        "semantic",
+        "hybrid"
+      ],
+      "reason": "Selected for lexical structure that makes exact-token retrieval observable."
+    },
+    {
+      "query_id": "100874",
+      "primary_tag": "hybrid",
+      "tags": [
+        "exact_token",
+        "semantic",
+        "hybrid"
+      ],
+      "reason": "Selected for lexical anchors plus broader intent that make fusion observable."
+    },
+    {
+      "query_id": "102492",
+      "primary_tag": "semantic",
+      "tags": [
+        "exact_token",
+        "semantic",
+        "hybrid"
+      ],
+      "reason": "Selected for multi-token natural-language intent suited to semantic retrieval."
+    },
+    {
+      "query_id": "104125",
+      "primary_tag": "hybrid",
+      "tags": [
+        "exact_token",
+        "semantic",
+        "hybrid"
+      ],
+      "reason": "Selected for lexical anchors plus broader intent that make fusion observable."
+    },
+    {
+      "query_id": "107168",
+      "primary_tag": "reranker",
+      "tags": [
+        "exact_token",
+        "semantic",
+        "hybrid",
+        "reranker"
+      ],
+      "reason": "Selected because multiple judgments make second-stage ordering measurable."
+    },
+    {
+      "query_id": "116849",
+      "primary_tag": "semantic",
+      "tags": [
+        "semantic"
+      ],
+      "reason": "Selected for multi-token natural-language intent suited to semantic retrieval."
+    },
+    {
+      "query_id": "118950",
+      "primary_tag": "reranker",
+      "tags": [
+        "semantic",
+        "reranker"
+      ],
+      "reason": "Selected because multiple judgments make second-stage ordering measurable."
+    },
+    {
+      "query_id": "119583",
+      "primary_tag": "semantic",
+      "tags": [
+        "semantic",
+        "reranker"
+      ],
+      "reason": "Selected for multi-token natural-language intent suited to semantic retrieval."
+    },
+    {
+      "query_id": "120045",
+      "primary_tag": "hybrid",
+      "tags": [
+        "exact_token",
+        "semantic",
+        "hybrid"
+      ],
+      "reason": "Selected for lexical anchors plus broader intent that make fusion observable."
+    },
+    {
+      "query_id": "122824",
+      "primary_tag": "exact_token",
+      "tags": [
+        "exact_token",
+        "semantic",
+        "hybrid"
+      ],
+      "reason": "Selected for lexical structure that makes exact-token retrieval observable."
+    },
+    {
+      "query_id": "122944",
+      "primary_tag": "semantic",
+      "tags": [
+        "exact_token",
+        "semantic",
+        "hybrid"
+      ],
+      "reason": "Selected for multi-token natural-language intent suited to semantic retrieval."
+    },
+    {
+      "query_id": "140565",
+      "primary_tag": "exact_token",
+      "tags": [
+        "exact_token",
+        "semantic",
+        "hybrid"
+      ],
+      "reason": "Selected for lexical structure that makes exact-token retrieval observable."
+    }
+  ]
+}

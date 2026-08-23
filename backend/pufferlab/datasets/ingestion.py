@@ -94,6 +94,22 @@ class BatchResult:
 
 
 @dataclass(frozen=True, slots=True)
+class IngestionCheckpoint:
+    """Durable resume capability bound to one namespace and immutable corpus revision."""
+
+    format_version: int
+    namespace: str
+    dataset_version: str
+    corpus_hash: str
+    schema_hash: str
+    completed_document_ids: tuple[UUID, ...]
+
+    @property
+    def completed_ids(self) -> frozenset[UUID]:
+        return frozenset(self.completed_document_ids)
+
+
+@dataclass(frozen=True, slots=True)
 class IngestionReport:
     namespace: str
     dataset_version: str
@@ -105,6 +121,7 @@ class IngestionReport:
     documents_total: int
     documents_completed: int
     batch_results: tuple[BatchResult, ...]
+    resumed_documents: int = 0
     readiness: NamespaceReadiness | None = None
 
     @property
@@ -141,6 +158,7 @@ class ReadinessError(IngestionError):
 
 
 type ProgressObserver = Callable[[IngestionProgress], None]
+type CheckpointObserver = Callable[[IngestionCheckpoint], None]
 
 
 class IngestionService:
@@ -175,6 +193,8 @@ class IngestionService:
         *,
         namespace: str,
         on_progress: ProgressObserver | None = None,
+        resume_from: IngestionCheckpoint | None = None,
+        on_checkpoint: CheckpointObserver | None = None,
     ) -> IngestionReport:
         if not namespace.strip():
             raise ValueError("namespace must not be blank")
@@ -185,6 +205,13 @@ class IngestionService:
             document_uuid(corpus.manifest.version, document.external_id)
             for document in corpus.documents
         )
+        resumed_ids = self._validate_checkpoint(
+            corpus,
+            namespace=namespace,
+            write_spec=write_spec,
+            expected_document_ids=expected_document_ids,
+            checkpoint=resume_from,
+        )
         if self._embedder.dimensions != corpus.manifest.embedding.dimensions:
             report = self._report(corpus, namespace=namespace, state=IngestionState.FAILED)
             raise EmbeddingDimensionMismatch(
@@ -192,10 +219,23 @@ class IngestionService:
                 report,
             )
 
-        batches = _make_batches(corpus.documents, self._batch_size)
+        pending_documents = tuple(
+            document
+            for document in corpus.documents
+            if document_uuid(corpus.manifest.version, document.external_id) not in resumed_ids
+        )
+        batches = _make_batches(pending_documents, self._batch_size)
         completed: list[BatchResult] = []
+        checkpoint_ids = set(resumed_ids)
         self._emit(
-            on_progress, self._progress(corpus, batches, completed, IngestionState.INGESTING)
+            on_progress,
+            self._progress(
+                corpus,
+                batches,
+                completed,
+                IngestionState.INGESTING,
+                resumed_documents=len(resumed_ids),
+            ),
         )
 
         for wave_start in range(0, len(batches), self._max_concurrency):
@@ -220,9 +260,38 @@ class IngestionService:
                         first_error = outcome
                 else:
                     completed.append(outcome)
+                    checkpoint_ids.update(outcome.document_ids)
+                    if on_checkpoint is not None:
+                        try:
+                            on_checkpoint(
+                                self._checkpoint(
+                                    corpus,
+                                    namespace=namespace,
+                                    write_spec=write_spec,
+                                    completed_document_ids=checkpoint_ids,
+                                )
+                            )
+                        except Exception:
+                            report = self._report(
+                                corpus,
+                                namespace=namespace,
+                                state=IngestionState.FAILED,
+                                batches=batches,
+                                completed=completed,
+                                resumed_documents=len(resumed_ids),
+                            )
+                            raise BatchWriteError(
+                                "ingestion checkpoint could not be persisted", report
+                            ) from None
                     self._emit(
                         on_progress,
-                        self._progress(corpus, batches, completed, IngestionState.INGESTING),
+                        self._progress(
+                            corpus,
+                            batches,
+                            completed,
+                            IngestionState.INGESTING,
+                            resumed_documents=len(resumed_ids),
+                        ),
                     )
             if first_error is not None:
                 report = self._report(
@@ -231,6 +300,7 @@ class IngestionService:
                     state=IngestionState.FAILED,
                     batches=batches,
                     completed=completed,
+                    resumed_documents=len(resumed_ids),
                 )
                 if isinstance(first_error, _EmbeddingCountError):
                     raise EmbeddingCountMismatch(str(first_error), report) from None
@@ -241,7 +311,14 @@ class IngestionService:
                 raise BatchWriteError("a dataset batch failed to ingest", report) from None
 
         self._emit(
-            on_progress, self._progress(corpus, batches, completed, IngestionState.VERIFYING)
+            on_progress,
+            self._progress(
+                corpus,
+                batches,
+                completed,
+                IngestionState.VERIFYING,
+                resumed_documents=len(resumed_ids),
+            ),
         )
         readiness: NamespaceReadiness | None = None
         ready = False
@@ -261,6 +338,7 @@ class IngestionService:
                     state=IngestionState.FAILED,
                     batches=batches,
                     completed=completed,
+                    resumed_documents=len(resumed_ids),
                 )
                 raise ReadinessError("namespace readiness inspection failed", report) from None
             assert readiness is not None
@@ -283,9 +361,19 @@ class IngestionService:
             state=state,
             batches=batches,
             completed=completed,
+            resumed_documents=len(resumed_ids),
             readiness=readiness,
         )
-        self._emit(on_progress, self._progress(corpus, batches, completed, state))
+        self._emit(
+            on_progress,
+            self._progress(
+                corpus,
+                batches,
+                completed,
+                state,
+                resumed_documents=len(resumed_ids),
+            ),
+        )
         if not ready:
             raise ReadinessError("namespace did not satisfy readiness checks", report)
         return report
@@ -370,12 +458,15 @@ class IngestionService:
         batches: tuple[tuple[int, tuple[SourceDocument, ...]], ...],
         completed: list[BatchResult],
         state: IngestionState,
+        *,
+        resumed_documents: int,
     ) -> IngestionProgress:
         return IngestionProgress(
             state=state,
             batches_completed=len(completed),
             batches_total=len(batches),
-            documents_completed=sum(len(result.document_ids) for result in completed),
+            documents_completed=resumed_documents
+            + sum(len(result.document_ids) for result in completed),
             documents_total=len(corpus.documents),
         )
 
@@ -387,6 +478,7 @@ class IngestionService:
         state: IngestionState,
         batches: tuple[tuple[int, tuple[SourceDocument, ...]], ...] | None = None,
         completed: list[BatchResult] | None = None,
+        resumed_documents: int = 0,
         readiness: NamespaceReadiness | None = None,
     ) -> IngestionReport:
         actual_batches = batches or _make_batches(corpus.documents, self._batch_size)
@@ -400,9 +492,55 @@ class IngestionService:
             batches_total=len(actual_batches),
             batches_completed=len(actual_completed),
             documents_total=len(corpus.documents),
-            documents_completed=sum(len(result.document_ids) for result in actual_completed),
+            documents_completed=resumed_documents
+            + sum(len(result.document_ids) for result in actual_completed),
             batch_results=actual_completed,
+            resumed_documents=resumed_documents,
             readiness=readiness,
+        )
+
+    @staticmethod
+    def _validate_checkpoint(
+        corpus: FixtureCorpus,
+        *,
+        namespace: str,
+        write_spec: NamespaceWriteSpec,
+        expected_document_ids: frozenset[UUID],
+        checkpoint: IngestionCheckpoint | None,
+    ) -> frozenset[UUID]:
+        if checkpoint is None:
+            return frozenset()
+        if checkpoint.format_version != 1:
+            raise ValueError("ingestion checkpoint format is unsupported")
+        if checkpoint.namespace != namespace:
+            raise ValueError("ingestion checkpoint belongs to a different namespace")
+        if (
+            checkpoint.dataset_version != corpus.manifest.version
+            or checkpoint.corpus_hash != corpus.corpus_hash
+            or checkpoint.schema_hash != write_spec.schema_hash
+        ):
+            raise ValueError("ingestion checkpoint belongs to a different corpus revision")
+        if len(checkpoint.completed_document_ids) != len(checkpoint.completed_ids):
+            raise ValueError("ingestion checkpoint contains duplicate document IDs")
+        if not checkpoint.completed_ids <= expected_document_ids:
+            raise ValueError("ingestion checkpoint contains unknown document IDs")
+        return checkpoint.completed_ids
+
+    @staticmethod
+    def _checkpoint(
+        corpus: FixtureCorpus,
+        *,
+        namespace: str,
+        write_spec: NamespaceWriteSpec,
+        completed_document_ids: set[UUID],
+    ) -> IngestionCheckpoint:
+        return IngestionCheckpoint(
+            format_version=1,
+            namespace=namespace,
+            dataset_version=corpus.manifest.version,
+            corpus_hash=corpus.corpus_hash,
+            schema_hash=write_spec.schema_hash,
+            completed_document_ids=tuple(sorted(completed_document_ids, key=str)),
         )
 
 
