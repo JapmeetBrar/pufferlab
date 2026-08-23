@@ -31,20 +31,23 @@ function isApiErrorCode(value: unknown): value is ApiErrorDetail["code"] {
   );
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
 function isApiErrorDetail(value: unknown): value is ApiErrorDetail {
-  if (typeof value !== "object" || value === null) {
+  if (!isRecord(value)) {
     return false;
   }
-  const candidate = value as Record<string, unknown>;
   return (
-    isApiErrorCode(candidate.code) &&
-    typeof candidate.message === "string" &&
-    typeof candidate.retryable === "boolean" &&
-    typeof candidate.trace_id === "string"
+    isApiErrorCode(value.code) &&
+    typeof value.message === "string" &&
+    typeof value.retryable === "boolean" &&
+    typeof value.trace_id === "string"
   );
 }
 
-async function readApiError(response: Response): Promise<ApiRequestError> {
+export async function readApiError(response: Response): Promise<ApiRequestError> {
   let payload: unknown;
   try {
     payload = await response.json();
@@ -65,8 +68,21 @@ async function readApiError(response: Response): Promise<ApiRequestError> {
   );
 }
 
+export async function readJsonResponse<ResponseBody>(
+  response: Response,
+): Promise<ResponseBody> {
+  if (!response.ok) {
+    throw await readApiError(response);
+  }
+  return (await response.json()) as ResponseBody;
+}
+
+export function apiUrl(path: string): string {
+  return `${apiBaseUrl}${path}`;
+}
+
 export async function getHealth(signal?: AbortSignal): Promise<HealthResponse> {
-  const response = await fetch(`${apiBaseUrl}/api/v1/health`, { signal });
+  const response = await fetch(apiUrl("/api/v1/health"), { signal });
   if (!response.ok) {
     throw new Error(`Health request failed with status ${response.status}`);
   }
@@ -76,23 +92,17 @@ export async function getHealth(signal?: AbortSignal): Promise<HealthResponse> {
 export async function getRetrievalConfigs(
   signal?: AbortSignal,
 ): Promise<RetrievalConfigListResponse> {
-  const response = await fetch(`${apiBaseUrl}/api/v1/configs`, { signal });
-  if (!response.ok) {
-    throw await readApiError(response);
-  }
-  return (await response.json()) as RetrievalConfigListResponse;
+  const response = await fetch(apiUrl("/api/v1/configs"), { signal });
+  return readJsonResponse<RetrievalConfigListResponse>(response);
 }
 
 export async function compareSearchConfigs(
   request: SearchCompareRequest,
 ): Promise<SearchCompareResponse> {
-  const response = await fetch(`${apiBaseUrl}/api/v1/search/compare`, {
+  const response = await fetch(apiUrl("/api/v1/search/compare"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(request),
   });
-  if (!response.ok) {
-    throw await readApiError(response);
-  }
-  return (await response.json()) as SearchCompareResponse;
+  return readJsonResponse<SearchCompareResponse>(response);
 }

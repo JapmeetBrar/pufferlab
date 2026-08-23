@@ -1,5 +1,5 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { type FormEvent, useState } from "react";
+import { type FormEvent, useEffect, useRef, useState } from "react";
 
 import {
   ApiRequestError,
@@ -186,6 +186,10 @@ function ErrorPanel({ error, onRetry }: { error: Error; onRetry: () => void }) {
 }
 
 export function Playground() {
+  const headingRef = useRef<HTMLHeadingElement>(null);
+  useEffect(() => {
+    headingRef.current?.focus();
+  }, []);
   const [queryText, setQueryText] = useState(
     () => new URLSearchParams(window.location.search).get("q") ?? "",
   );
@@ -240,7 +244,9 @@ export function Playground() {
       <section className="playground-hero" aria-labelledby="playground-heading">
         <div className="hero-copy">
           <p className="eyebrow">Live retrieval playground</p>
-          <h1 id="playground-heading">One query. Two retrieval instincts.</h1>
+          <h1 id="playground-heading" ref={headingRef} tabIndex={-1}>
+            One query. Two retrieval instincts.
+          </h1>
           <p className="lede">
             Put exact-token matching next to semantic similarity and inspect only what the system
             actually observed.
