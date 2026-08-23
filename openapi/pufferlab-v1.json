@@ -4,6 +4,7 @@
       "ApiErrorCode": {
         "enum": [
           "validation_error",
+          "configuration_required",
           "not_found",
           "namespace_not_ready",
           "provider_error",

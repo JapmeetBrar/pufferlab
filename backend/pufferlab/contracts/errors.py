@@ -10,6 +10,7 @@ from pufferlab.contracts.common import ContractModel, JsonValue
 
 class ApiErrorCode(StrEnum):
     VALIDATION_ERROR = "validation_error"
+    CONFIGURATION_REQUIRED = "configuration_required"
     NOT_FOUND = "not_found"
     NAMESPACE_NOT_READY = "namespace_not_ready"
     PROVIDER_ERROR = "provider_error"

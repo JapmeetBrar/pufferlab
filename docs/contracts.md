@@ -700,6 +700,11 @@ GET    /api/v1/eval-runs/{run_id}/export
 POST   /api/v1/eval-runs/{run_id}/queries/{query_id}/replay
 ```
 
+Milestone 4 contract freeze does not add `/api/v1/capabilities` to this HTTP surface. M4-B mounts
+that route only after its provider-free inspector exists; until then the capability models remain
+unreachable from OpenAPI. Evaluation-gate policy and report models are CLI-only and never enter the
+HTTP schema.
+
 Polling `GET /eval-runs/{run_id}` is the P0 progress mechanism. No WebSocket/SSE contract is reserved.
 There is no P0 `POST /configs`.
 
@@ -713,7 +718,7 @@ perform provider work. Live replay is the only explicit query-detail action that
 ```python
 class ApiErrorDetail(BaseModel):
     code: Literal[
-        "validation_error", "not_found", "namespace_not_ready",
+        "validation_error", "configuration_required", "not_found", "namespace_not_ready",
         "provider_error", "rate_limited", "run_conflict", "internal_error"
     ]
     message: str
@@ -773,3 +778,54 @@ OpenAPI -> generated web API types -> UI features
 ```
 
 `evals` remains pure and cannot import turbopuffer, FastAPI, SQLAlchemy, or frontend concepts.
+
+## 14. Local capability and evaluation-gate contracts
+
+Milestone 4 freezes these models before composing routes, commands, provider clients, or durable
+adapters. All models forbid extra fields and are frozen after validation. They contain no
+free-form string or dictionary value seam for credentials, namespaces, regions, local paths,
+provider payloads, query/document text, qrels, or tracebacks.
+
+### Local Playground capability
+
+The future versioned capability response has exactly one `live_playground` member. Its state is
+`locally_configured` or `action_required`. Requirements are a unique ordered subsequence of:
+
+1. `api_key`
+2. `search_namespace`
+3. `region`
+4. `live_search_runtime`
+5. `owned_tiny_receipt_invalid`
+6. `owned_tiny_credential_mismatch`
+7. `owned_tiny_region_mismatch`
+
+The corresponding action codes, in the same order, are `configure_api_key`,
+`configure_search_namespace`, `configure_region`, `install_live_search_runtime`,
+`resolve_owned_tiny_receipt`, `use_owned_tiny_credential`, and `use_owned_tiny_region`.
+`locally_configured` requires an empty requirement tuple and null action. `action_required`
+requires a non-empty tuple, and its action must correspond to the first unmet requirement. The
+contract communicates only local configuration state and never remote health.
+
+M4-A adds `configuration_required` to the already reachable `ApiErrorCode` enum but does not yet
+map it to runtime behavior. M4-B owns the direct pre-factory search error and frontend handling.
+
+### Provider-free evaluation gate
+
+`GatePolicy` is versioned and accepts only `ndcg@10`, `recall@50`, or `mrr@10`. Its strict numeric
+domains are finite `min_delta` in `[-1, 1]`, finite `max_query_drop` and `max_error_rate` in
+`[0, 1]`, and integer `min_paired_queries` in `[1, 50]`; strings and booleans are not numeric input.
+
+A valid completed-run evaluation returns `GateReport` with verdict `passed` or `policy_failed`,
+run/baseline/candidate UUIDs, the selected metric, and exactly four typed checks in this order:
+
+1. `candidate_error_rate`
+2. `paired_query_coverage`
+3. `aggregate_delta`
+4. `per_query_drop`
+
+Every threshold is inclusive. Candidate error rate uses all 50 attempts. Paired plus excluded
+query counts total 50, and aggregate/per-query checks use that same nonzero paired population. A
+passing verdict requires all four checks to pass. The per-query check reports its total violation
+count and at most the first ten unique violations ordered by observed delta ascending, then query
+UUID ascending. Invalid policy or evidence remains a separate safe CLI error rather than a third
+gate-report verdict.

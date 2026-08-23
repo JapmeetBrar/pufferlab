@@ -251,7 +251,7 @@ export interface components {
          * ApiErrorCode
          * @enum {string}
          */
-        ApiErrorCode: "validation_error" | "not_found" | "namespace_not_ready" | "provider_error" | "rate_limited" | "run_conflict" | "internal_error";
+        ApiErrorCode: "validation_error" | "configuration_required" | "not_found" | "namespace_not_ready" | "provider_error" | "rate_limited" | "run_conflict" | "internal_error";
         /** ApiErrorDetail */
         ApiErrorDetail: {
             code: components["schemas"]["ApiErrorCode"];
