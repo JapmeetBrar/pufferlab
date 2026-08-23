@@ -53,10 +53,17 @@ namespace, and immutable configs and returns new evidence labeled `live_replay`.
   partial, cancelled, interrupted, and failed runs.
 - The old Milestone 2 run reports `original_stage_evidence_available=false`. Missing stage evidence
   produces `NOT_OBSERVABLE`; it is never inferred from final ranks or a trace ID.
-- A replay is a new observation with its own timestamp and trace. It never mutates the immutable
-  run/outcomes and is not substituted for recorded evidence.
+- Every replay request separates the production-shaped primary result from any second,
+  counterfactual provenance probe. Each evidence item carries its own origin, timestamp, and trace;
+  no cross-request observation is presented as the cause of the primary result.
 - If the exact namespace is absent or not ready, replay returns the safe namespace-unavailable
   error while stored evidence remains usable.
+- A queued row is durable pending work. The one-worker API reclaims valid queued rows after restart
+  instead of leaving ownerless work polling forever; stale running rows remain interrupted and are
+  never resumed from an uncertain partial execution.
+- A fresh checkout can seed one explicitly synthetic 50-query/four-config completed run into its
+  configured SQLite database without a provider, API key, generated database, export, or licensed
+  text in Git. The normal read API serves that run and labels its origin `synthetic_demo`.
 - Immutable sanitized trace capture for future runs would require a separate reviewed migration and
   versioned codec; it is outside this P0 goal.
 
@@ -103,8 +110,54 @@ POST /api/v1/eval-runs/{run_id}/queries/{query_id}/replay
   availability. It performs no provider call.
 - Replay accepts config IDs only. The server loads the run/query, preserves exact graded qrels,
   resolves the dataset and config hashes, and never accepts query text, expected IDs, or namespace
-  from the browser. The response is labeled `evidence_origin=live_replay`, includes `observed_at`, a
-  new trace ID, and an explicit non-original-evidence notice.
+  from the browser. The response is explicitly non-original evidence. Its production-shaped result
+  is labeled `live_replay_primary`; a separate BM25/ANN provenance probe, when requested, is labeled
+  `live_replay_counterfactual_probe`. Every observation has its own `observed_at` and trace ID.
+
+### Run ownership and crash recovery
+
+- `queued` means durable, unclaimed pending work. Startup first applies the existing
+  `running -> interrupted` recovery, then validates and claims queued runs oldest-first up to the
+  global active-run bound. The status changes `queued -> running` before any provider call.
+- A queued run that cannot be reconstructed from its exact persisted dataset, query set, and config
+  hashes transitions `queued -> failed` with a safe redacted error and performs no provider work.
+  This is the only new recovery transition; partial `running` work is never auto-resumed.
+- The single-worker P0 process owns the in-memory task registry. Creation persists first and
+  schedules before returning 202, while startup reclamation closes the crash window between those
+  operations. Valid queued and running rows both count toward duplicate-suite and global bounds.
+- Restart tests must cover a crash immediately after the queued commit, safe failure of an invalid
+  queued binding, interruption of stale running work, oldest-first bounded claims, and zero provider
+  calls before a successful claim.
+
+### Replay evidence provenance
+
+- `stored_run` identifies only durable original ranks, metrics, timings, and other fields that were
+  actually persisted. It never implies original stage membership.
+- `live_replay_primary` identifies the result of the production-shaped replay request.
+  `live_replay_counterfactual_probe` identifies raw-list ranks or scores observed by a separate
+  provider request used to inspect possible RRF inputs. `client_computed` identifies arithmetic
+  derived solely from explicitly returned bounded inputs.
+- Primary final ordering is observed only from the primary request. Because the counterfactual
+  probe may see another provider snapshot, probe-derived memberships, ranks, and RRF contributions
+  are never described as the cause of the primary ordering. A cross-request mismatch or missing
+  probe yields `certainty=counterfactual` or `NOT_OBSERVABLE`, never an observed causal claim.
+- Probe failure does not discard the primary replay result. Probe timing is reported separately and
+  never added to primary latency.
+
+### Offline synthetic fallback
+
+- M3-B owns an idempotent application/CLI seeder that writes one deterministic, PufferLab-authored
+  synthetic dataset, 50-query set, four canonical configs, completed run, and 200 successful
+  outcomes through the normal repository boundary into the configured SQLite database.
+- Checked-in seed inputs are small synthetic code/data only. No generated SQLite/export artifact,
+  licensed CQADupStack text, provider response, vector, namespace, or credential is tracked. The
+  seeder makes no network call and requires no API key.
+- Synthetic identities are content-addressed and immutable. Re-running the command neither creates
+  duplicate rows nor changes the canonical export bytes. Catalog/run responses expose
+  `data_origin=synthetic_demo`, and the UI never presents the data as a live or CQADupStack run.
+- A clean temporary data directory must seed and serve the complete run through the same list,
+  detail, regression, query, and export paths used by real stored runs. M3-F rehearses and documents
+  this already-implemented path; it does not introduce the fallback for the first time.
 
 ### Browser routes and state
 
@@ -158,13 +211,15 @@ PR; its own merge/check record remains canonical in GitHub.
 
 - M3-A changes versioned contracts only. It adds no route, provider call, database migration, or
   browser behavior and can be reverted as one contract review unit before dependents merge.
-- M3-B adds provider-free reads and HTTP projections over the existing SQLite schema. Removing its
-  routes does not alter durable rows or namespaces.
+- M3-B adds provider-free reads and HTTP projections over the existing SQLite schema plus an
+  explicit, idempotent synthetic demo seeder. Removing its routes/seeder leaves durable rows and
+  namespaces intact; no generated database or export is a source artifact.
 - M3-C is a browser-only consumer of generated M3-B contracts. Its routing/dashboard shell can be
   reverted without changing backend state.
 - M3-D reuses the existing run and outcome tables; no trace table or destructive migration is
-  authorized. On rollback or process failure, the existing startup recovery marks orphaned running
-  work interrupted. No rollback path deletes a namespace.
+  authorized. On rollback or process failure, startup marks orphaned running work interrupted and
+  reclaims valid queued work; unreconstructable queued work fails safely. No rollback path deletes
+  a namespace.
 - M3-E live replay is request-scoped and non-persistent. Reverting it leaves recorded runs and
   outcomes byte-for-byte unchanged.
 - Any future durable trace capture, config editing, namespace branching, or job lease requires a
@@ -188,22 +243,26 @@ PR; its own merge/check record remains canonical in GitHub.
 - **Dependencies:** merged M3-0
 - **Files:** evaluation/catalog/forensic Pydantic contracts, contract documentation/tests
 - **Acceptance:** freeze versioned catalog, run-list/detail, regression coverage, query-detail,
-  cancel, export, and live-replay envelopes; preserve canonical 50-by-four validation; add strict
-  size/shape validation to forensic evidence; correct RunEnvironment documentation; no provider,
-  persistence, FastAPI, or handwritten TypeScript domain models.
+  cancel, export, and live-replay envelopes; preserve canonical 50-by-four validation; freeze
+  `data_origin`, queued recovery/error transitions, and per-observation evidence origins/certainty;
+  add strict size/shape validation to forensic evidence; correct RunEnvironment documentation; no
+  provider, persistence, FastAPI, or handwritten TypeScript domain models.
 
 ### M3-B — Durable read models and eval HTTP surface
 
 - **Owner:** evaluation application worker
 - **Branch:** `codex/m3-eval-read-api`
 - **Dependencies:** merged M3-A
-- **Files:** repository read methods, provider-free evaluation views, eval/catalog routes and fake
-  route tests, OpenAPI and generated TypeScript
+- **Files:** repository read methods, provider-free evaluation views, deterministic synthetic demo
+  seeder/CLI, eval/catalog routes and fake route tests, OpenAPI and generated TypeScript
 - **Acceptance:** bounded deterministic run/catalog listing; strict durable payload decoding;
   regressions/gains use the existing paired engine and exact qrels; explicit excluded-pair coverage;
   relevant rank changes are exact through rank 50; query detail is run-scoped and provider-free;
-  all six run statuses export/read; API errors are direct and redacted; generated artifacts do not
-  drift.
+  all six run statuses export/read; API errors are direct and redacted; a clean temporary data
+  directory seeds exactly 50 synthetic queries, four canonical configs, and 200 successes without
+  network/credentials and then serves every read/export path; the seed is idempotent,
+  content-addressed, explicitly `synthetic_demo`, and produces no tracked database/export; generated
+  artifacts do not drift.
 
 ### M3-C — Run dashboard
 
@@ -228,7 +287,9 @@ PR; its own merge/check record remains canonical in GitHub.
   202; exact dataset/config resolution replaces fixture binding; active/global concurrency and
   duplicate-run bounds hold; request cancellation does not cancel the job; cancel is idempotent and
   preserves evidence; fatal errors are safe; shutdown drains jobs, closes search runtimes, then
-  disposes SQLite; one-worker constraint is enforced/documented.
+  disposes SQLite; a post-commit/pre-schedule restart reclaims valid queued work oldest-first,
+  unreconstructable queued work fails safely without a provider call, stale running work becomes
+  interrupted, and one-worker constraint is enforced/documented.
 
 ### M3-E — Regression deep links and observable query forensics
 
@@ -237,22 +298,26 @@ PR; its own merge/check record remains canonical in GitHub.
 - **Dependencies:** merged M3-C and M3-D
 - **Files:** pure forensic rules, replay route, query detail/Playground integration, drawer and tests
 - **Acceptance:** recorded detail never calls the provider; old M2 evidence is honestly unavailable;
-  replay binds the run dataset/configs and is visibly a new observation; absent namespaces degrade
-  to stored evidence plus `NOT_OBSERVABLE`; RRF contribution inputs/math are inspectable; reranker
-  copy is score/rank only; stable deep links restore run/query/config/document state; drawer keyboard
-  focus/Escape/return and forbidden-claim goldens pass.
+  replay binds the run dataset/configs and is visibly a new observation; primary and counterfactual
+  probe evidence retain distinct origin/timestamp/trace labels; cross-request mismatch and probe
+  failure yield counterfactual or `NOT_OBSERVABLE` copy, never causal claims; absent namespaces
+  degrade to stored evidence plus `NOT_OBSERVABLE`; bounded RRF contribution inputs/math remain
+  inspectable with their exact origin; reranker copy is score/rank only; stable deep links restore
+  run/query/config/document state; drawer keyboard focus/Escape/return and forbidden-claim goldens
+  pass.
 
 ### M3-F — Interview QA and finalization
 
 - **Owner:** root orchestrator plus dedicated reviewer
 - **Branch:** `codex/m3-finalization`
 - **Dependencies:** all delivery PRs merged and protected-main checks green
-- **Files:** README, demo/observability documentation, synthetic fallback artifacts only, progress
-  ledger, browser smoke configuration where required
+- **Files:** README, demo/observability documentation, progress ledger, browser smoke configuration
+  where required
 - **Acceptance:** fresh setup works; local stored-run dashboard and a deliberately authorized live
   replay are verified without exposing licensed text or secrets; a regression deep link survives
-  refresh/back navigation at desktop and mobile widths; offline synthetic fallback works; full local
-  and GitHub gates pass; one independent reviewer merges the exact final head and verifies protected
+  refresh/back navigation at desktop and mobile widths; the already-reviewed M3-B synthetic seed
+  command proves the full 50-by-four offline dashboard from an empty data directory; full local and
+  GitHub gates pass; one independent reviewer merges the exact final head and verifies protected
   `main`.
 
 ## Cross-cutting invariants
@@ -261,7 +326,8 @@ PR; its own merge/check record remains canonical in GitHub.
 2. The browser imports domain types only from generated OpenAPI TypeScript.
 3. Dashboard reads and deep-link restoration never perform provider work implicitly.
 4. Config IDs resolve to one persisted dataset revision; browser input never selects a namespace.
-5. Original stored evidence and live replay evidence are never merged or relabeled.
+5. Original stored, primary replay, counterfactual-probe, and client-computed evidence retain their
+   own origin/timestamp/trace; cross-request observations are never merged or made causal.
 6. Query/document text, qrels, credentials, vectors, provider bodies, database/export files, and
    live screenshots remain outside Git and PR/check output.
 7. `EvidenceItem` values are allowlisted and bounded; arbitrary provider payloads never cross the
@@ -269,6 +335,8 @@ PR; its own merge/check record remains canonical in GitHub.
 8. Latency is labeled observed client wall clock with sample count, never a service benchmark.
 9. Failures and missing pairs remain explicit coverage states, never zero-valued quality.
 10. UI explanations map to typed evidence; unsupported causes are `NOT_OBSERVABLE`.
+11. A fresh-checkout demo is SQLite-authoritative and explicitly synthetic; no generated database,
+    export, licensed text, or live provider material enters Git.
 
 ## Standard validation
 
