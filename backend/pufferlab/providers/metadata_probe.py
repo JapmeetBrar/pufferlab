@@ -21,10 +21,11 @@ from turbopuffer import APIError, AsyncTurbopuffer, NotFoundError
 _TIMEOUT_SECONDS = 10.0
 _OFFICIAL_BASE_URL_TEMPLATE = "https://{region}.turbopuffer.com"
 _REGION_PATTERN = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
+_MAX_NAMESPACE_UTF8_BYTES = 128
 _NAMESPACE_PATH_SAFE = "!$&'()*+,;=:@"
 _USER_AGENT = "pufferlab-metadata-probe/1"
 
-type MetadataRequestHook = Callable[[httpx.Request], Awaitable[None]]
+type _MetadataRequestHook = Callable[[httpx.Request], Awaitable[None]]
 
 
 class MetadataProbeState(StrEnum):
@@ -57,7 +58,7 @@ class MetadataProbeConfigurationError(ValueError):
         super().__init__("turbopuffer metadata probe configuration is invalid")
 
 
-class MetadataProbeRequestError(RuntimeError):
+class _MetadataProbeRequestError(RuntimeError):
     """Raised before transport when the SDK request violates the frozen shape."""
 
     def __init__(self) -> None:
@@ -70,12 +71,19 @@ def is_valid_metadata_probe_region(region: str) -> bool:
     return isinstance(region, str) and _REGION_PATTERN.fullmatch(region) is not None
 
 
-def metadata_request_sanitizer(
+@dataclass(frozen=True, slots=True)
+class _ProbeOutcome:
+    result: MetadataProbeResult
+    configuration_error: bool = False
+    cancellation_observed: bool = False
+
+
+def _metadata_request_sanitizer(
     *,
     api_key: str,
     region: str,
     namespace: str,
-) -> MetadataRequestHook:
+) -> _MetadataRequestHook:
     """Build an HTTPX request hook that freezes the metadata request boundary.
 
     The SDK reads custom headers from the process environment. Replacing the
@@ -92,7 +100,7 @@ def metadata_request_sanitizer(
     async def sanitize(request: httpx.Request) -> None:
         body = await request.aread()
         if request.method != "GET" or request.url != expected_url or body:
-            raise MetadataProbeRequestError()
+            raise _MetadataProbeRequestError()
         request.headers = httpx.Headers(
             {
                 "Host": expected_url.netloc.decode("ascii"),
@@ -120,10 +128,42 @@ async def probe_namespace_metadata(
     raised after close drains so the SDK request graph is not retained.
     """
 
-    if not is_valid_metadata_probe_region(region):
-        raise MetadataProbeConfigurationError()
+    outcome = await _probe_namespace_metadata_inner(
+        api_key=api_key,
+        region=region,
+        namespace=namespace,
+        transport=transport,
+    )
 
-    request_hook = metadata_request_sanitizer(
+    # A safe exception still retains the locals of every traceback frame. Scrub
+    # all caller-supplied and transport-bearing references before a separate
+    # value-free helper raises configuration/cancellation signals.
+    api_key = ""
+    region = ""
+    namespace = ""
+    transport = None
+
+    if outcome.configuration_error:
+        _raise_configuration_error()
+    if outcome.cancellation_observed:
+        _raise_cancelled()
+    return outcome.result
+
+
+async def _probe_namespace_metadata_inner(
+    *,
+    api_key: str,
+    region: str,
+    namespace: str,
+    transport: httpx.AsyncBaseTransport | None,
+) -> _ProbeOutcome:
+    if not _valid_local_configuration(api_key=api_key, region=region, namespace=namespace):
+        return _ProbeOutcome(
+            result=MetadataProbeResult(state=MetadataProbeState.REMOTE_FAILURE),
+            configuration_error=True,
+        )
+
+    request_hook = _metadata_request_sanitizer(
         api_key=api_key,
         region=region,
         namespace=namespace,
@@ -137,7 +177,7 @@ async def probe_namespace_metadata(
             trust_env=False,
         )
     except Exception:
-        return MetadataProbeResult(state=MetadataProbeState.REMOTE_FAILURE)
+        return _ProbeOutcome(result=MetadataProbeResult(state=MetadataProbeState.REMOTE_FAILURE))
 
     client: AsyncTurbopuffer | None = None
     result = MetadataProbeResult(state=MetadataProbeState.REMOTE_FAILURE)
@@ -174,9 +214,28 @@ async def probe_namespace_metadata(
         if close_failed:
             result = MetadataProbeResult(state=MetadataProbeState.REMOTE_FAILURE)
 
-    if cancellation_observed:
-        raise asyncio.CancelledError() from None
-    return result
+    return _ProbeOutcome(
+        result=result,
+        cancellation_observed=cancellation_observed,
+    )
+
+
+def _valid_local_configuration(*, api_key: str, region: str, namespace: str) -> bool:
+    if not api_key.strip() or not is_valid_metadata_probe_region(region) or not namespace.strip():
+        return False
+    try:
+        namespace_bytes = namespace.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return len(namespace_bytes) <= _MAX_NAMESPACE_UTF8_BYTES
+
+
+def _raise_configuration_error() -> None:
+    raise MetadataProbeConfigurationError()
+
+
+def _raise_cancelled() -> None:
+    raise asyncio.CancelledError()
 
 
 def _metadata_url(*, region: str, namespace: str) -> httpx.URL:

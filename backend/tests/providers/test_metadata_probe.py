@@ -3,15 +3,15 @@ from __future__ import annotations
 import asyncio
 import traceback
 from collections.abc import Awaitable, Callable
+from types import TracebackType
 
 import httpx
+import pufferlab.providers.metadata_probe as metadata_probe_module
 import pytest
 from pufferlab.providers.metadata_probe import (
     MetadataProbeConfigurationError,
-    MetadataProbeRequestError,
     MetadataProbeState,
     is_valid_metadata_probe_region,
-    metadata_request_sanitizer,
     probe_namespace_metadata,
 )
 
@@ -53,6 +53,34 @@ class RecordingTransport(httpx.AsyncBaseTransport):
             await self._close_release.wait()
         if self._close_error is not None:
             raise self._close_error
+
+
+def _probe_traceback_frames(traceback_value: TracebackType | None) -> list[dict[str, object]]:
+    frames: list[dict[str, object]] = []
+    while traceback_value is not None:
+        frame = traceback_value.tb_frame
+        if frame.f_code.co_filename.endswith("/pufferlab/providers/metadata_probe.py"):
+            frames.append(dict(frame.f_locals))
+        traceback_value = traceback_value.tb_next
+    return frames
+
+
+def _assert_probe_traceback_scrubbed(
+    error: BaseException,
+    *,
+    secrets: tuple[str, ...],
+    transport: RecordingTransport,
+) -> None:
+    frames = _probe_traceback_frames(error.__traceback__)
+    assert frames
+    for frame in frames:
+        for value in frame.values():
+            assert value is not transport
+            assert not isinstance(value, httpx.Request | httpx.AsyncClient | RecordingTransport)
+            if isinstance(value, str):
+                for secret in secrets:
+                    if secret:
+                        assert secret not in value
 
 
 def _metadata_body(*, status: str = "up-to-date") -> dict[str, object]:
@@ -237,6 +265,50 @@ async def test_hostile_region_fails_before_client_or_transport(
         assert region not in repr(raised.value)
     assert raised.value.__cause__ is None
     assert raised.value.__context__ is None
+    _assert_probe_traceback_scrubbed(
+        raised.value,
+        secrets=(_API_KEY, _NAMESPACE, region),
+        transport=transport,
+    )
+
+
+@pytest.mark.parametrize(
+    ("api_key", "namespace"),
+    [
+        ("", _NAMESPACE),
+        ("   ", _NAMESPACE),
+        (_API_KEY, ""),
+        (_API_KEY, "   "),
+        (_API_KEY, "n" * 129),
+        (_API_KEY, "é" * 65),
+    ],
+)
+@pytest.mark.asyncio
+async def test_blank_key_and_blank_or_overlong_namespace_fail_before_client_construction(
+    api_key: str,
+    namespace: str,
+) -> None:
+    async def handler(_: httpx.Request) -> httpx.Response:
+        raise AssertionError("transport must not be reached")
+
+    transport = RecordingTransport(handler)
+    with pytest.raises(MetadataProbeConfigurationError) as raised:
+        await probe_namespace_metadata(
+            api_key=api_key,
+            region=_REGION,
+            namespace=namespace,
+            transport=transport,
+        )
+
+    assert len(transport.requests) == 0
+    assert transport.close_calls == 0
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None
+    _assert_probe_traceback_scrubbed(
+        raised.value,
+        secrets=(api_key, namespace, _REGION),
+        transport=transport,
+    )
 
 
 def test_region_accepts_bounded_lowercase_dns_labels() -> None:
@@ -280,7 +352,7 @@ async def test_request_sanitizer_rejects_write_query_delete_body_and_other_targe
         outbound_calls += 1
         raise AssertionError("poisoned provider operation reached transport")
 
-    sanitizer = metadata_request_sanitizer(
+    sanitizer = metadata_probe_module._metadata_request_sanitizer(
         api_key=_API_KEY,
         region=_REGION,
         namespace=_NAMESPACE,
@@ -289,7 +361,7 @@ async def test_request_sanitizer_rejects_write_query_delete_body_and_other_targe
         event_hooks={"request": [sanitizer]},
         transport=httpx.MockTransport(poison_handler),
     ) as client:
-        with pytest.raises(MetadataProbeRequestError) as raised:
+        with pytest.raises(metadata_probe_module._MetadataProbeRequestError) as raised:
             await client.request(method, url, content=body)
 
     assert outbound_calls == 0
@@ -331,6 +403,11 @@ async def test_cancellation_during_request_closes_once_and_detaches_sdk_graph() 
     assert _API_KEY not in rendered
     assert _NAMESPACE not in rendered
     assert "cancel-message-must-not-survive" not in rendered
+    _assert_probe_traceback_scrubbed(
+        raised.value,
+        secrets=(_API_KEY, _NAMESPACE, "cancel-message-must-not-survive"),
+        transport=transport,
+    )
 
 
 @pytest.mark.asyncio
@@ -368,6 +445,11 @@ async def test_repeated_cancellation_during_close_is_drained_before_cancellation
 
     assert str(raised.value) == ""
     assert transport.close_calls == 1
+    _assert_probe_traceback_scrubbed(
+        raised.value,
+        secrets=(_API_KEY, _NAMESPACE, "first-sensitive-cancel", "second-sensitive-cancel"),
+        transport=transport,
+    )
 
 
 @pytest.mark.asyncio

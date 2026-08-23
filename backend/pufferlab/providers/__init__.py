@@ -3,11 +3,9 @@
 from pufferlab.providers.errors import ProviderError, ProviderErrorDetails
 from pufferlab.providers.metadata_probe import (
     MetadataProbeConfigurationError,
-    MetadataProbeRequestError,
     MetadataProbeResult,
     MetadataProbeState,
     is_valid_metadata_probe_region,
-    metadata_request_sanitizer,
     probe_namespace_metadata,
 )
 from pufferlab.providers.turbopuffer import TurbopufferProvider, filter_to_turbopuffer
@@ -29,7 +27,6 @@ __all__ = [
     "AttributeSchema",
     "FullTextSearchSchema",
     "MetadataProbeConfigurationError",
-    "MetadataProbeRequestError",
     "MetadataProbeResult",
     "MetadataProbeState",
     "ProviderDeleteResult",
@@ -44,6 +41,5 @@ __all__ = [
     "WriteDocument",
     "filter_to_turbopuffer",
     "is_valid_metadata_probe_region",
-    "metadata_request_sanitizer",
     "probe_namespace_metadata",
 ]
