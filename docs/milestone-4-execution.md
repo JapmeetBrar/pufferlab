@@ -57,10 +57,12 @@ finalization PR.
 
 - Readiness is local configuration evidence, not provider authentication or remote health. It never
   auto-probes turbopuffer from API startup, page load, polling, or browser prefetch.
-- Default doctor, dashboard reads, eval gates, and browser CI construct no provider client,
-  embedding model, reranker, or live-search runtime and never transmit a credential. Doctor may
-  read the configured `SecretStr` only inside a local constant-time receipt HMAC comparison; it
-  never prints, copies into a report/error, or retains that value.
+- Provider-free/default doctor, dashboard reads, eval gates, and browser CI construct no provider
+  client, embedding model, reranker, or live-search runtime and never transmit a credential. The
+  default doctor may read the configured `SecretStr` only inside a local constant-time receipt HMAC
+  comparison. Explicit `doctor --live` may unwrap it only into its command-scoped metadata client;
+  that client is closed and drained before return. Neither path prints or copies the value into a
+  report/error.
 - Public responses and output from new Milestone 4 CLI commands contain allowlisted states,
   requirement codes, commands,
   UUIDs, counts, thresholds, and numeric deltas only. They contain no credential, configured
@@ -169,12 +171,16 @@ changing database mtime; evaluation inspection opens an already existing databas
 versions are action-required rather than guessed. It resolves every target namespace from an
 authenticated fixed tiny receipt or SQLite dataset row, never from a raw namespace argument.
 `--live` is an explicit, potentially billable metadata-only check; it makes at most one metadata
-request per selected target by constructing the pinned turbopuffer client with `max_retries=0` and
-never wrapping it in application retries. Retryable status, transport, timeout, and close failures
-therefore still produce exactly one outbound attempt. The check performs no write, document
-search/retrieval query, create, or delete, closes the provider under success/error/cancellation, and
-reports only `metadata_reachable` plus `index_up_to_date` or `index_updating`. A blank region is a
-local configuration failure. Receipt
+request per selected target through a dedicated pinned turbopuffer 2.9 client. The client pins the
+validated official HTTPS region URL, uses `max_retries=0`, a ten-second timeout, an owned HTTP
+client with environment proxy inheritance and redirects disabled, and a request hook that enforces
+the exact GET target and reconstructs allowlisted headers with exactly one Authorization value.
+SDK base-URL/custom-header environment overrides therefore cannot redirect or replace the configured
+credential. No application retry wraps the client, so retryable status, transport, timeout,
+redirect, and close failures still produce exactly one outbound attempt. The check performs no
+write, document search/retrieval query, create, or delete, closes and drains the provider under
+success/error/repeated cancellation, and reports only `metadata_reachable` plus
+`index_up_to_date` or `index_updating`. A blank region is a local configuration failure. Receipt
 corruption, credential mismatch, and current-region mismatch are distinct allowlisted
 action-required codes and never expose either value. These states do not prove schema, exact corpus
 identity, authentication for other operations, or working BM25/ANN retrieval.
@@ -443,7 +449,9 @@ cleanup and the gate CLI. M4-G is the single goal-finalization PR.
   action-required state precedes provider factories; optional metadata-only live check closes under
   every exit and proves one outbound attempt under retryable status/transport/timeout failures;
   stable outputs/exits and exact redaction attacks pass; serve is loopback-only and fixes one
-  worker.
+  worker. M4-B installs an injected owned-tiny target resolver that remains action-required until
+  M4-C supplies the authenticated receipt; M4-B proves the live one-shot path with a selected
+  existing live SQLite dataset and never invents a raw namespace argument.
 
 ### M4-C — Owned tiny lifecycle
 
