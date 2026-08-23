@@ -1,9 +1,9 @@
 # PufferLab Progress Ledger
 
-- **Active goal:** deliver [Milestone 2](milestone-2-execution.md) through the reviewed engineering
-  loop: a persisted 50-query Unix evaluation across BM25, ANN, server RRF, and local reranking.
+- **Active goal:** deliver [Milestone 3](milestone-3-execution.md) through the reviewed engineering
+  loop: an interview-ready run dashboard, regression workflow, and evidence-honest query forensics.
 - **Goal status:** implementing
-- **Last updated:** 2026-08-22
+- **Last updated:** 2026-08-23
 - **Orchestrator:** root agent
 - **Dedicated reviewer:** reviewer agent
 
@@ -40,7 +40,14 @@ Process details live in [`engineering-loop.md`](engineering-loop.md).
 | M2-C | [Hybrid retrieval and local reranking](milestone-2-execution.md#m2-c--hybrid-retrieval-and-local-reranking) | root retrieval worker | `codex/m2-hybrid-retrieval` / [PR #13](https://github.com/JapmeetBrar/pufferlab/pull/13) | verified | [Independent re-review](https://github.com/JapmeetBrar/pufferlab/pull/13#issuecomment-5384004506) approved exact head `b79bb5c`; PR #13 reviewer-only squash-merged as `48f4e29`. The [canonical merge record](https://github.com/JapmeetBrar/pufferlab/pull/13#issuecomment-5384007820) confirms protected-main Backend and Frontend checks passed. |
 | M2-D | [CQADupStack Unix dataset foundation](milestone-2-execution.md#m2-d--cqadupstack-unix-dataset-foundation) | dataset_worker | `codex/m2-unix-dataset` / [PR #14](https://github.com/JapmeetBrar/pufferlab/pull/14) | verified | [Independent re-review](https://github.com/JapmeetBrar/pufferlab/pull/14#issuecomment-5384120560) approved repaired head `7187702`; PR #14 reviewer-only squash-merged as `31387b6b62cc938a3b0d107c4c4ac5e0fd7fb4c9`. The [canonical record](https://github.com/JapmeetBrar/pufferlab/pull/14#issuecomment-5384124747) confirms protected-main Backend and Frontend checks passed, including full-history audit `160/357/19`. |
 | M2-E | [Evaluation service and CLI](milestone-2-execution.md#m2-e--evaluation-application-service-and-cli) | root integration worker + delegated seam workers | `codex/m2-eval-cli` / [PR #15](https://github.com/JapmeetBrar/pufferlab/pull/15) | verified | [Independent re-review](https://github.com/JapmeetBrar/pufferlab/pull/15#issuecomment-5384253856) reproduced both repair paths, approved the exact head, and reviewer-only squash-merged PR #15 as `0e91e2bd24194e375e0dd5d6b0e12b729a3409d0`. The [canonical record](https://github.com/JapmeetBrar/pufferlab/pull/15#issuecomment-5384257932) confirms protected-main Backend and Frontend passed. |
-| M2-F | [Live execution and goal finalization](milestone-2-execution.md#m2-f--live-execution-and-goal-finalization) | root + live_harness worker + reviewer | `codex/m2-live-finalization` / [draft PR #16](https://github.com/JapmeetBrar/pufferlab/pull/16) | review_requested | The reviewed retry completed the exact READY 47,382-document ingestion and all 200 judged outcomes with zero failures. Independent ranking/qrel recomputation and canonical export validation passed; exact authenticated cleanup reached `NOT_FOUND`; the session record is absent; post-cleanup read-only verification, full gates, artifact `176/431/19`, and secret-boundary scans pass. The dedicated reviewer must inspect the final evidence head, mark the PR ready, merge it, and verify protected `main`. |
+| M2-F | [Live execution and goal finalization](milestone-2-execution.md#m2-f--live-execution-and-goal-finalization) | root + live_harness worker + reviewer | `codex/m2-live-finalization` / [PR #16](https://github.com/JapmeetBrar/pufferlab/pull/16) | verified | [Dedicated final review](https://github.com/JapmeetBrar/pufferlab/pull/16#issuecomment-5384603898) approved the exact evidence head; PR #16 reviewer-only squash-merged as `a1f1197bbd600800f513b7079edb57629c3ba955`. The [canonical record](https://github.com/JapmeetBrar/pufferlab/pull/16#issuecomment-5384608895) confirms protected-main Backend and Frontend checks passed. |
+| M3-0 | [Milestone 3 architecture and contract audit](milestone-3-execution.md#m3-0--architecture-and-contract-audit) | root | `codex/m3-plan` | review_requested | Read-only backend and frontend audits identified the durable-evidence, fixture-runtime, cancellation, config-label, and generated-contract seams. The finite architecture, rollback boundaries, and review graph are recorded; full local gates pass and dedicated review is required before implementation branches start. |
+| M3-A | [Contract freeze](milestone-3-execution.md#m3-a--contract-freeze) | eval_application | `codex/m3-contracts` | planned | Starts only from reviewed M3-0; freezes versioned catalog/run/regression/query/replay envelopes without provider or persistence imports. |
+| M3-B | [Durable read models and eval HTTP surface](milestone-3-execution.md#m3-b--durable-read-models-and-eval-http-surface) | eval_application | `codex/m3-eval-read-api` | planned | Depends on merged M3-A; exposes provider-free SQLite evidence and generated frontend types. |
+| M3-C | [Run dashboard](milestone-3-execution.md#m3-c--run-dashboard) | frontend_worker | `codex/m3-run-dashboard` | planned | Depends on merged M3-B; owns routed run history/detail, polling, metrics, and regression UI. |
+| M3-D | [Dataset-bound execution and control runtime](milestone-3-execution.md#m3-d--dataset-bound-execution-and-control-runtime) | root | `codex/m3-eval-control-runtime` | planned | Depends on merged M3-B; owns 202 scheduling, exact runtime binding, cancellation, bounds, recovery, and shutdown. |
+| M3-E | [Regression deep links and observable query forensics](milestone-3-execution.md#m3-e--regression-deep-links-and-observable-query-forensics) | live_harness + frontend_worker | `codex/m3-query-forensics` | planned | Begins after M3-C/M3-D merge; stored evidence remains immutable and any live replay is explicit, exact-bound, and separately labeled. |
+| M3-F | [Interview QA and goal finalization](milestone-3-execution.md#m3-f--interview-qa-and-finalization) | root + reviewer | `codex/m3-finalization` | planned | One finalization PR after all delivery units are independently merged and protected main is green. |
 
 ## Review history
 
@@ -95,6 +102,8 @@ Process details live in [`engineering-loop.md`](engineering-loop.md).
 | 2026-08-22 | M2-F / [draft PR #16](https://github.com/JapmeetBrar/pufferlab/pull/16) | `implementing → review_requested` (live readiness repair) | Worker repair `9e4cdfb` preserves the exact count-plus-one inventory contract while paging at most 10,000 strongly consistent ascending IDs and advancing an exclusive `id > last_id` cursor. Tests cover the exact 47,382 corpus shape, the 10,001st-row truncation proof, an exact-full-page empty successor, cursor/consistency arguments, mixed or invalid IDs, duplicates/out-of-order/non-progress, oversized pages, and short-page/count inconsistency. Fifty-three focused tests pass; `make check` passes with 354 backend tests plus one opt-in skip and six frontend tests/build, Ruff/format/mypy/OpenAPI/diff gates pass, and artifact `176/428/19` plus secret-boundary audits are clean. Dedicated exact-head review is required before retry. |
 | 2026-08-22 | M2-F / [draft PR #16](https://github.com/JapmeetBrar/pufferlab/pull/16) | `review_requested → approved → implementing` (live readiness repair) | [Dedicated review at `d07582a`](https://github.com/JapmeetBrar/pufferlab/pull/16#issuecomment-5384486966) reproduced the original over-limit request and used the real SDK offline to verify five strong keyset pages bounded to 10,000 with exact cursors. All boundary/attack tests passed; the absent session, retained mode-`0600` owner key, zero application-table rows, unchanged read-only database, clean worktree, full gates/audits, and exact-head GitHub Backend/Frontend checks were independently confirmed. The runbook-scoped credentialed retry is authorized; the draft remains unmerged. |
 | 2026-08-22 | M2-F / [draft PR #16](https://github.com/JapmeetBrar/pufferlab/pull/16) | `implementing → review_requested` (goal-finalization review) | The authorized retry passed five-page exact readiness for all 47,382 documents, persisted dataset `dd403bda-d298-5a4a-bb45-a29dee84c61b`, query set `e490c239-69ee-57d6-b6b0-bb5cc31c8b2a`, four canonical configs, run `34af9297-e423-4787-a43b-37292aaf1d93`, and 200/200 successful outcomes. The authenticated verifier recomputed every quality metric from rankings and 83 exact qrels, matched all six 50-sample aggregates per config, validated export SHA-256 `46b175d9cd88e2f102876c00c5e3a60e533c8dd0cea07118b215efef0ba83e02`, and remained byte/mtime/sidecar read-only. Namespace fingerprint `505a2788e77e` reached exact `NOT_FOUND`; the session is absent and ignored owner key remains mode `0600`. Full gates pass with 354 backend tests plus one skip and six frontend tests/build; artifact `176/431/19`, secret-boundary, diff, and post-cleanup Bash gates pass. Final exact-head reviewer-only merge and protected-main verification remain. |
+| 2026-08-22 | M2-F / [PR #16](https://github.com/JapmeetBrar/pufferlab/pull/16) | `review_requested → approved → merged → verified` | [Dedicated final review](https://github.com/JapmeetBrar/pufferlab/pull/16#issuecomment-5384603898) matched the persisted IDs, 50/200 coverage, metrics, export hash, cleanup, and artifact boundaries. PR #16 reviewer-only squash-merged as `a1f1197bbd600800f513b7079edb57629c3ba955`; the [canonical closing record](https://github.com/JapmeetBrar/pufferlab/pull/16#issuecomment-5384608895) confirms protected-main Backend and Frontend checks passed. |
+| 2026-08-23 | M3-0 / `codex/m3-plan` | `planned → assigned → implementing → review_requested` | Root based the coordination branch on verified Milestone 2 merge `a1f1197`, then delegated read-only backend and frontend audits. The plan chooses provider-free SQLite dashboard reads plus explicit dataset-bound live replay, resolves cancellation/canonical-suite/original-evidence contradictions, defines six finite review units and rollback boundaries, and keeps trace persistence/config editing/distributed execution out of P0. `make check` passes with 354 backend tests plus one opt-in skip and six frontend tests/build; Ruff, format, mypy, OpenAPI drift, full-history artifact audit `177/433/19`, and `git diff --check` pass. Dedicated plan review and merge are required before M3-A starts. |
 
 ## Milestone 1 acceptance evidence
 
@@ -123,7 +132,7 @@ Process details live in [`engineering-loop.md`](engineering-loop.md).
   validates against the checked-in contract.
 - [x] The credentialed run cleans only its exact generated namespace and retains no secret, raw
   vector, corpus, or database artifact in Git.
-- [ ] Every Milestone 2 PR receives independent review, reviewer-only merge, and green protected
+- [x] Every Milestone 2 PR receives independent review, reviewer-only merge, and green protected
   `main` checks.
 
 ### Sanitized live run
@@ -149,6 +158,23 @@ Process details live in [`engineering-loop.md`](engineering-loop.md).
 Every displayed aggregate has sample count 50; the verifier independently recomputed quality from
 ranked IDs plus exact qrels and latency percentiles from stored per-query client wall times.
 
+## Milestone 3 acceptance evidence
+
+- [ ] Versioned, generated contracts expose persisted catalogs, run list/detail, cancellation,
+  regressions, query detail, export, and explicitly labeled live replay.
+- [ ] Provider-free dashboard reads work for completed, partial, cancelled, interrupted, and failed
+  runs without mutating durable state or triggering network calls.
+- [ ] A canonical run can be started at HTTP 202, polled across refresh, cancelled idempotently, and
+  remains inspectable with all completed outcomes preserved.
+- [ ] Regression ordering uses candidate-minus-baseline quality deltas, shows sample/coverage state,
+  and deep-links into exact run/query/config context.
+- [ ] Missing original stage evidence is `NOT_OBSERVABLE`; an optional live replay is exact-bound,
+  cost-bearing, and visibly distinct from recorded evidence.
+- [ ] The dashboard and forensic drawer pass generated-type, accessibility, responsive, browser,
+  secret/artifact, and production-build gates.
+- [ ] Every Milestone 3 PR receives independent review, reviewer-only merge, and green protected
+  `main` checks.
+
 ## Decision log
 
 | Date | Decision | Reason |
@@ -162,3 +188,5 @@ ranked IDs plus exact qrels and latency percentiles from stored per-query client
 | 2026-08-22 | Protect `main` with active ruleset `21190317` requiring PRs and Backend/Frontend checks. | Enforces review-unit and CI boundaries without bypasses; GitHub approvals remain zero because agents share one identity. |
 | 2026-08-22 | Split Milestone 2 into four parallel foundations, one serial integration PR, and one finalization PR. | Keeps pure metrics, persistence, retrieval, and licensed-data handling independently reviewable while enforcing a single integration point. |
 | 2026-08-22 | Keep downloaded CQADupStack data, generated embeddings, SQLite, and live evidence outside Git. | Preserves licensing, credential, reproducibility, and repository-size boundaries while checked-in manifests and hashes make processing auditable. |
+| 2026-08-23 | Make durable SQLite read models the dashboard source and live replay a separate explicit observation. | Preserves offline/partial-run inspection and prevents a new query from being misrepresented as original run evidence. |
+| 2026-08-23 | Keep Milestone 3 P0 canonical at 50 queries and four immutable configs. | Delivers the interview workflow without reopening general config editing, arbitrary suites, distributed execution, or multi-tenant scope. |
