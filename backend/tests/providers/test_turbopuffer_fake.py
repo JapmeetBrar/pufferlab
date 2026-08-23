@@ -132,6 +132,10 @@ def unit_vector(dimensions: int, hot_dimension: int) -> list[float]:
     return [float(position == hot_dimension) for position in range(dimensions)]
 
 
+def inventory_rows(start: int, stop: int) -> list[dict[str, object]]:
+    return [{"id": f"doc-{value:05d}"} for value in range(start, stop)]
+
+
 def make_provider(
     namespace: FakeNamespace,
     *,
@@ -606,6 +610,184 @@ async def test_document_id_inventory_detects_more_than_expected_limit() -> None:
     assert inventory.document_ids == ("doc-1", "doc-2", "doc-3")
     assert inventory.document_count == 40
     assert inventory.truncated
+
+
+@pytest.mark.asyncio
+async def test_document_id_inventory_paginates_more_than_ten_thousand_exact_ids() -> None:
+    namespace = FakeNamespace()
+    namespace.query_responses = [
+        FakeResponse(rows=inventory_rows(0, 10_000)),
+        FakeResponse(rows=inventory_rows(10_000, 20_000)),
+        FakeResponse(rows=inventory_rows(20_000, 30_000)),
+        FakeResponse(rows=inventory_rows(30_000, 40_000)),
+        FakeResponse(rows=inventory_rows(40_000, 47_382)),
+        FakeResponse(aggregations={"count": 47_382}),
+    ]
+    provider, _ = make_provider(namespace)
+
+    inventory = await provider.namespace_document_ids("fixture", max_documents=47_382)
+
+    assert inventory.document_ids == tuple(f"doc-{value:05d}" for value in range(47_382))
+    assert inventory.document_count == 47_382
+    assert not inventory.truncated
+    id_queries = [kwargs for operation, kwargs in namespace.calls if "rank_by" in kwargs]
+    assert id_queries == [
+        {
+            "rank_by": ("id", "asc"),
+            "top_k": 10_000,
+            "include_attributes": [],
+            "consistency": {"level": "strong"},
+        },
+        {
+            "rank_by": ("id", "asc"),
+            "top_k": 10_000,
+            "include_attributes": [],
+            "consistency": {"level": "strong"},
+            "filters": ("id", "Gt", "doc-09999"),
+        },
+        {
+            "rank_by": ("id", "asc"),
+            "top_k": 10_000,
+            "include_attributes": [],
+            "consistency": {"level": "strong"},
+            "filters": ("id", "Gt", "doc-19999"),
+        },
+        {
+            "rank_by": ("id", "asc"),
+            "top_k": 10_000,
+            "include_attributes": [],
+            "consistency": {"level": "strong"},
+            "filters": ("id", "Gt", "doc-29999"),
+        },
+        {
+            "rank_by": ("id", "asc"),
+            "top_k": 7_383,
+            "include_attributes": [],
+            "consistency": {"level": "strong"},
+            "filters": ("id", "Gt", "doc-39999"),
+        },
+    ]
+    assert namespace.calls[-1] == (
+        "query",
+        {
+            "aggregate_by": {"count": ("Count",)},
+            "consistency": {"level": "strong"},
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_document_id_inventory_preserves_ordered_integer_ids() -> None:
+    namespace = FakeNamespace()
+    namespace.query_responses = [
+        FakeResponse(rows=[{"id": 1}, {"id": 2}]),
+        FakeResponse(aggregations={"count": 2}),
+    ]
+    provider, _ = make_provider(namespace)
+
+    inventory = await provider.namespace_document_ids("fixture", max_documents=20)
+
+    assert inventory.document_ids == (1, 2)
+    assert not inventory.truncated
+
+
+@pytest.mark.asyncio
+async def test_document_id_inventory_collects_one_over_expected_across_page_boundary() -> None:
+    namespace = FakeNamespace()
+    namespace.query_responses = [
+        FakeResponse(rows=inventory_rows(0, 10_000)),
+        FakeResponse(rows=inventory_rows(10_000, 10_001)),
+        FakeResponse(aggregations={"count": 10_001}),
+    ]
+    provider, _ = make_provider(namespace)
+
+    inventory = await provider.namespace_document_ids("fixture", max_documents=10_000)
+
+    assert len(inventory.document_ids) == 10_001
+    assert inventory.document_ids[-1] == "doc-10000"
+    assert inventory.document_count == 10_001
+    assert inventory.truncated
+    assert namespace.calls[1] == (
+        "query",
+        {
+            "rank_by": ("id", "asc"),
+            "top_k": 1,
+            "include_attributes": [],
+            "consistency": {"level": "strong"},
+            "filters": ("id", "Gt", "doc-09999"),
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_document_id_inventory_handles_an_exact_full_page_with_empty_successor() -> None:
+    namespace = FakeNamespace()
+    namespace.query_responses = [
+        FakeResponse(rows=inventory_rows(0, 10_000)),
+        FakeResponse(rows=[]),
+        FakeResponse(aggregations={"count": 10_000}),
+    ]
+    provider, _ = make_provider(namespace)
+
+    inventory = await provider.namespace_document_ids("fixture", max_documents=10_000)
+
+    assert len(inventory.document_ids) == 10_000
+    assert not inventory.truncated
+    assert namespace.calls[1][1]["top_k"] == 1
+    assert namespace.calls[1][1]["filters"] == ("id", "Gt", "doc-09999")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("rows", "message"),
+    [
+        ([{"id": "doc-2"}, {"id": "doc-1"}], "duplicate or out of order"),
+        ([{"id": "doc-1"}, {"id": "doc-1"}], "duplicate or out of order"),
+        ([{"id": 1}, {"id": "doc-2"}], "mixed ID types"),
+        ([{"id": True}], "valid id"),
+    ],
+)
+async def test_document_id_inventory_rejects_invalid_page_ordering(
+    rows: list[dict[str, object]],
+    message: str,
+) -> None:
+    namespace = FakeNamespace()
+    namespace.query_responses = [FakeResponse(rows=rows)]
+    provider, _ = make_provider(namespace)
+
+    with pytest.raises(ValueError, match=message):
+        await provider.namespace_document_ids("fixture", max_documents=20)
+
+
+@pytest.mark.asyncio
+async def test_document_id_inventory_rejects_non_progress_across_pages() -> None:
+    namespace = FakeNamespace()
+    namespace.query_responses = [
+        FakeResponse(rows=inventory_rows(0, 10_000)),
+        FakeResponse(rows=[{"id": "doc-09999"}]),
+    ]
+    provider, _ = make_provider(namespace)
+
+    with pytest.raises(ValueError, match="duplicate or out of order"):
+        await provider.namespace_document_ids("fixture", max_documents=10_000)
+
+
+@pytest.mark.asyncio
+async def test_document_id_inventory_rejects_oversized_and_count_inconsistent_pages() -> None:
+    oversized = FakeNamespace()
+    oversized.query_responses = [FakeResponse(rows=inventory_rows(0, 10_001))]
+    oversized_provider, _ = make_provider(oversized)
+    with pytest.raises(ValueError, match="invalid document inventory page"):
+        await oversized_provider.namespace_document_ids("fixture", max_documents=20_000)
+
+    short = FakeNamespace()
+    short.query_responses = [
+        FakeResponse(rows=inventory_rows(0, 9_999)),
+        FakeResponse(aggregations={"count": 10_000}),
+    ]
+    short_provider, _ = make_provider(short)
+    with pytest.raises(ValueError, match="invalid document inventory"):
+        await short_provider.namespace_document_ids("fixture", max_documents=20_000)
 
 
 @pytest.mark.asyncio

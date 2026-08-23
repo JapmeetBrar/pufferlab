@@ -43,6 +43,8 @@ from pufferlab.providers.types import (
 
 type SdkFilter = tuple[object, ...]
 
+_DOCUMENT_ID_PAGE_SIZE = 10_000
+
 
 class _AsyncNamespace(Protocol):
     async def write(self, **kwargs: object) -> object: ...
@@ -381,25 +383,45 @@ class TurbopufferProvider:
         *,
         max_documents: int,
     ) -> ProviderDocumentIdInventory:
-        """Observe an exact small-namespace ID inventory with strong consistency.
+        """Observe a bounded exact ID inventory with strong-consistency keyset pages.
 
         Requesting one row beyond the expected maximum proves whether the bounded result is
-        complete. This is intentionally for small fixture namespaces, not general corpus scans.
+        complete without exceeding the provider's per-query result limit.
         """
         if max_documents < 1:
             raise ValueError("max_documents must be at least 1")
 
         provider_namespace = self._namespace(namespace)
         start = self._clock()
-        ids_response = await _call_sdk(
-            provider_namespace.query(
-                rank_by=("id", "asc"),
-                top_k=max_documents + 1,
-                include_attributes=[],
-                consistency={"level": "strong"},
-            ),
-            operation="namespace_document_ids",
-        )
+        inventory_limit = max_documents + 1
+        document_ids: list[str | int] = []
+        last_id: str | int | None = None
+        while len(document_ids) < inventory_limit:
+            page_size = min(_DOCUMENT_ID_PAGE_SIZE, inventory_limit - len(document_ids))
+            query: dict[str, object] = {
+                "rank_by": ("id", "asc"),
+                "top_k": page_size,
+                "include_attributes": [],
+                "consistency": {"level": "strong"},
+            }
+            if last_id is not None:
+                query["filters"] = ("id", "Gt", last_id)
+            ids_response = await _call_sdk(
+                provider_namespace.query(**query),
+                operation="namespace_document_ids",
+            )
+            rows = _query_rows(ids_response)
+            if len(rows) > page_size:
+                raise ValueError("turbopuffer returned an invalid document inventory page")
+            page_ids = tuple(_row_id(row) for row in rows)
+            for document_id in page_ids:
+                if last_id is not None:
+                    _require_document_id_progress(last_id, document_id)
+                document_ids.append(document_id)
+                last_id = document_id
+            if len(page_ids) < page_size:
+                break
+
         count_response = await _call_sdk(
             provider_namespace.query(
                 aggregate_by={"count": ("Count",)},
@@ -407,9 +429,6 @@ class TurbopufferProvider:
             ),
             operation="namespace_document_count",
         )
-        rows_value = getattr(ids_response, "rows", None)
-        rows = () if rows_value is None else cast(Sequence[object], rows_value)
-        document_ids = tuple(_row_id(row) for row in rows)
         document_count = _required_aggregation_count(count_response, "count")
         expected_returned_ids = min(document_count, max_documents + 1)
         if len(document_ids) != expected_returned_ids or len(set(document_ids)) != len(
@@ -417,7 +436,7 @@ class TurbopufferProvider:
         ):
             raise ValueError("turbopuffer returned an invalid document inventory")
         return ProviderDocumentIdInventory(
-            document_ids=document_ids,
+            document_ids=tuple(document_ids),
             document_count=document_count,
             truncated=document_count > max_documents,
             client_duration_ms=_elapsed_ms(start, self._clock()),
@@ -554,6 +573,28 @@ def _row_id(row: object) -> str | int:
     if not isinstance(document_id, str | int) or isinstance(document_id, bool):
         raise ValueError("turbopuffer row is missing a valid id")
     return document_id
+
+
+def _query_rows(response: object) -> tuple[object, ...]:
+    rows = getattr(response, "rows", None)
+    if rows is None:
+        return ()
+    if not isinstance(rows, Sequence) or isinstance(rows, str | bytes | bytearray):
+        raise ValueError("turbopuffer document inventory response has invalid rows")
+    return tuple(rows)
+
+
+def _require_document_id_progress(previous: str | int, current: str | int) -> None:
+    if isinstance(previous, str):
+        if not isinstance(current, str):
+            raise ValueError("turbopuffer document inventory contains mixed ID types")
+        progresses = current > previous
+    else:
+        if not isinstance(current, int):
+            raise ValueError("turbopuffer document inventory contains mixed ID types")
+        progresses = current > previous
+    if not progresses:
+        raise ValueError("turbopuffer document inventory IDs are duplicate or out of order")
 
 
 def _multi_query_rows(
