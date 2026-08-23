@@ -98,4 +98,4 @@ class RetrievalConfigSummary(ContractModel):
 
 class RetrievalConfigListResponse(ContractModel):
     contract_version: ContractVersion = 1
-    configs: list[RetrievalConfigSummary]
+    configs: list[RetrievalConfigSummary] = Field(max_length=100)
