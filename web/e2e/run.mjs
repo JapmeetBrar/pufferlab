@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 
 const webRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const repositoryRoot = path.resolve(webRoot, "..");
+const browserArtifacts = path.join(webRoot, "test-results");
 const temporaryRoot = await mkdtemp(path.join(tmpdir(), "pufferlab-browser-gate-"));
 const dataDirectory = path.join(temporaryRoot, "data");
 const guardMarker = path.join(temporaryRoot, "guard-tripped.txt");
@@ -180,6 +181,7 @@ try {
   } catch (error) {
     if (error?.code !== "ENOENT") throw error;
   }
+  await rm(browserArtifacts, { recursive: true, force: true });
 } catch (error) {
   failure = error;
 } finally {

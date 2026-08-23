@@ -11,6 +11,7 @@ import {
   type SearchCompareRequest,
 } from "../../api/client";
 import { ComparisonResults } from "./ComparisonResults";
+import { currentCapabilityReadiness } from "./capabilityState";
 
 type Config = RetrievalConfigListResponse["configs"][number];
 type LivePlaygroundCapability = CapabilitiesResponse["live_playground"];
@@ -122,8 +123,13 @@ export function Playground() {
     queryFn: ({ signal }) => getCapabilities(signal),
     retry: false,
   });
-  const livePlayground = capabilities.data?.live_playground;
-  const locallyConfigured = livePlayground?.state === "locally_configured";
+  const capabilityReadiness = currentCapabilityReadiness(capabilities);
+  const livePlayground =
+    capabilityReadiness.state === "action_required" ||
+    capabilityReadiness.state === "locally_configured"
+      ? capabilityReadiness.capability
+      : undefined;
+  const locallyConfigured = capabilityReadiness.state === "locally_configured";
   const configs = useQuery({
     queryKey: ["retrieval-configs"],
     queryFn: ({ signal }) => getRetrievalConfigs(signal),
@@ -180,12 +186,12 @@ export function Playground() {
           </p>
         </div>
         <form className="query-console" onSubmit={submit}>
-          {capabilities.isPending && (
+          {capabilityReadiness.state === "checking" && (
             <p className="capability-loading" role="status">
               Checking local live-search setup before enabling comparison…
             </p>
           )}
-          {capabilities.isError && (
+          {capabilityReadiness.state === "unavailable" && (
             <div className="capability-guidance capability-error" role="alert">
               <div>
                 <strong>Local live-search setup could not be checked.</strong>
@@ -235,7 +241,7 @@ export function Playground() {
               Loading retrieval configurations…
             </p>
           )}
-          {configs.isError && (
+          {locallyConfigured && configs.isError && (
             <div className="config-error" role="alert">
               <span>Retrieval configurations are unavailable.</span>
               <button type="button" onClick={() => void configs.refetch()}>
@@ -243,7 +249,7 @@ export function Playground() {
               </button>
             </div>
           )}
-          {configs.isSuccess && availableConfigs.length === 0 && (
+          {locallyConfigured && configs.isSuccess && availableConfigs.length === 0 && (
             <div className="config-error" role="status">
               <span>No retrieval configurations have been seeded yet.</span>
               <button type="button" onClick={() => void configs.refetch()}>

@@ -326,6 +326,76 @@ describe("App playground", () => {
     );
   });
 
+  it("invalidates stale configured readiness while a navigation refetch fails", async () => {
+    let capabilityCount = 0;
+    let resolveFailedRefetch: ((value: Response) => void) | undefined;
+    const fetchMock = vi.fn((...args: [input: string | URL | Request, init?: RequestInit]) => {
+      const url = requestUrl(args[0]);
+      if (url.endsWith("/api/v1/health")) {
+        return Promise.resolve(jsonResponse({ contract_version: 1, status: "ok", version: "0.1.0" }));
+      }
+      if (url.endsWith("/api/v1/capabilities")) {
+        capabilityCount += 1;
+        if (capabilityCount === 1) {
+          return Promise.resolve(jsonResponse(locallyConfiguredCapabilities));
+        }
+        return new Promise<Response>((resolve) => { resolveFailedRefetch = resolve; });
+      }
+      if (url.endsWith("/api/v1/configs")) return Promise.resolve(jsonResponse(configs));
+      if (url.endsWith("/api/v1/eval-runs?limit=50")) {
+        return Promise.resolve(jsonResponse({ contract_version: 1, runs: [] }));
+      }
+      if (url.endsWith("/api/v1/datasets")) {
+        return Promise.resolve(jsonResponse({ contract_version: 1, datasets: [] }));
+      }
+      return Promise.reject(new Error(`Unexpected request: ${url}`));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    renderApp();
+
+    await screen.findAllByRole("option", { name: "Exact terms · bm25" });
+    expect(screen.getByText("Live search locally configured · remote unchecked")).toBeVisible();
+    const initialConfigRequests = fetchMock.mock.calls.filter(([input]) =>
+      requestUrl(input).endsWith("/api/v1/configs"),
+    ).length;
+
+    const navigation = screen.getByRole("navigation", { name: "Primary navigation" });
+    fireEvent.click(within(navigation).getByRole("link", { name: "Evaluation runs" }));
+    await screen.findByRole("heading", { name: "Evaluation runs", level: 1 });
+    fireEvent.click(within(navigation).getByRole("link", { name: "Playground" }));
+
+    expect(await screen.findByText(/Checking local live-search setup/)).toBeVisible();
+    expect(screen.getByText("Checking live-search setup")).toBeVisible();
+    expect(screen.queryByText("Live search locally configured · remote unchecked")).not.toBeInTheDocument();
+    expect(screen.queryByText("Live-search setup needed")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Compare results" })).toBeDisabled();
+
+    resolveFailedRefetch?.(
+      jsonResponse(
+        {
+          code: "configuration_required",
+          message: "The local capability check is unavailable.",
+          retryable: true,
+          trace_id: "capability-refetch-503",
+        },
+        503,
+      ),
+    );
+
+    expect(await screen.findByText("Live-search setup unavailable")).toBeVisible();
+    expect(screen.getByText("Local live-search setup could not be checked.")).toBeVisible();
+    expect(screen.queryByText("Live search locally configured · remote unchecked")).not.toBeInTheDocument();
+    expect(screen.queryByText("Live-search setup needed")).not.toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Search query"), { target: { value: "permission mode" } });
+    fireEvent.click(screen.getByRole("button", { name: "Compare results" }));
+
+    expect(screen.getByRole("button", { name: "Compare results" })).toBeDisabled();
+    expect(fetchMock.mock.calls.filter(([input]) =>
+      requestUrl(input).endsWith("/api/v1/configs"),
+    )).toHaveLength(initialConfigRequests);
+    expect(fetchMock.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
+  });
+
   it("disables the form and announces an in-flight comparison", async () => {
     let resolveComparison: ((value: Response) => void) | undefined;
     const fetchMock = vi.fn((input: string | URL | Request) => {

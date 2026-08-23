@@ -4,6 +4,7 @@ import { getCapabilities, getHealth } from "../api/client";
 import { RunDetailPage } from "../features/evals/RunDetailPage";
 import { RunListPage } from "../features/evals/RunListPage";
 import { QueryDetailPage } from "../features/evals/QueryDetailPage";
+import { currentCapabilityReadiness } from "../features/playground/capabilityState";
 import {
   isUuid,
   readPlaygroundForensicIdentity,
@@ -33,7 +34,7 @@ export function App() {
     queryFn: ({ signal }) => getCapabilities(signal),
     retry: false,
   });
-  const livePlayground = capabilities.data?.live_playground;
+  const liveSearchReadiness = currentCapabilityReadiness(capabilities);
   const queryMatch = /^\/runs\/([^/]+)\/queries\/([^/]+)$/.exec(location.pathname);
   const queryRunId = queryMatch?.[1] === undefined ? null : decodePathId(queryMatch[1]);
   const queryId = queryMatch?.[2] === undefined ? null : decodePathId(queryMatch[2]);
@@ -82,13 +83,13 @@ export function App() {
           </div>
           <div className="service-status live-search-status">
             <span
-              className={`status-dot ${livePlayground?.state === "locally_configured" ? "is-local" : ""}`}
+              className={`status-dot ${liveSearchReadiness.state === "locally_configured" ? "is-local" : ""}`}
               aria-hidden="true"
             />
-            {capabilities.isPending && "Checking live-search setup"}
-            {capabilities.isError && "Live-search setup unavailable"}
-            {livePlayground?.state === "action_required" && "Live-search setup needed"}
-            {livePlayground?.state === "locally_configured" &&
+            {liveSearchReadiness.state === "checking" && "Checking live-search setup"}
+            {liveSearchReadiness.state === "unavailable" && "Live-search setup unavailable"}
+            {liveSearchReadiness.state === "action_required" && "Live-search setup needed"}
+            {liveSearchReadiness.state === "locally_configured" &&
               "Live search locally configured · remote unchecked"}
           </div>
         </div>
