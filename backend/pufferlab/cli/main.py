@@ -6,15 +6,39 @@ import argparse
 import asyncio
 import sys
 from collections.abc import Callable, Sequence
+from pathlib import Path
 from typing import Protocol, TextIO
+from uuid import UUID, uuid4
 
+from pufferlab.cli.evaluation import (
+    CliApplication,
+    CliApplicationFactory,
+    CompactEvalProgress,
+    ConfigSeedOptions,
+    EvalExportOptions,
+    EvalRunOptions,
+    EvaluationCommandError,
+    SeedResult,
+    UnixIngestOptions,
+    render_run,
+    render_seed,
+    run_exit_code,
+    validate_export_destination,
+    write_canonical_export,
+)
 from pufferlab.cli.ingest import (
     IngestTinyOptions,
     TinyFixtureIngestor,
     TinyIngestionCommandError,
+    resolve_owned_namespace,
 )
 from pufferlab.config import Settings
+from pufferlab.contracts.common import ContractModel
+from pufferlab.contracts.evals import EvalRun, EvalRunStatus
 from pufferlab.datasets.ingestion import IngestionReport
+
+_UNIX_PREFIX = "pufferlab-unix-"
+_UNIX_DATASET_DIR = Path("datasets/cqadupstack-unix")
 
 
 class _IngestRunner(Protocol):
@@ -27,20 +51,144 @@ class _IngestRunner(Protocol):
     ) -> IngestionReport: ...
 
 
+class _EvaluationInterrupted(Exception):
+    """Carry only safe, durable interrupt-cleanup state across ``asyncio.run``."""
+
+    def __init__(
+        self,
+        *,
+        durable_status: EvalRunStatus | None,
+        cleanup_failed: bool,
+    ) -> None:
+        super().__init__("evaluation interrupted")
+        self.durable_status = durable_status
+        self.cleanup_failed = cleanup_failed
+
+
 def main(
     argv: Sequence[str] | None = None,
     *,
     settings_factory: Callable[[], Settings] = Settings,
     ingest_runner: _IngestRunner | None = None,
+    cli_application_factory: CliApplicationFactory | None = None,
+    run_id_factory: Callable[[], UUID] = uuid4,
     stdout: TextIO | None = None,
     stderr: TextIO | None = None,
 ) -> int:
     output = stdout or sys.stdout
     error_output = stderr or sys.stderr
-    arguments = _parser().parse_args(argv)
-    if arguments.command != "dataset" or arguments.dataset_command != "ingest-tiny":
-        raise AssertionError("argparse returned an unknown command")
+    parser = _parser()
+    arguments = parser.parse_args(argv)
 
+    if arguments.command == "dataset" and arguments.dataset_command == "ingest-tiny":
+        return _run_tiny_ingest(
+            arguments,
+            settings_factory=settings_factory,
+            ingest_runner=ingest_runner,
+            output=output,
+            error_output=error_output,
+        )
+
+    factory = cli_application_factory or _default_application_factory
+    try:
+        settings = settings_factory()
+        if arguments.command == "dataset" and arguments.dataset_command == "ingest-unix":
+            namespace = resolve_owned_namespace(
+                arguments.namespace,
+                generated_prefix=_UNIX_PREFIX,
+            )
+            unix_options = UnixIngestOptions(
+                namespace=namespace,
+                processed_pack_path=arguments.processed_pack,
+                source_lock_path=arguments.source_lock,
+                processed_pack_lock_path=arguments.processed_pack_lock,
+                dataset_manifest_path=arguments.dataset_manifest,
+                curated_manifest_path=arguments.curated_manifest,
+                batch_size=arguments.batch_size,
+                max_concurrency=arguments.max_concurrency,
+                readiness_attempts=arguments.readiness_attempts,
+            )
+            _validate_unix_paths(unix_options, settings=settings)
+            print(
+                "unix ingestion plan (local model execution and remote writes follow)", file=output
+            )
+            print(f"region={settings.turbopuffer_region}", file=output)
+            print(f"namespace={namespace}", file=output)
+            print("processed_pack=explicit verified local path", file=output)
+            result = asyncio.run(
+                _ingest_unix(
+                    factory(settings),
+                    unix_options,
+                    emit=lambda message: print(message, file=output),
+                )
+            )
+            render_seed(result, emit=lambda message: print(message, file=output))
+            return 0
+
+        if arguments.command == "config" and arguments.config_command == "seed":
+            seed_options = ConfigSeedOptions(dataset_version_id=arguments.dataset_version)
+            result = asyncio.run(_seed_configs(factory(settings), seed_options))
+            render_seed(result, emit=lambda message: print(message, file=output))
+            return 0
+
+        if arguments.command == "eval" and arguments.eval_command == "run":
+            run_options = _eval_run_options(arguments, parser)
+            run_id = run_id_factory()
+            application = factory(settings)
+            progress = CompactEvalProgress(lambda message: print(message, file=output))
+            try:
+                run = asyncio.run(
+                    _run_evaluation(
+                        application,
+                        run_options,
+                        run_id=run_id,
+                        on_progress=progress,
+                    )
+                )
+            except _EvaluationInterrupted as interrupted:
+                _render_evaluation_interrupt(run_id, interrupted, output=error_output)
+                return 130
+            except KeyboardInterrupt:
+                print(
+                    f"run_id={run_id} status=interrupt_requested cleanup=unknown",
+                    file=error_output,
+                )
+                return 130
+            render_run(run, emit=lambda message: print(message, file=output))
+            return run_exit_code(run)
+
+        if arguments.command == "eval" and arguments.eval_command == "export":
+            export_options = EvalExportOptions(
+                run_id=arguments.run_id,
+                output_path=arguments.output,
+                overwrite=arguments.overwrite,
+            )
+            validate_export_destination(export_options, settings=settings)
+            export = asyncio.run(_load_export(factory(settings), export_options.run_id))
+            path = write_canonical_export(export, export_options, settings=settings)
+            print(f"exported run_id={export_options.run_id} path={path}", file=output)
+            return 0
+    except (EvaluationCommandError, TinyIngestionCommandError) as error:
+        print(f"error: {error}", file=error_output)
+        return error.exit_code
+    except KeyboardInterrupt:
+        print("error: command cancelled", file=error_output)
+        return 130
+    except Exception:
+        print(f"error: {_failure_message(arguments)}", file=error_output)
+        return 1
+
+    raise AssertionError("argparse returned an unknown command")
+
+
+def _run_tiny_ingest(
+    arguments: argparse.Namespace,
+    *,
+    settings_factory: Callable[[], Settings],
+    ingest_runner: _IngestRunner | None,
+    output: TextIO,
+    error_output: TextIO,
+) -> int:
     options = IngestTinyOptions(
         namespace=arguments.namespace,
         batch_size=arguments.batch_size,
@@ -65,15 +213,194 @@ def main(
     return 0
 
 
+async def _ingest_unix(
+    application: CliApplication,
+    options: UnixIngestOptions,
+    *,
+    emit: Callable[[str], None],
+) -> SeedResult:
+    try:
+        return await application.ingest_unix(options, emit=emit)
+    finally:
+        await application.close()
+
+
+async def _seed_configs(
+    application: CliApplication,
+    options: ConfigSeedOptions,
+) -> SeedResult:
+    try:
+        return application.seed(options)
+    finally:
+        await application.close()
+
+
+async def _run_evaluation(
+    application: CliApplication,
+    options: EvalRunOptions,
+    *,
+    run_id: UUID,
+    on_progress: CompactEvalProgress,
+) -> EvalRun:
+    interrupted = False
+    try:
+        return await application.run(
+            options,
+            run_id=run_id,
+            on_progress=on_progress,
+        )
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        interrupted = True
+        durable_status: EvalRunStatus | None = None
+        cleanup_failed = False
+        try:
+            durable = await asyncio.shield(application.cancel_and_drain(run_id))
+            durable_status = durable.status
+        except (Exception, asyncio.CancelledError, KeyboardInterrupt):
+            cleanup_failed = True
+        try:
+            await asyncio.shield(application.close())
+        except (Exception, asyncio.CancelledError, KeyboardInterrupt):
+            cleanup_failed = True
+        raise _EvaluationInterrupted(
+            durable_status=durable_status,
+            cleanup_failed=cleanup_failed,
+        ) from None
+    finally:
+        if not interrupted:
+            await application.close()
+
+
+def _render_evaluation_interrupt(
+    run_id: UUID,
+    interrupted: _EvaluationInterrupted,
+    *,
+    output: TextIO,
+) -> None:
+    fields = [f"run_id={run_id}"]
+    if interrupted.durable_status is None:
+        fields.append("status=interrupt_requested")
+    else:
+        fields.extend(
+            (
+                f"status={interrupted.durable_status.value}",
+                "interrupt_requested=true",
+            )
+        )
+    if interrupted.cleanup_failed:
+        fields.append("cleanup=failed")
+    print(" ".join(fields), file=output)
+
+
+async def _load_export(application: CliApplication, run_id: UUID) -> ContractModel:
+    try:
+        return application.export(run_id)
+    finally:
+        await application.close()
+
+
+def _eval_run_options(
+    arguments: argparse.Namespace,
+    parser: argparse.ArgumentParser,
+) -> EvalRunOptions:
+    explicit_values = (
+        arguments.query_set,
+        arguments.baseline,
+        arguments.candidates,
+    )
+    if arguments.seeded_defaults:
+        if any(value for value in explicit_values):
+            parser.error(
+                "--seeded-defaults cannot be combined with --query-set, --baseline, or --candidate"
+            )
+    elif arguments.query_set is None or arguments.baseline is None or not arguments.candidates:
+        parser.error(
+            "eval run requires --seeded-defaults or all of --query-set, --baseline, and --candidate"
+        )
+    candidate_ids = tuple(arguments.candidates)
+    if len(candidate_ids) > 3:
+        parser.error("--candidate may be repeated at most three times")
+    if len(set(candidate_ids)) != len(candidate_ids):
+        parser.error("--candidate values must be unique")
+    if arguments.baseline in candidate_ids:
+        parser.error("the baseline cannot also be a candidate")
+    return EvalRunOptions(
+        query_set_id=arguments.query_set,
+        baseline_config_id=arguments.baseline,
+        candidate_config_ids=candidate_ids,
+        seeded_defaults=arguments.seeded_defaults,
+        random_seed=arguments.random_seed,
+        max_concurrency=arguments.max_concurrency,
+        warmup_query_count=arguments.warmup_count,
+    )
+
+
+def _validate_unix_paths(options: UnixIngestOptions, *, settings: Settings) -> None:
+    data_dir = settings.pufferlab_data_dir.resolve()
+    processed = options.processed_pack_path.expanduser().resolve()
+    try:
+        processed.relative_to(data_dir)
+    except ValueError:
+        raise EvaluationCommandError(
+            "processed pack must be inside PUFFERLAB_DATA_DIR",
+            exit_code=2,
+        ) from None
+    if options.processed_pack_path.is_symlink() or not processed.is_dir():
+        raise EvaluationCommandError(
+            "processed pack must be an existing non-symbolic-link directory",
+            exit_code=2,
+        )
+    checked_paths = (
+        options.source_lock_path,
+        options.processed_pack_lock_path,
+        options.dataset_manifest_path,
+        options.curated_manifest_path,
+    )
+    if any(path.is_symlink() or not path.is_file() for path in checked_paths):
+        raise EvaluationCommandError(
+            "Unix source locks and manifests must be existing non-symbolic-link files",
+            exit_code=2,
+        )
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="pufferlab",
-        description="PufferLab local workflows.",
+        description="PufferLab local dataset and judged-evaluation workflows.",
     )
     commands = parser.add_subparsers(dest="command", required=True)
-    dataset = commands.add_parser("dataset", help="Manage fixture datasets.")
+
+    dataset = commands.add_parser("dataset", help="Prepare and ingest evaluation datasets.")
     dataset_commands = dataset.add_subparsers(dest="dataset_command", required=True)
-    ingest = dataset_commands.add_parser(
+    _add_tiny_ingest_parser(dataset_commands)
+    _add_unix_ingest_parser(dataset_commands)
+
+    config = commands.add_parser("config", help="Manage immutable retrieval configurations.")
+    config_commands = config.add_subparsers(dest="config_command", required=True)
+    seed = config_commands.add_parser(
+        "seed",
+        help="Persist the four canonical retrieval configurations.",
+        description=(
+            "Persist the four canonical retrieval configurations—BM25, ANN, server RRF, and "
+            "local reranker—for one READY dataset. PUFFERLAB_DATA_DIR selects the local SQLite "
+            "state. No provider write is performed."
+        ),
+    )
+    seed.add_argument(
+        "--dataset-version",
+        type=_uuid,
+        help="READY dataset revision UUID; omit only when one seeded Unix default is unambiguous.",
+    )
+
+    evaluation = commands.add_parser("eval", help="Run and export durable judged evaluations.")
+    evaluation_commands = evaluation.add_subparsers(dest="eval_command", required=True)
+    _add_eval_run_parser(evaluation_commands)
+    _add_eval_export_parser(evaluation_commands)
+    return parser
+
+
+def _add_tiny_ingest_parser(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    ingest = commands.add_parser(
         "ingest-tiny",
         help="Embed and upsert the checked-in 20-document fixture.",
         description=(
@@ -82,32 +409,151 @@ def _parser() -> argparse.ArgumentParser:
             "TURBOPUFFER_REGION selects the target region."
         ),
     )
+    _add_ingest_arguments(ingest, default_batch_size=20)
+
+
+def _add_unix_ingest_parser(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    ingest = commands.add_parser(
+        "ingest-unix",
+        help="Resume the verified CQADupStack Unix ingestion and persist its eval seed.",
+        description=(
+            "Verify an ignored CQADupStack Unix processed pack, run the pinned local embedding "
+            "model, perform cost-bearing turbopuffer writes, and persist the READY dataset and "
+            "50-query seed. TURBOPUFFER_API_KEY, TURBOPUFFER_REGION, PUFFERLAB_DATA_DIR, and an "
+            "explicit --processed-pack are required inputs."
+        ),
+    )
+    _add_ingest_arguments(ingest, default_batch_size=64)
     ingest.add_argument(
+        "--processed-pack",
+        type=Path,
+        required=True,
+        help="Ignored content-addressed processed-pack directory under PUFFERLAB_DATA_DIR.",
+    )
+    ingest.add_argument(
+        "--source-lock",
+        type=Path,
+        default=_UNIX_DATASET_DIR / "source-lock.json",
+        help="Checked source lock (default: datasets/cqadupstack-unix/source-lock.json).",
+    )
+    ingest.add_argument(
+        "--processed-pack-lock",
+        type=Path,
+        default=_UNIX_DATASET_DIR / "processed-pack-lock.json",
+        help="Checked processed-pack lock.",
+    )
+    ingest.add_argument(
+        "--dataset-manifest",
+        type=Path,
+        default=_UNIX_DATASET_DIR / "dataset-manifest.json",
+        help="Checked Unix dataset/index manifest.",
+    )
+    ingest.add_argument(
+        "--curated-manifest",
+        type=Path,
+        default=_UNIX_DATASET_DIR / "curated-50.json",
+        help="Checked ID-only curated 50-query manifest.",
+    )
+
+
+def _add_ingest_arguments(parser: argparse.ArgumentParser, *, default_batch_size: int) -> None:
+    parser.add_argument(
         "--namespace",
         help=(
             "Explicit owned pufferlab-* target for an idempotent rerun. "
-            "Omit to generate a unique random pufferlab-tiny-* namespace."
+            "Omit to generate a unique owned namespace."
         ),
     )
-    ingest.add_argument(
+    parser.add_argument(
         "--batch-size",
         type=_positive_int,
-        default=20,
-        help="Documents per embedding/upsert batch (default: 20).",
+        default=default_batch_size,
+        help=f"Documents per embedding/upsert batch (default: {default_batch_size}).",
     )
-    ingest.add_argument(
+    parser.add_argument(
         "--max-concurrency",
         type=_positive_int,
         default=2,
         help="Maximum concurrent ingestion batches (default: 2).",
     )
-    ingest.add_argument(
+    parser.add_argument(
         "--readiness-attempts",
         type=_positive_int,
         default=180,
         help="Bounded metadata/index readiness checks (default: 180 at 0.5s intervals).",
     )
-    return parser
+
+
+def _add_eval_run_parser(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    run = commands.add_parser(
+        "run",
+        help="Execute and incrementally persist one judged evaluation.",
+        description=(
+            "Execute a judged query set through turbopuffer and pinned local embedding/reranking "
+            "models. TURBOPUFFER_API_KEY and TURBOPUFFER_REGION select the cost-bearing provider "
+            "target; PUFFERLAB_DATA_DIR stores durable SQLite state. Progress is emitted only "
+            "after outcomes commit."
+        ),
+    )
+    run.add_argument(
+        "--seeded-defaults",
+        action="store_true",
+        help="Use the canonical 50-query set, BM25 baseline, and other three seeded candidates.",
+    )
+    run.add_argument("--query-set", type=_uuid, help="Persisted judged query-set UUID.")
+    run.add_argument("--baseline", type=_uuid, help="Persisted baseline config UUID.")
+    run.add_argument(
+        "--candidate",
+        dest="candidates",
+        action="append",
+        type=_uuid,
+        default=[],
+        help="Persisted candidate config UUID; repeat one to three times.",
+    )
+    run.add_argument("--random-seed", type=int, default=20260822)
+    run.add_argument("--max-concurrency", type=_positive_int, default=4)
+    run.add_argument("--warmup-count", type=_nonnegative_int, default=5)
+
+
+def _add_eval_export_parser(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    export = commands.add_parser(
+        "export",
+        help="Write one durable run and its outcomes as canonical JSON.",
+        description=(
+            "Export completed, failed, cancelled, interrupted, or partial durable state without "
+            "inventing outcomes. The explicit output must stay under ignored PUFFERLAB_DATA_DIR; "
+            "credential values, raw vectors, and provider request data are never printed."
+        ),
+    )
+    export.add_argument("run_id", type=_uuid, help="Durable evaluation run UUID.")
+    export.add_argument("--format", choices=("json",), default="json")
+    export.add_argument(
+        "--output",
+        type=Path,
+        required=True,
+        help="Explicit file path inside PUFFERLAB_DATA_DIR (relative paths resolve beneath it).",
+    )
+    export.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Atomically replace an existing regular export file; symbolic links are refused.",
+    )
+
+
+def _failure_message(arguments: argparse.Namespace) -> str:
+    if arguments.command == "dataset":
+        return "Unix dataset ingestion failed"
+    if arguments.command == "config":
+        return "configuration seed failed"
+    if arguments.eval_command == "run":
+        return "evaluation run failed"
+    return "evaluation export failed"
+
+
+def _default_application_factory(settings: Settings) -> CliApplication:
+    from pufferlab.cli.runtime import RuntimeCliApplication
+
+    return RuntimeCliApplication(settings)
 
 
 def _positive_int(value: str) -> int:
@@ -115,3 +561,17 @@ def _positive_int(value: str) -> int:
     if parsed < 1:
         raise argparse.ArgumentTypeError("must be at least 1")
     return parsed
+
+
+def _nonnegative_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be at least 0")
+    return parsed
+
+
+def _uuid(value: str) -> UUID:
+    try:
+        return UUID(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("must be a UUID") from None

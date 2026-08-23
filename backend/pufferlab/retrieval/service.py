@@ -51,7 +51,13 @@ from pufferlab.retrieval.errors import (
 )
 from pufferlab.retrieval.filter_validation import FixtureFilterValidator
 from pufferlab.retrieval.rrf import RrfEntry, reconstruct_rrf
-from pufferlab.retrieval.types import QueryEmbedder, QueryEmbedding, RetrievalProvider
+from pufferlab.retrieval.types import (
+    QueryEmbedder,
+    QueryEmbedding,
+    RetrievalProvider,
+    SearchExecuteRequest,
+    SearchExecuteResult,
+)
 
 _INCLUDE_ATTRIBUTES = ("external_id", "title", "body", "source_url")
 _OBSERVABILITY_NOTICE = (
@@ -103,6 +109,24 @@ class SearchCompareService:
             observability_notice=_OBSERVABILITY_NOTICE,
         )
 
+    async def search_one(self, request: SearchExecuteRequest) -> SearchExecuteResult:
+        if request.namespace != self._namespace:
+            raise invalid_search("execution namespace does not match the configured namespace")
+        if not request.query_text:
+            raise invalid_search("query_text must not be empty")
+        self._validate_filter(request.filter_override)
+        config = self._resolve_configs((request.config_id,))[0]
+        result = await self._run_config(
+            config,
+            request=request,
+            trace_id=self._trace_id_factory(),
+        )
+        return SearchExecuteResult(
+            config_id=config.summary.id,
+            query_id=request.query_id,
+            result=result,
+        )
+
     def _validate_filter(self, filter_override: FilterNode | None) -> None:
         if filter_override is not None:
             self._filter_validator.validate(filter_override)
@@ -125,7 +149,7 @@ class SearchCompareService:
         self,
         config: SeededSearchConfig,
         *,
-        request: SearchCompareRequest,
+        request: SearchCompareRequest | SearchExecuteRequest,
         trace_id: UUID,
     ) -> ConfigSearchResult:
         if config.mode is RetrievalMode.BM25:
@@ -172,7 +196,7 @@ class SearchCompareService:
         self,
         config: SeededSearchConfig,
         *,
-        request: SearchCompareRequest,
+        request: SearchCompareRequest | SearchExecuteRequest,
         trace_id: UUID,
     ) -> ConfigSearchResult:
         embedding = await self._embed_query(config, request.query_text)
@@ -298,7 +322,7 @@ class SearchCompareService:
     async def _query_bm25(
         self,
         config: SeededSearchConfig,
-        request: SearchCompareRequest,
+        request: SearchCompareRequest | SearchExecuteRequest,
     ) -> ProviderQueryResult:
         if config.lexical_fields is None:
             raise invalid_search("BM25 configuration is incomplete")
@@ -324,7 +348,7 @@ class SearchCompareService:
     async def _query_ann(
         self,
         config: SeededSearchConfig,
-        request: SearchCompareRequest,
+        request: SearchCompareRequest | SearchExecuteRequest,
         embedding: QueryEmbedding,
     ) -> ProviderQueryResult:
         if config.vector_attribute is None or config.distance_metric is None:
@@ -351,7 +375,7 @@ class SearchCompareService:
     async def _query_hybrid_rrf(
         self,
         config: SeededSearchConfig,
-        request: SearchCompareRequest,
+        request: SearchCompareRequest | SearchExecuteRequest,
         embedding: QueryEmbedding,
     ) -> ProviderQueryResult:
         lexical_fields, vector_attribute, distance_metric = _required_hybrid_attributes(config)
@@ -387,7 +411,7 @@ class SearchCompareService:
     async def _probe_hybrid_candidates(
         self,
         config: SeededSearchConfig,
-        request: SearchCompareRequest,
+        request: SearchCompareRequest | SearchExecuteRequest,
         embedding: QueryEmbedding,
     ) -> ProviderHybridProbeResult:
         lexical_fields, vector_attribute, distance_metric = _required_hybrid_attributes(config)

@@ -104,7 +104,7 @@ without committing the licensed inputs used to derive them.
 
 ## Evaluation and ingestion application boundary
 
-M2-E should call `UnixDatasetApplicationService.from_paths(...).ingest` with its provider-neutral
+The production CLI calls `UnixDatasetApplicationService.from_paths(...).ingest` with its provider-neutral
 `IngestionService`, absolute-data-directory `IngestionCheckpointStore`, verified processed-pack
 path, checked source/processed-pack locks, and manifest paths. The application service owns local
 materialization, fail-closed provenance/content verification, checkpoint lookup/save, stable-ID
@@ -122,9 +122,24 @@ The successful `UnixIngestionResult` exposes an `IngestionReport` plus one deter
   field.
 
 IDs and content hashes are UUIDv5/SHA-256 derivations of immutable inputs. The logical revision
-timestamp is the pinned upstream dump date rather than local wall-clock time. M2-E may persist
-`dataset_version`, `query_set`, and `judged_queries` directly; it can retain the parallel curation
-metadata in application memory for analysis without parsing the ID-only manifest again.
+timestamp is the pinned upstream dump date rather than local wall-clock time. The application
+persists `dataset_version`, `query_set`, and `judged_queries` directly and retains the parallel
+curation metadata in application memory without parsing the ID-only manifest again.
+
+From the repository root, the end-to-end commands after local-pack preparation are:
+
+```bash
+uv sync --extra live-search
+uv run pufferlab dataset ingest-unix --processed-pack \
+  data/cqadupstack-unix/processed/cqadupstack-unix-6d54fb92c04b9f193d081a7c430d8804e24e71855d3cbaa2bb50cde838f181b8
+uv run pufferlab eval run --seeded-defaults
+uv run pufferlab eval export <run-id> --output exports/<run-id>.json
+```
+
+The ingestion command itself persists the dataset/query/config seed. `pufferlab config seed` is an
+idempotent control-plane-only repair when the dataset and query-set revisions already exist. SQLite,
+checkpoints, model caches, and exports stay under ignored local paths. The CLI contains no Unix
+namespace deletion surface.
 
 ## Resume and namespace safety
 

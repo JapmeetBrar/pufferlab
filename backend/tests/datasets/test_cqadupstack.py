@@ -33,6 +33,7 @@ from pufferlab.datasets.cqadupstack import (
     iter_processed_qrels,
     iter_processed_queries,
     load_curated_unix_corpus,
+    load_unix_dataset_manifest,
     prepare_unix_pack,
     processed_content_sha256,
     source_lock_sha256,
@@ -40,6 +41,14 @@ from pufferlab.datasets.cqadupstack import (
     verify_archive,
     verify_processed_pack,
 )
+
+
+def test_public_unix_manifest_loader_rejects_duplicate_json_keys(tmp_path: Path) -> None:
+    manifest = tmp_path / "dataset-manifest.json"
+    manifest.write_text('{"slug":"first","slug":"second"}', encoding="utf-8")
+
+    with pytest.raises(DatasetPreparationError, match="duplicate key"):
+        load_unix_dataset_manifest(manifest)
 
 
 def test_prepare_is_deterministic_content_addressed_and_attributed(tmp_path: Path) -> None:

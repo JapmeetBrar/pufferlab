@@ -29,7 +29,8 @@ from pufferlab.providers.types import (
 from pufferlab.retrieval.config import build_search_catalog
 from pufferlab.retrieval.errors import SearchError
 from pufferlab.retrieval.service import SearchCompareService
-from pufferlab.retrieval.types import QueryEmbedding
+from pufferlab.retrieval.types import QueryEmbedding, SearchExecuteRequest
+from pydantic import ValidationError
 
 MODEL = "BAAI/bge-small-en-v1.5"
 REVISION = "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a"
@@ -302,6 +303,54 @@ def test_catalog_lexical_weights_are_executable_and_part_of_identity() -> None:
         result_k=3,
         lexical=LexicalSpec(title_weight=0.0, body_weight=1.0),
     ).configs[0].lexical_fields == (("body", 1.0),)
+
+
+@pytest.mark.asyncio
+async def test_single_config_execution_preserves_identity_and_http_request_stays_multi_config() -> (
+    None
+):
+    service, provider, _, _ = _service()
+    bm25, _, _, _ = service.list_configs()
+    query_id = uuid4()
+
+    response = await service.search_one(
+        SearchExecuteRequest(
+            namespace="pufferlab-test",
+            query_text="find terminal basics",
+            config_id=bm25.id,
+            query_id=query_id,
+            expected_document_ids=(DOCUMENT_B,),
+        )
+    )
+
+    assert response.config_id == bm25.id
+    assert response.query_id == query_id
+    assert response.result.config == bm25
+    assert [hit.external_id for hit in response.result.hits] == ["a", "b"]
+    assert response.result.hits[1].relevance_grade == 1
+    assert [membership.stage for membership in response.result.hits[0].stage_membership] == [
+        RetrievalStage.FINAL
+    ]
+    assert len(provider.bm25_calls) == 1
+    with pytest.raises(ValidationError, match="at least 2 items"):
+        SearchCompareRequest(query_text="query", config_ids=[bm25.id])
+
+
+@pytest.mark.asyncio
+async def test_single_config_execution_rejects_namespace_mismatch_before_provider_use() -> None:
+    service, provider, _, _ = _service()
+    bm25, _, _, _ = service.list_configs()
+
+    with pytest.raises(SearchError, match="namespace"):
+        await service.search_one(
+            SearchExecuteRequest(
+                namespace="pufferlab-wrong",
+                query_text="query",
+                config_id=bm25.id,
+            )
+        )
+
+    assert provider.bm25_calls == []
 
 
 @pytest.mark.asyncio
