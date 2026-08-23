@@ -1,6 +1,11 @@
 """Pure deterministic evaluation metrics and paired analysis."""
 
 from pufferlab.evals.aggregation import aggregate_outcomes, linear_percentile
+from pufferlab.evals.gates import (
+    GateEvaluationError,
+    GateEvaluationErrorCode,
+    evaluate_gate,
+)
 from pufferlab.evals.metrics import evaluate_ranking
 from pufferlab.evals.models import (
     EvaluationAggregate,
@@ -19,6 +24,8 @@ __all__ = [
     "EvaluationAggregate",
     "EvaluationWarning",
     "EvaluationWarningCode",
+    "GateEvaluationError",
+    "GateEvaluationErrorCode",
     "Judgment",
     "MetricSummary",
     "PairStatus",
@@ -26,6 +33,7 @@ __all__ = [
     "QueryMetrics",
     "QueryOutcome",
     "aggregate_outcomes",
+    "evaluate_gate",
     "evaluate_ranking",
     "linear_percentile",
     "order_quality_deltas",
