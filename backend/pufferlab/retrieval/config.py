@@ -244,18 +244,49 @@ def bind_retrieval_catalog(
 ) -> BoundSearchCatalog:
     """Bind the frozen four-config suite to one proven-ready dataset revision."""
 
-    _validate_dataset_binding(dataset_version, manifest, namespace=namespace)
-    lexical_spec = lexical or LexicalSpec()
-    # Reuse the executable compiler for all provider-specific validation, then replace only
-    # identities with dataset-version-bound immutable contract identities below.
-    executable = build_search_catalog(
+    configs = derive_bound_retrieval_configs(
+        dataset_version,
         manifest,
+        namespace=namespace,
         result_k=result_k,
         candidate_k=candidate_k,
         rrf_rank_constant=rrf_rank_constant,
         rrf_weights=rrf_weights,
         reranker_depth=reranker_depth,
         consistency=consistency,
+        lexical=lexical,
+    )
+    return BoundSearchCatalog(
+        dataset_version=dataset_version,
+        manifest=manifest,
+        configs=configs,
+    )
+
+
+def derive_bound_retrieval_configs(
+    dataset_version: DatasetVersion,
+    manifest: DatasetManifest,
+    *,
+    namespace: str | None = None,
+    result_k: int = 50,
+    candidate_k: int = 100,
+    rrf_rank_constant: int = 60,
+    rrf_weights: tuple[float, float] = (1.0, 1.0),
+    reranker_depth: int = 50,
+    consistency: ConsistencyLevel = "strong",
+    lexical: LexicalSpec | None = None,
+) -> tuple[RetrievalConfig, ...]:
+    """Derive immutable identities without constructing an executable search catalog."""
+
+    _validate_dataset_binding(dataset_version, manifest, namespace=namespace)
+    lexical_spec = lexical or LexicalSpec()
+    _validate_retrieval_parameters(
+        manifest,
+        result_k=result_k,
+        candidate_k=candidate_k,
+        rrf_rank_constant=rrf_rank_constant,
+        rrf_weights=rrf_weights,
+        reranker_depth=reranker_depth,
         lexical=lexical_spec,
     )
 
@@ -271,10 +302,25 @@ def bind_retrieval_catalog(
         depth=reranker_depth,
     )
     specifications = (
-        (RetrievalMode.BM25, lexical_spec, None, None, None),
-        (RetrievalMode.VECTOR, None, vector_spec, None, None),
-        (RetrievalMode.HYBRID_RRF, lexical_spec, vector_spec, rrf_spec, None),
+        ("BM25 · weighted title + body", RetrievalMode.BM25, lexical_spec, None, None, None),
         (
+            f"Vector · {manifest.embedding.model}",
+            RetrievalMode.VECTOR,
+            None,
+            vector_spec,
+            None,
+            None,
+        ),
+        (
+            "Hybrid · server RRF",
+            RetrievalMode.HYBRID_RRF,
+            lexical_spec,
+            vector_spec,
+            rrf_spec,
+            None,
+        ),
+        (
+            f"Hybrid + reranker · {DEFAULT_RERANKER_MODEL}",
             RetrievalMode.HYBRID_RERANK,
             lexical_spec,
             vector_spec,
@@ -284,15 +330,11 @@ def bind_retrieval_catalog(
     )
 
     persisted: list[RetrievalConfig] = []
-    for seeded, (mode, lexical_value, vector, rrf, reranker) in zip(
-        executable.configs,
-        specifications,
-        strict=True,
-    ):
+    for name, mode, lexical_value, vector, rrf, reranker in specifications:
         draft = RetrievalConfig(
             id=UUID(int=0),
             revision=1,
-            name=seeded.summary.name,
+            name=name,
             dataset_version_id=dataset_version.id,
             mode=mode,
             result_k=result_k,
@@ -315,13 +357,34 @@ def bind_retrieval_catalog(
             }
         )
         persisted.append(config)
-    # Construction derives the catalog again from the immutable contracts. This intentionally
-    # treats the initial compiler output only as a contract authoring aid, never as runtime input.
-    return BoundSearchCatalog(
-        dataset_version=dataset_version,
-        manifest=manifest,
-        configs=tuple(persisted),
-    )
+    return tuple(persisted)
+
+
+def _validate_retrieval_parameters(
+    manifest: DatasetManifest,
+    *,
+    result_k: int,
+    candidate_k: int,
+    rrf_rank_constant: int,
+    rrf_weights: tuple[float, float],
+    reranker_depth: int,
+    lexical: LexicalSpec,
+) -> None:
+    if result_k < 1:
+        raise ValueError("result_k must be positive")
+    if candidate_k < result_k:
+        raise ValueError("candidate_k must be greater than or equal to result_k")
+    if isinstance(rrf_rank_constant, bool) or rrf_rank_constant < 1:
+        raise ValueError("rrf_rank_constant must be positive")
+    if len(rrf_weights) != 2 or any(
+        isinstance(weight, bool) or not math.isfinite(weight) or weight <= 0
+        for weight in rrf_weights
+    ):
+        raise ValueError("rrf_weights must contain two finite positive values")
+    if reranker_depth < result_k or reranker_depth > candidate_k:
+        raise ValueError("reranker_depth must be between result_k and candidate_k")
+    compile_namespace_write_spec(manifest)
+    _compile_lexical_fields(manifest, lexical)
 
 
 def _compile_bound_executable_catalog(

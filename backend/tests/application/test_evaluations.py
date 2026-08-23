@@ -1,4 +1,5 @@
 import asyncio
+import traceback
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -6,6 +7,7 @@ from uuid import UUID, uuid5
 
 import pytest
 from pufferlab.application import EvaluationApplicationService, EvaluationRunError
+from pufferlab.application.evaluations import create_evaluation_run
 from pufferlab.contracts.common import ObservedScore, ScoreDirection, ScoreKind, ScoreSource
 from pufferlab.contracts.datasets import (
     DatasetStatus,
@@ -13,6 +15,7 @@ from pufferlab.contracts.datasets import (
     FtsProfile,
     IndexProfile,
 )
+from pufferlab.contracts.errors import ApiErrorCode
 from pufferlab.contracts.evals import (
     CreateEvalRunRequest,
     EvalRun,
@@ -348,6 +351,83 @@ def _service(
     )
 
 
+def test_provider_free_create_requires_exact_config_contract_order(
+    repository: PufferLabRepository,
+) -> None:
+    seed, configs = _seed()
+    repository.put_dataset_version(seed.dataset_version)
+    for config in configs:
+        repository.put_retrieval_config(config)
+    repository.put_query_set(seed.query_set, seed.judged_queries)
+    reordered = _request(seed, configs).model_copy(
+        update={"candidate_config_ids": [configs[2].id, configs[1].id, configs[3].id]}
+    )
+
+    with pytest.raises(PersistenceValidationError, match="exact BM25, vector"):
+        create_evaluation_run(
+            repository,
+            reordered,
+            _environment(reordered),
+            run_id=_id("provider-free-reordered-run"),
+            now=lambda: _FIXED_TIME,
+        )
+
+    assert repository.list_runs() == []
+
+
+@pytest.mark.asyncio
+async def test_claim_failure_runs_zero_warmup_or_executor_work(
+    repository: PufferLabRepository,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seed, configs = _seed()
+    backend = FakeSearchBackend(configs)
+    service = _service(repository, backend)
+    service.seed(seed, configs)
+    request = _request(seed, configs, warmup_query_count=2)
+    run = service.create_run(
+        request,
+        _environment(request),
+        run_id=_id("rejected-claim-run"),
+    )
+
+    def reject_claim(*_: object, **__: object) -> EvalRun:
+        raise PersistenceValidationError("durable claim rejected before provider work")
+
+    monkeypatch.setattr(repository, "claim_queued_run", reject_claim)
+    with pytest.raises(PersistenceValidationError, match="claim rejected"):
+        service.start_run(run.id)
+    await asyncio.sleep(0)
+
+    assert backend.calls == []
+    assert repository.get_run(run.id).status is EvalRunStatus.QUEUED
+
+
+@pytest.mark.asyncio
+async def test_already_claimed_run_starts_without_a_second_transition(
+    repository: PufferLabRepository,
+) -> None:
+    seed, configs = _seed()
+    backend = FakeSearchBackend(configs)
+    service = _service(repository, backend)
+    service.seed(seed, configs)
+    request = _request(seed, configs, warmup_query_count=1)
+    queued = service.create_run(
+        request,
+        _environment(request),
+        run_id=_id("already-claimed-run"),
+    )
+    claimed = repository.claim_queued_run(queued.id, at=_FIXED_TIME)
+
+    task = service.start_claimed_run(claimed.id)
+    assert repository.get_run(claimed.id) == claimed
+    assert backend.calls == []
+    completed = await task
+
+    assert completed.status is EvalRunStatus.COMPLETED
+    assert len(backend.calls) == 204
+
+
 @pytest.mark.asyncio
 async def test_run_persists_200_outcomes_after_unmeasured_warmups_and_exports_typed_state(
     repository: PufferLabRepository,
@@ -461,9 +541,79 @@ async def test_systemic_failure_is_redacted_and_preserves_prior_durable_outcomes
         await service.drain(run.id)
 
     assert "private provider response" not in str(raised.value)
-    assert repository.get_run(run.id).status is EvalRunStatus.FAILED
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None
+    rendered = "".join(
+        traceback.format_exception(type(raised.value), raised.value, raised.value.__traceback__)
+    )
+    assert "private provider response" not in rendered
+    failed = repository.get_run(run.id)
+    assert failed.status is EvalRunStatus.FAILED
+    assert failed.error is not None
+    assert failed.error.code is ApiErrorCode.INTERNAL_ERROR
+    assert failed.error.message == "evaluation execution failed"
+    assert failed.error.retryable is False
+    assert failed.error.details == {}
+    assert "private provider response" not in failed.model_dump_json()
     assert len(repository.list_outcomes(run.id)) == 4
     assert len(service.export(run.id).outcomes) == 4
+
+
+@pytest.mark.asyncio
+async def test_fatal_claimed_warmup_persists_safe_error_before_any_outcome(
+    repository: PufferLabRepository,
+) -> None:
+    seed, configs = _seed()
+    backend = FakeSearchBackend(configs)
+    backend.fatal_after = 1
+    service = _service(repository, backend)
+    service.seed(seed, configs)
+    request = _request(seed, configs, warmup_query_count=1)
+    run_id = _id("fatal-warmup-run")
+
+    with pytest.raises(EvaluationRunError) as raised:
+        await service.run(request, _environment(request), run_id=run_id)
+
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None
+    failed = repository.get_run(run_id)
+    assert failed.status is EvalRunStatus.FAILED
+    assert failed.started_at is not None
+    assert failed.error is not None
+    assert failed.error.code is ApiErrorCode.INTERNAL_ERROR
+    assert failed.error.message == "evaluation execution failed"
+    assert "private provider response" not in failed.model_dump_json()
+    assert len(backend.calls) == 1
+    assert repository.list_outcomes(run_id) == []
+
+
+@pytest.mark.asyncio
+async def test_duplicate_local_application_task_is_rejected_without_provider_duplication(
+    repository: PufferLabRepository,
+) -> None:
+    seed, configs = _seed()
+    backend = FakeSearchBackend(configs)
+    backend.block = True
+    service = _service(repository, backend)
+    service.seed(seed, configs)
+    request = _request(seed, configs, warmup_query_count=0, max_concurrency=1)
+    run = service.create_run(
+        request,
+        _environment(request),
+        run_id=_id("duplicate-application-task"),
+    )
+    service.start_run(run.id)
+
+    with pytest.raises(PersistenceValidationError, match="already has a local task"):
+        service.start_claimed_run(run.id)
+
+    await backend.started.wait()
+    cancellation = asyncio.create_task(service.cancel(run.id))
+    await asyncio.sleep(0)
+    backend.release.set()
+    cancelled = await cancellation
+    assert cancelled.status is EvalRunStatus.CANCELLED
+    assert len(backend.calls) == 1
 
 
 @pytest.mark.asyncio

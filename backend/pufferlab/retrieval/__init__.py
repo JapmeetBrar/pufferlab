@@ -6,6 +6,7 @@ from pufferlab.retrieval.config import (
     SeededSearchConfig,
     bind_retrieval_catalog,
     build_search_catalog,
+    derive_bound_retrieval_configs,
 )
 from pufferlab.retrieval.service import SearchCompareService
 from pufferlab.retrieval.types import SearchExecuteRequest, SearchExecuteResult
@@ -19,4 +20,5 @@ __all__ = [
     "SeededSearchConfig",
     "bind_retrieval_catalog",
     "build_search_catalog",
+    "derive_bound_retrieval_configs",
 ]

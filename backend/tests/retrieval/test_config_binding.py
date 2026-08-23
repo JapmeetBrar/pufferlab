@@ -20,7 +20,12 @@ from pufferlab.contracts.retrieval import (
 from pufferlab.datasets.loader import load_fixture_corpus
 from pufferlab.datasets.models import DatasetManifest
 from pufferlab.datasets.schema import compile_namespace_write_spec
-from pufferlab.retrieval.config import BoundSearchCatalog, bind_retrieval_catalog
+from pufferlab.retrieval import config as retrieval_config
+from pufferlab.retrieval.config import (
+    BoundSearchCatalog,
+    bind_retrieval_catalog,
+    derive_bound_retrieval_configs,
+)
 
 ROOT = Path(__file__).resolve().parents[3]
 FIXTURE_DIR = ROOT / "fixtures" / "tiny-corpus"
@@ -124,6 +129,25 @@ def test_binder_compiles_complete_contracts_and_exact_executable_summaries() -> 
         assert executable.reranker_depth == (
             persisted.reranker.depth if persisted.reranker is not None else None
         )
+
+
+def test_config_identity_derivation_precedes_executable_catalog_construction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = load_fixture_corpus(FIXTURE_DIR).manifest
+    dataset = _dataset_version(manifest)
+    expected = bind_retrieval_catalog(dataset, manifest).configs
+
+    def fail_if_compiled(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("executable catalog was constructed during identity derivation")
+
+    monkeypatch.setattr(
+        retrieval_config,
+        "_compile_bound_executable_catalog",
+        fail_if_compiled,
+    )
+
+    assert derive_bound_retrieval_configs(dataset, manifest) == expected
 
 
 def test_bound_catalog_rejects_stale_identity_after_provider_semantics_change() -> None:

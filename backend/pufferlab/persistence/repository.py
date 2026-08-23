@@ -53,6 +53,7 @@ _MAX_OUTCOME_ROWS = 200
 _ALLOWED_TRANSITIONS = {
     EvalRunStatus.QUEUED: {
         EvalRunStatus.RUNNING,
+        EvalRunStatus.FAILED,
         EvalRunStatus.CANCELLED,
     },
     EvalRunStatus.RUNNING: {
@@ -394,6 +395,23 @@ class PufferLabRepository:
             ).all()
             return [self._decode_run_row(row) for row in rows]
 
+    def list_active_runs(self, *, limit: int = _MAX_RUN_ROWS) -> list[EvalRun]:
+        """Return every bounded queued/running revision in deterministic claim order."""
+        self._validate_limit(limit, maximum=_MAX_RUN_ROWS)
+        with self._session_factory() as session:
+            rows = session.scalars(
+                select(EvalRunRow)
+                .where(
+                    EvalRunRow.status.in_((EvalRunStatus.QUEUED.value, EvalRunStatus.RUNNING.value))
+                )
+                .order_by(EvalRunRow.created_at, EvalRunRow.id)
+                .limit(limit + 1)
+            ).all()
+            active = [self._decode_run_row(row) for row in rows]
+            if len(active) > limit:
+                raise PersistenceValidationError("active run selection exceeds its bound")
+            return active
+
     def list_run_configs(self, run_id: UUID) -> list[RetrievalConfig]:
         """Return the immutable run catalog in persisted baseline/candidate order."""
         with self._session_factory() as session:
@@ -445,6 +463,30 @@ class PufferLabRepository:
                 transition_at=transition_at,
                 summaries=summaries,
                 error=error,
+            )
+
+    def claim_queued_run(
+        self,
+        run_id: UUID,
+        *,
+        at: datetime | None = None,
+    ) -> EvalRun:
+        """Atomically claim exactly one queued revision for the local API worker."""
+        transition_at = at or datetime.now(UTC)
+        canonical_utc(transition_at, field_name="run_claim.at")
+        with self._session_factory.begin() as session:
+            row = self._require_run(session, run_id)
+            current = self._decode_run_row(row)
+            if current.status is not EvalRunStatus.QUEUED:
+                raise InvalidRunTransitionError(
+                    f"run {run_id} is {current.status.value}; only queued runs may be claimed"
+                )
+            return self._transition_row(
+                row,
+                EvalRunStatus.RUNNING,
+                transition_at=transition_at,
+                summaries=None,
+                error=None,
             )
 
     def complete_run(
@@ -778,8 +820,22 @@ class PufferLabRepository:
             )
         if target is EvalRunStatus.COMPLETED and current.completed_queries != current.total_queries:
             raise InvalidRunTransitionError("a run cannot complete before every query is durable")
+        if target is EvalRunStatus.FAILED and error is None:
+            raise PersistenceValidationError("failed runs require a safe run-level error")
         if error is not None and target is not EvalRunStatus.FAILED:
             raise PersistenceValidationError("only failed runs may store a run-level error")
+        if error is not None:
+            try:
+                validated_error = ApiErrorDetail.model_validate(error.model_dump(mode="python"))
+            except (AttributeError, TypeError, ValueError):
+                raise PersistenceValidationError(
+                    "failed runs require a contract-valid safe run-level error"
+                ) from None
+            if validated_error != error:
+                raise PersistenceValidationError(
+                    "failed runs require a contract-valid safe run-level error"
+                )
+            error = validated_error
 
         updates: dict[str, object] = {"status": target}
         if target is EvalRunStatus.RUNNING:
