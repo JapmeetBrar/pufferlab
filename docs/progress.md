@@ -1,7 +1,8 @@
 # PufferLab Progress Ledger
 
-- **Active goal:** deliver [Milestone 3](milestone-3-execution.md) through the reviewed engineering
-  loop: an interview-ready run dashboard, regression workflow, and evidence-honest query forensics.
+- **Active goal:** deliver [Milestone 4](milestone-4-execution.md) through the reviewed engineering
+  loop: an operator-ready live workflow, exact owned cleanup, provider-free evaluation gates, and
+  repeatable browser/accessibility CI.
 - **Goal status:** implementing
 - **Last updated:** 2026-08-23
 - **Orchestrator:** root agent
@@ -47,7 +48,8 @@ Process details live in [`engineering-loop.md`](engineering-loop.md).
 | M3-C | [Run dashboard](milestone-3-execution.md#m3-c--run-dashboard) | frontend_worker | `codex/m3-run-dashboard` / [PR #20](https://github.com/JapmeetBrar/pufferlab/pull/20) | verified | [Independent review](https://github.com/JapmeetBrar/pufferlab/pull/20#issuecomment-5385563568) approved the exact dashboard head after local gates and root browser QA. PR #20 reviewer-only squash-merged as `ed549df87307e877cbe5da8bb1a463af4ebabc87`; the [canonical record](https://github.com/JapmeetBrar/pufferlab/pull/20#issuecomment-5385569932) confirms protected-main Backend and Frontend passed. |
 | M3-D | [Dataset-bound execution and control runtime](milestone-3-execution.md#m3-d--dataset-bound-execution-and-control-runtime) | root + live_harness + eval_application | `codex/m3-eval-control-runtime` / [PR #21](https://github.com/JapmeetBrar/pufferlab/pull/21) | verified | [Independent re-review](https://github.com/JapmeetBrar/pufferlab/pull/21#issuecomment-5385708016) reproduced all eleven repaired exception-detachment paths and approved the exact head. PR #21 reviewer-only squash-merged as `ef55645bd4edcc2fc739f0219bfb23b4d51a8d3c`; the [canonical record](https://github.com/JapmeetBrar/pufferlab/pull/21#issuecomment-5385713819) confirms protected-main Backend and Frontend passed. |
 | M3-E | [Regression deep links and observable query forensics](milestone-3-execution.md#m3-e--regression-deep-links-and-observable-query-forensics) | live_harness + frontend_worker | `codex/m3-query-forensics` / [PR #22](https://github.com/JapmeetBrar/pufferlab/pull/22) | verified | [Independent re-review](https://github.com/JapmeetBrar/pufferlab/pull/22#issuecomment-5386008445) reproduced the repaired source-authentication, repeated-cancellation, and detached-close paths and approved exact head `1901f3f`. PR #22 reviewer-only squash-merged as `43ee692`; the [canonical record](https://github.com/JapmeetBrar/pufferlab/pull/22#issuecomment-5386015555) confirms protected-main Backend and Frontend passed. |
-| M3-F | [Interview QA and goal finalization](milestone-3-execution.md#m3-f--interview-qa-and-finalization) | root + reviewer | `codex/m3-finalization` / [PR #23](https://github.com/JapmeetBrar/pufferlab/pull/23) | review_requested | [Independent review](https://github.com/JapmeetBrar/pufferlab/pull/23#issuecomment-5386113566) accepted every runtime, browser, generated-code, privacy, artifact, and CI gate but found one broken historical T7 ledger anchor. The docs-only repair now passes repository-wide file-and-anchor validation, the complete release gate, generated-code drift, and artifact/secret-boundary audits; exact-head re-review, reviewer-only merge, and protected-main verification remain. |
+| M3-F | [Interview QA and goal finalization](milestone-3-execution.md#m3-f--interview-qa-and-finalization) | root + reviewer | `codex/m3-finalization` / [PR #23](https://github.com/JapmeetBrar/pufferlab/pull/23) | verified | [Independent re-review](https://github.com/JapmeetBrar/pufferlab/pull/23#issuecomment-5386152705) closed the historical-anchor blocker and reviewer-only squash-merged PR #23 as `a7c2800`. The [canonical record](https://github.com/JapmeetBrar/pufferlab/pull/23#issuecomment-5386159858) confirms protected-main Backend and Frontend checks passed. |
+| M4-0 | [Milestone 4 architecture and gap audit](milestone-4-execution.md#m4-0--architecture-and-gap-audit) | root | `codex/m4-plan` | review_requested | Three independent architecture, product-gap, and provider-constraint audits approve the repaired operator-readiness, exact owned-cleanup, provider-free-gate, and browser-CI plan. The full repository gate and all local Markdown links/fragments pass; a dedicated exact-head reviewer must still approve and merge before M4-A begins. |
 
 ## Review history
 
@@ -141,6 +143,9 @@ Process details live in [`engineering-loop.md`](engineering-loop.md).
 | 2026-08-23 | M3-F / `codex/m3-finalization` | `implementing → review_requested` | A new ignored directory seeded the same content-addressed 50-query/four-config/200-outcome synthetic run twice with identical database SHA-256 and mtime; serving it added only the process guard, and all QA traffic was health/run/regression/query-detail GETs. Browser QA at 1280/720/390/320 verifies page containment, internally scrollable tables, UUID-only candidate/order/query/document state, reload and Back/Forward restoration, drawer focus trap/Escape/opener return, no replay control, and a clean console. One explicit credentialed replay against stored live run `8eded793-6337-443a-98f3-623e1ad465a5` returned HTTP 200 with two distinct primary traces, one bounded observation, no optional probes, and `original_stage_evidence_available=false`; the disposable and original databases retained their byte hashes with no sidecars, and the original database mtime was unchanged. An initial redacted 503 identified the locally absent optional model runtime; `uv sync --locked --extra live-search` repaired only the ignored environment before the successful retry. Both disposable directories were moved recoverably to Trash, no namespace was created or deleted, and unrelated user servers were untouched. `make check` passes with 476 backend tests plus one opt-in live skip, OpenAPI zero-diff, frontend lint/typecheck, 48 tests, and production build; frozen installs, generated TypeScript, docs links, diff, full-history artifact, and exact configured-key/browser scans pass. The exact pushed head, PR checks, and dedicated reviewer decision remain. |
 | 2026-08-23 | M3-F / [PR #23](https://github.com/JapmeetBrar/pufferlab/pull/23) | `review_requested → changes_requested → implementing` | [Independent exact-head review](https://github.com/JapmeetBrar/pufferlab/pull/23#issuecomment-5386113566) passed deterministic double seeding, isolated one-worker enforcement, responsive browser/history/focus QA, `make check`, generated-code drift, artifact/privacy scans, and both required GitHub checks. It stopped before the optional live replay and correctly blocked merge because the older M1-E link targeted nonexistent `implementation-plan.md#task-t7`; root repaired it to the heading's GitHub anchor `#t7--cli-workflows` and began the bounded docs-only revalidation cycle. |
 | 2026-08-23 | M3-F / [PR #23](https://github.com/JapmeetBrar/pufferlab/pull/23) | `implementing → review_requested` | The docs-only repair validates all 17 tracked Markdown files, 53 local link targets, and 21 Markdown fragments, including the corrected T7 heading anchor. `make check` again passes 476 backend tests plus one opt-in live skip, OpenAPI drift, lint, typecheck, 48 frontend tests, and production build; generated TypeScript and `git diff --check` are clean. Full-history artifact and exact configured-key/browser scans pass; their immutable-head counts belong in the PR review handoff so this commit cannot stale its own evidence. The already-successful bounded live replay was deliberately not repeated for this documentation repair. |
+| 2026-08-23 | M3-F / [PR #23](https://github.com/JapmeetBrar/pufferlab/pull/23) | `review_requested → approved → merged → verified` | [Independent exact-head re-review](https://github.com/JapmeetBrar/pufferlab/pull/23#issuecomment-5386152705) verified the repaired GitHub anchor, all 17 Markdown files/53 local targets/21 fragments, generated drift, artifact and exact-key boundaries, and successful PR checks. The reviewer squash-merged as `a7c2800c49b9e60268266fb3dfdcc25a45a18e1e`; the [canonical record](https://github.com/JapmeetBrar/pufferlab/pull/23#issuecomment-5386159858) confirms fresh protected-main [Backend](https://github.com/JapmeetBrar/pufferlab/actions/runs/32641367627/job/97198850881) and [Frontend](https://github.com/JapmeetBrar/pufferlab/actions/runs/32641367627/job/97198850773) passed. |
+| 2026-08-23 | M4-0 / `codex/m4-plan` | `planned → assigned → implementing` | Root started from canonical M3 merge `a7c2800` and assigned three read-only audits across current product gaps, code seams, and official provider capabilities. The observed missing-namespace failure and absence of repeatable browser CI justify local capability guidance; the original P1 CI gate is the smallest provider-free deployment feature. Generic import, arbitrary branching, warm hints, and ANN recall are explicitly deferred rather than mixed with cleanup authority. |
+| 2026-08-23 | M4-0 / `codex/m4-plan` | `implementing → review_requested` | Three independent audit loops now approve the repaired scope. Their blockers froze two separate clean-checkout success tracks, reachable-only contract generation, a read-only doctor/gate composition, loopback one-worker serving, receipt-bound credential/region authority, fixed per-user no-follow locking and atomic lifecycle transitions through terminal cleanup, honest local evidence trust, exact paired gate math, and provider-free browser CI. `make check` passes Ruff, format, strict mypy, 476 backend tests plus one opt-in live skip, OpenAPI drift, frontend lint/typecheck, 48 tests, and production build. All 18 Markdown files, 56 local links, and 22 fragments validate; exact-head artifact/privacy checks and dedicated reviewer-only merge remain. |
 
 ## Milestone 1 acceptance evidence
 
@@ -214,12 +219,27 @@ ranked IDs plus exact qrels and latency percentiles from stored per-query client
   unavailable rather than observed.
 - [x] The dashboard and forensic drawer pass generated-type, accessibility, responsive, browser,
   secret/artifact, and production-build gates.
-- [ ] Every Milestone 3 PR receives independent review, reviewer-only merge, and green protected
+- [x] Every Milestone 3 PR receives independent review, reviewer-only merge, and green protected
   `main` checks.
 
-All product acceptance items are satisfied. The final unchecked process item closes only after this
-finalization PR is independently reviewed and reviewer-only merged; its verdict, merge, and
-protected-main checks remain canonical in GitHub without a recursive ledger-only PR.
+All Milestone 3 product and process acceptance items are satisfied. PR #23's independent verdict,
+reviewer-only merge, and protected-main checks are canonical in GitHub.
+
+## Milestone 4 acceptance evidence
+
+- [ ] M4 architecture, local-versus-live capability semantics, cleanup authority, gate policy,
+  branch graph, rollback, and non-goals are independently reviewed before implementation.
+- [ ] Doctor/serve and the Playground expose actionable local configuration state without provider
+  calls, secret values, namespace values, model initialization, or remote-health claims.
+- [ ] Generated tiny ingestion durably owns and resumes one exact HMAC-derived namespace; cleanup
+  accepts no caller target/path/token and retains its authenticated receipt on every failure.
+- [ ] A completed durable run can produce a provider-free CI gate verdict with source-authenticated
+  Unix/synthetic judgments, structurally validated outcomes, recomputed quality over trusted local
+  ranked IDs, bounded safe output, and stable pass/policy/invalid/internal exit codes.
+- [ ] Required Playwright/axe CI reproduces the provider-free synthetic desktop/mobile/history/focus
+  journey and proves action-required Playground state sends no comparison POST.
+- [ ] Every Milestone 4 PR receives independent review, reviewer-only merge, and green protected
+  `main` checks after the single goal-finalization PR.
 
 ## Decision log
 
@@ -240,3 +260,4 @@ protected-main checks remain canonical in GitHub without a recursive ledger-only
 | 2026-08-23 | Label primary live replay and counterfactual provenance probes per observation. | Separate provider requests can observe different snapshots and must never be presented as one causal trace. |
 | 2026-08-23 | Seed the offline demo through M3-B into SQLite from deterministic synthetic inputs. | Gives a fresh checkout an honest full dashboard path before finalization without tracking licensed data, provider evidence, databases, or exports. |
 | 2026-08-23 | Make `synthetic_demo` read/export-only with unavailable timing and normally recomputed quality. | Prevents demo identifiers from authorizing provider cost and avoids fabricating latency for searches that never ran. |
+| 2026-08-23 | Scope Milestone 4 to operator readiness, authenticated generated-tiny cleanup, provider-free CI gates, and repeatable browser/accessibility CI. | Closes the reproduced setup and original hardening gaps while adding one bounded P1 deployment feature; generic customer import and namespace branching require separate schema, licensing, and ownership work. |
