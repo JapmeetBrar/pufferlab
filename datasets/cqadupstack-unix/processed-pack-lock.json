@@ -1,0 +1,14 @@
+{
+  "format_version": 1,
+  "dataset": "CQADupStack",
+  "subset": "unix",
+  "source_lock_sha256": "85484de1703c8754e67ddf5e9658df2728a0adae8656b8876f9244b56538f095",
+  "archive_sha256": "6072f7d345496387d24194c8af35c5fb6c2f0e5f9130c5b4a78b98bbfac88558",
+  "preprocessing_sha256": "e28559f846751ad6aae5d85d6a8871be9c75a9de8fb39954475259305c8e8c32",
+  "content_sha256": "6d54fb92c04b9f193d081a7c430d8804e24e71855d3cbaa2bb50cde838f181b8",
+  "files": [
+    {"name": "documents.jsonl", "records": 47382},
+    {"name": "queries.jsonl", "records": 1072},
+    {"name": "qrels.jsonl", "records": 1693}
+  ]
+}

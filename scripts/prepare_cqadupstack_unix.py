@@ -4,6 +4,7 @@ import argparse
 from pathlib import Path
 
 from pufferlab.datasets.cqadupstack import (
+    load_processed_pack_lock,
     load_source_lock,
     prepare_unix_pack,
     source_lock_sha256,
@@ -36,6 +37,10 @@ def main() -> int:
     verify_curated_query_manifest(
         output,
         root / "datasets/cqadupstack-unix/curated-50.json",
+        source_lock=source_lock,
+        processed_pack_lock=load_processed_pack_lock(
+            root / "datasets/cqadupstack-unix/processed-pack-lock.json"
+        ),
     )
     print(f"ready processed_pack={output} source_lock_sha256={source_lock_sha256(source_lock)}")
     return 0

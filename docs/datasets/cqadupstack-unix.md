@@ -49,6 +49,15 @@ Any URL, revision, published checksum, member inventory, transformation hash, or
 archive hash drift fails closed. Updating the lock is a new dataset revision and requires a fresh
 license/provenance review.
 
+[`processed-pack-lock.json`](../../datasets/cqadupstack-unix/processed-pack-lock.json) is the
+separate independently reviewed commitment to the real deterministic output. Keeping it outside
+the source-lock hash avoids a circular content address. Before yielding any row, public loaders
+bind it to the checked source-lock hash, archive SHA-256, current preprocessing hash, expected
+record counts, and reviewed content SHA-256; recompute actual row-file hashes/counts and the
+canonical content address; require the exact content-address directory name; and reject missing,
+extra, non-regular, or symlinked pack entries. A changed row remains invalid even if its local
+manifest hashes and directory are self-updated.
+
 ## Transformation and retained records
 
 The adapter reads only `corpus.jsonl`, `queries.jsonl`, and `qrels/test.tsv` after whole-archive
@@ -95,11 +104,11 @@ without committing the licensed inputs used to derive them.
 
 ## Evaluation and ingestion application boundary
 
-M2-E should call `UnixDatasetApplicationService.ingest` with its provider-neutral
+M2-E should call `UnixDatasetApplicationService.from_paths(...).ingest` with its provider-neutral
 `IngestionService`, absolute-data-directory `IngestionCheckpointStore`, verified processed-pack
-path, and checked manifest paths. The application service owns local materialization, checkpoint
-lookup/save, stable-ID resume, readiness verification, and seed construction. It never deletes a
-namespace.
+path, checked source/processed-pack locks, and manifest paths. The application service owns local
+materialization, fail-closed provenance/content verification, checkpoint lookup/save, stable-ID
+resume, readiness verification, and seed construction. It never deletes a namespace.
 
 The successful `UnixIngestionResult` exposes an `IngestionReport` plus one deterministic
 `UnixEvaluationSeed` containing:
@@ -141,7 +150,9 @@ logs, screenshots and live evidence.
 `scripts/audit_dataset_artifacts.py` checks current candidates and every historical Git blob. It
 rejects forbidden paths/suffixes, ZIP signatures and hashed token windows from known upstream
 samples, and proves the documented raw/processed/cache/database/export/log paths with
-`git check-ignore --no-index`. Run it before every dataset PR handoff.
+`git check-ignore --no-index`. It refuses to run in a shallow repository because that cannot prove
+whole-history coverage; the Backend CI checkout therefore uses `fetch-depth: 0`. Run it before
+every dataset PR handoff.
 
 To remove a local pack, delete only the explicit ignored directory you created under
 `data/cqadupstack-unix/`. The archive and processed pack are reproducible from the source lock; Git

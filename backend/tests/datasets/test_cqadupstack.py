@@ -1,5 +1,6 @@
 import hashlib
 import json
+import shutil
 import zipfile
 from pathlib import Path
 
@@ -21,6 +22,8 @@ from pufferlab.datasets.cqadupstack import (
     MemberLock,
     PreprocessingLock,
     ProcessedFile,
+    ProcessedPackLock,
+    ProcessedPackLockFile,
     ProcessedPackManifest,
     RepositoryLock,
     SourceLock,
@@ -31,9 +34,11 @@ from pufferlab.datasets.cqadupstack import (
     iter_processed_queries,
     load_curated_unix_corpus,
     prepare_unix_pack,
+    processed_content_sha256,
     source_lock_sha256,
     transformation_specification_sha256,
     verify_archive,
+    verify_processed_pack,
 )
 
 
@@ -200,6 +205,8 @@ def test_processed_pack_and_id_only_manifest_load_for_ingestion(tmp_path: Path) 
 
     corpus = load_curated_unix_corpus(
         processed,
+        source_lock=source_lock,
+        processed_pack_lock=_processed_pack_lock(source_lock, processed),
         dataset_manifest_path=Path(__file__).parents[3]
         / "datasets/cqadupstack-unix/dataset-manifest.json",
         curated_manifest_path=curated_path,
@@ -211,6 +218,127 @@ def test_processed_pack_and_id_only_manifest_load_for_ingestion(tmp_path: Path) 
     attribution = corpus.documents[0].attributes["attribution"]
     assert isinstance(attribution, dict)
     assert attribution["attribution_metadata_status"] == "unavailable_in_pinned_archive"
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    (
+        ("archive_sha256", "0" * 64, "archive SHA-256 drifted"),
+        ("source_lock_sha256", "3" * 64, "source-lock SHA-256 drifted"),
+        ("preprocessing_sha256", "1" * 64, "preprocessing SHA-256 drifted"),
+        ("content_sha256", "2" * 64, "content SHA-256 is not canonical"),
+    ),
+)
+def test_loader_rejects_each_self_declared_manifest_identity_drift(
+    tmp_path: Path,
+    field: str,
+    value: str,
+    message: str,
+) -> None:
+    archive, source_lock = _synthetic_archive(tmp_path, query_count=60)
+    original = prepare_unix_pack(archive, tmp_path / "processed", source_lock)
+    expected_pack = _processed_pack_lock(source_lock, original)
+    mutated = tmp_path / field / original.name
+    mutated.parent.mkdir()
+    shutil.copytree(original, mutated)
+    manifest = _processed_manifest(mutated).model_copy(update={field: value})
+    (mutated / "manifest.json").write_text(manifest.model_dump_json(), encoding="utf-8")
+
+    with pytest.raises(DatasetPreparationError, match=message):
+        verify_processed_pack(mutated, source_lock=source_lock, expected_pack=expected_pack)
+
+
+def test_public_corpus_loader_rejects_reviewed_provenance_reproduction(
+    tmp_path: Path,
+) -> None:
+    archive, source_lock = _synthetic_archive(tmp_path, query_count=60)
+    original = prepare_unix_pack(archive, tmp_path / "processed", source_lock)
+    expected_pack = _processed_pack_lock(source_lock, original)
+    mutated = tmp_path / "review-reproduction" / original.name
+    mutated.parent.mkdir()
+    shutil.copytree(original, mutated)
+    manifest = _processed_manifest(mutated).model_copy(
+        update={
+            "archive_sha256": "0" * 64,
+            "preprocessing_sha256": "1" * 64,
+            "content_sha256": "2" * 64,
+        }
+    )
+    (mutated / "manifest.json").write_text(manifest.model_dump_json(), encoding="utf-8")
+
+    with pytest.raises(DatasetPreparationError, match="archive SHA-256 drifted"):
+        load_curated_unix_corpus(
+            mutated,
+            source_lock=source_lock,
+            processed_pack_lock=expected_pack,
+            dataset_manifest_path=Path(__file__).parents[3]
+            / "datasets/cqadupstack-unix/dataset-manifest.json",
+            curated_manifest_path=tmp_path / "never-read-curated.json",
+        )
+
+
+@pytest.mark.parametrize("mutation", ("missing", "extra"))
+def test_loader_rejects_missing_or_extra_processed_pack_files(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    archive, source_lock = _synthetic_archive(tmp_path, query_count=60)
+    original = prepare_unix_pack(archive, tmp_path / "processed", source_lock)
+    expected_pack = _processed_pack_lock(source_lock, original)
+    mutated = tmp_path / mutation / original.name
+    mutated.parent.mkdir()
+    shutil.copytree(original, mutated)
+    if mutation == "missing":
+        (mutated / "qrels.jsonl").unlink()
+    else:
+        (mutated / "unexpected.txt").write_text("synthetic extra", encoding="utf-8")
+
+    with pytest.raises(DatasetPreparationError, match="directory inventory is not exact"):
+        verify_processed_pack(mutated, source_lock=source_lock, expected_pack=expected_pack)
+
+
+def test_loader_rejects_wrong_content_address_directory(tmp_path: Path) -> None:
+    archive, source_lock = _synthetic_archive(tmp_path, query_count=60)
+    original = prepare_unix_pack(archive, tmp_path / "processed", source_lock)
+    expected_pack = _processed_pack_lock(source_lock, original)
+    mutated = tmp_path / "processed" / "cqadupstack-unix-wrong-address"
+    shutil.copytree(original, mutated)
+
+    with pytest.raises(DatasetPreparationError, match="directory is not its content address"):
+        verify_processed_pack(mutated, source_lock=source_lock, expected_pack=expected_pack)
+
+
+def test_loader_rejects_changed_rows_with_self_updated_manifest_and_directory(
+    tmp_path: Path,
+) -> None:
+    archive, source_lock = _synthetic_archive(tmp_path, query_count=60)
+    original = prepare_unix_pack(archive, tmp_path / "processed", source_lock)
+    expected_pack = _processed_pack_lock(source_lock, original)
+    staging = tmp_path / "self-updated" / original.name
+    staging.parent.mkdir()
+    shutil.copytree(original, staging)
+    documents_path = staging / "documents.jsonl"
+    documents = documents_path.read_text(encoding="utf-8")
+    documents_path.write_text(
+        documents.replace("Synthetic body 0", "Synthetic body tampered", 1),
+        encoding="utf-8",
+    )
+    original_manifest = _processed_manifest(staging)
+    actual_files = _actual_processed_files(staging)
+    changed_content_sha256 = processed_content_sha256(
+        source_lock_hash=source_lock_sha256(source_lock),
+        preprocessing_hash=transformation_specification_sha256(),
+        files=actual_files,
+    )
+    changed_manifest = original_manifest.model_copy(
+        update={"files": actual_files, "content_sha256": changed_content_sha256}
+    )
+    (staging / "manifest.json").write_text(changed_manifest.model_dump_json(), encoding="utf-8")
+    changed_path = staging.with_name(f"cqadupstack-unix-{changed_content_sha256}")
+    staging.rename(changed_path)
+
+    with pytest.raises(DatasetPreparationError, match="reviewed pack identity"):
+        verify_processed_pack(changed_path, source_lock=source_lock, expected_pack=expected_pack)
 
 
 def _synthetic_archive(
@@ -341,3 +469,40 @@ def _synthetic_archive(
 
 def _jsonl(records: tuple[dict[str, object], ...]) -> str:
     return "".join(f"{json.dumps(record, sort_keys=True)}\n" for record in records)
+
+
+def _processed_manifest(processed: Path) -> ProcessedPackManifest:
+    return ProcessedPackManifest.model_validate_json(
+        (processed / "manifest.json").read_text(encoding="utf-8")
+    )
+
+
+def _actual_processed_files(processed: Path) -> tuple[ProcessedFile, ...]:
+    files: list[ProcessedFile] = []
+    for name in ("documents.jsonl", "queries.jsonl", "qrels.jsonl"):
+        path = processed / name
+        data = path.read_bytes()
+        files.append(
+            ProcessedFile(
+                name=name,
+                records=len(data.splitlines()),
+                sha256=hashlib.sha256(data).hexdigest(),
+            )
+        )
+    return tuple(files)
+
+
+def _processed_pack_lock(source_lock: SourceLock, processed: Path) -> ProcessedPackLock:
+    manifest = _processed_manifest(processed)
+    return ProcessedPackLock(
+        format_version=1,
+        dataset="CQADupStack",
+        subset="unix",
+        source_lock_sha256=source_lock_sha256(source_lock),
+        archive_sha256=source_lock.archive.completed_download_sha256,
+        preprocessing_sha256=transformation_specification_sha256(),
+        content_sha256=manifest.content_sha256,
+        files=tuple(
+            ProcessedPackLockFile(name=file.name, records=file.records) for file in manifest.files
+        ),
+    )

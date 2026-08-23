@@ -22,10 +22,14 @@ from pufferlab.datasets.cqadupstack import (
     CuratedQueryManifest,
     CurationTag,
     DatasetPreparationError,
+    ProcessedPackLock,
     ProcessedQrel,
+    SourceLock,
     iter_processed_qrels,
+    load_curated_query_manifest,
     load_curated_unix_corpus,
-    verify_curated_query_manifest,
+    load_processed_pack_lock,
+    load_source_lock,
 )
 from pufferlab.datasets.identity import PUFFERLAB_NAMESPACE_UUID, document_uuid
 from pufferlab.datasets.ingestion import (
@@ -84,16 +88,21 @@ class UnixIngestionResult:
 def load_curated_unix_local_pack(
     processed_path: Path,
     *,
+    source_lock: SourceLock,
+    processed_pack_lock: ProcessedPackLock,
     dataset_manifest_path: Path,
     curated_manifest_path: Path,
 ) -> CuratedUnixLocalPack:
     """Load one verified ignored pack without flattening its official qrel grades."""
     corpus = load_curated_unix_corpus(
         processed_path,
+        source_lock=source_lock,
+        processed_pack_lock=processed_pack_lock,
         dataset_manifest_path=dataset_manifest_path,
         curated_manifest_path=curated_manifest_path,
     )
-    curated_manifest = verify_curated_query_manifest(processed_path, curated_manifest_path)
+    # The corpus loader has already bound and recomputed this exact curated manifest.
+    curated_manifest = load_curated_query_manifest(curated_manifest_path)
     qrels = tuple(iter_processed_qrels(processed_path))
     return CuratedUnixLocalPack(
         corpus=corpus,
@@ -255,18 +264,47 @@ class UnixDatasetApplicationService:
         checkpoint_store: IngestionCheckpointStore,
         *,
         processed_path: Path,
+        source_lock: SourceLock,
+        processed_pack_lock: ProcessedPackLock,
         dataset_manifest_path: Path,
         curated_manifest_path: Path,
     ) -> None:
         self._ingestion_service = ingestion_service
         self._checkpoint_store = checkpoint_store
         self._processed_path = processed_path
+        self._source_lock = source_lock
+        self._processed_pack_lock = processed_pack_lock
         self._dataset_manifest_path = dataset_manifest_path
         self._curated_manifest_path = curated_manifest_path
+
+    @classmethod
+    def from_paths(
+        cls,
+        ingestion_service: IngestionService,
+        checkpoint_store: IngestionCheckpointStore,
+        *,
+        processed_path: Path,
+        source_lock_path: Path,
+        processed_pack_lock_path: Path,
+        dataset_manifest_path: Path,
+        curated_manifest_path: Path,
+    ) -> UnixDatasetApplicationService:
+        """Load the reviewed checked-in locks for the normal application composition root."""
+        return cls(
+            ingestion_service,
+            checkpoint_store,
+            processed_path=processed_path,
+            source_lock=load_source_lock(source_lock_path),
+            processed_pack_lock=load_processed_pack_lock(processed_pack_lock_path),
+            dataset_manifest_path=dataset_manifest_path,
+            curated_manifest_path=curated_manifest_path,
+        )
 
     def materialize_local_pack(self) -> CuratedUnixLocalPack:
         return load_curated_unix_local_pack(
             self._processed_path,
+            source_lock=self._source_lock,
+            processed_pack_lock=self._processed_pack_lock,
             dataset_manifest_path=self._dataset_manifest_path,
             curated_manifest_path=self._curated_manifest_path,
         )

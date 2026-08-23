@@ -250,6 +250,8 @@ class ProcessedDocument(_StrictModel):
             raise ValueError("document source identity does not match attribution")
         if self.source_url != self.attribution.canonical_post_url:
             raise ValueError("document source URL does not match attribution")
+        if self.attribution.content_hash != _canonical_hash([self.title, self.body]):
+            raise ValueError("document content hash does not match retained text")
         return self
 
 
@@ -265,6 +267,8 @@ class ProcessedQuery(_StrictModel):
             raise ValueError("query source identity does not match attribution")
         if self.source_url != self.attribution.canonical_post_url:
             raise ValueError("query source URL does not match attribution")
+        if self.attribution.content_hash != _canonical_hash([self.text]):
+            raise ValueError("query content hash does not match retained text")
         return self
 
 
@@ -302,6 +306,34 @@ class ProcessedPackManifest(_StrictModel):
             "qrels.jsonl",
         ):
             raise ValueError("processed pack file inventory must be canonical")
+        return self
+
+
+class ProcessedPackLockFile(_StrictModel):
+    name: NonBlank
+    records: int = Field(gt=0)
+
+
+class ProcessedPackLock(_StrictModel):
+    """Independently reviewed identity for the real deterministic Unix output."""
+
+    format_version: Literal[1]
+    dataset: Literal["CQADupStack"]
+    subset: Literal["unix"]
+    source_lock_sha256: Sha256
+    archive_sha256: Sha256
+    preprocessing_sha256: Sha256
+    content_sha256: Sha256
+    files: tuple[ProcessedPackLockFile, ...] = Field(min_length=3, max_length=3)
+
+    @model_validator(mode="after")
+    def file_inventory_is_canonical(self) -> ProcessedPackLock:
+        if tuple(file.name for file in self.files) != (
+            "documents.jsonl",
+            "queries.jsonl",
+            "qrels.jsonl",
+        ):
+            raise ValueError("processed pack lock file inventory must be canonical")
         return self
 
 
@@ -374,12 +406,33 @@ def load_curated_query_manifest(path: Path) -> CuratedQueryManifest:
     return _load_model_json(path, CuratedQueryManifest)
 
 
+def load_processed_pack_lock(path: Path) -> ProcessedPackLock:
+    return _load_model_json(path, ProcessedPackLock)
+
+
 def source_lock_sha256(source_lock: SourceLock) -> str:
     return _canonical_hash(source_lock.model_dump(mode="json"))
 
 
 def curated_selection_sha256(entries: Iterable[CuratedQuery]) -> str:
     return _canonical_hash([entry.model_dump(mode="json", exclude_none=False) for entry in entries])
+
+
+def processed_content_sha256(
+    *,
+    source_lock_hash: str,
+    preprocessing_hash: str,
+    files: tuple[ProcessedFile, ...],
+) -> str:
+    """Hash the exact canonical identity used by generated and loaded packs."""
+    return _canonical_hash(
+        {
+            "format_version": 1,
+            "source_lock_sha256": source_lock_hash,
+            "preprocessing_sha256": preprocessing_hash,
+            "files": [file.model_dump(mode="json") for file in files],
+        }
+    )
 
 
 def verify_archive(path: Path, source_lock: SourceLock) -> VerifiedArchive:
@@ -458,17 +511,90 @@ def iter_processed_qrels(path: Path) -> Iterator[ProcessedQrel]:
     yield from _iter_model_jsonl(path / "qrels.jsonl", ProcessedQrel)
 
 
+def verify_processed_pack(
+    processed_path: Path,
+    *,
+    source_lock: SourceLock,
+    expected_pack: ProcessedPackLock,
+) -> ProcessedPackManifest:
+    """Bind a local pack to reviewed provenance and content before any row is exposed."""
+    expected_source_lock_hash = source_lock_sha256(source_lock)
+    expected_preprocessing_hash = transformation_specification_sha256()
+    if expected_pack.source_lock_sha256 != expected_source_lock_hash:
+        raise DatasetPreparationError("processed pack lock belongs to a different source lock")
+    if expected_pack.archive_sha256 != source_lock.archive.completed_download_sha256:
+        raise DatasetPreparationError("processed pack lock archive SHA-256 drifted")
+    if (
+        expected_pack.preprocessing_sha256 != source_lock.preprocessing.specification_sha256
+        or expected_pack.preprocessing_sha256 != expected_preprocessing_hash
+    ):
+        raise DatasetPreparationError("processed pack lock preprocessing SHA-256 drifted")
+    expected_record_inventory = (
+        ("documents.jsonl", source_lock.members["corpus"].records),
+        ("queries.jsonl", source_lock.members["queries"].records),
+        ("qrels.jsonl", source_lock.members["qrels"].records),
+    )
+    if (
+        tuple((file.name, file.records) for file in expected_pack.files)
+        != expected_record_inventory
+    ):
+        raise DatasetPreparationError("processed pack lock record inventory drifted")
+
+    _require_exact_processed_pack_inventory(processed_path)
+    manifest = _load_model_json(processed_path / "manifest.json", ProcessedPackManifest)
+    if manifest.archive_sha256 != source_lock.archive.completed_download_sha256:
+        raise DatasetPreparationError("processed manifest archive SHA-256 drifted")
+    if manifest.source_lock_sha256 != expected_source_lock_hash:
+        raise DatasetPreparationError("processed manifest source-lock SHA-256 drifted")
+    if (
+        manifest.preprocessing_version != source_lock.preprocessing.version
+        or manifest.preprocessing_version != TRANSFORMATION_VERSION
+    ):
+        raise DatasetPreparationError("processed manifest preprocessing version drifted")
+    if (
+        manifest.preprocessing_sha256 != source_lock.preprocessing.specification_sha256
+        or manifest.preprocessing_sha256 != expected_preprocessing_hash
+    ):
+        raise DatasetPreparationError("processed manifest preprocessing SHA-256 drifted")
+
+    actual_files = _inspect_processed_pack_files(processed_path)
+    if manifest.files != actual_files:
+        raise DatasetPreparationError("processed manifest file identity does not match local rows")
+    actual_content_sha256 = processed_content_sha256(
+        source_lock_hash=expected_source_lock_hash,
+        preprocessing_hash=expected_preprocessing_hash,
+        files=actual_files,
+    )
+    if manifest.content_sha256 != actual_content_sha256:
+        raise DatasetPreparationError("processed manifest content SHA-256 is not canonical")
+    if expected_pack.content_sha256 != actual_content_sha256:
+        raise DatasetPreparationError("processed rows do not match the reviewed pack identity")
+    expected_basename = f"cqadupstack-unix-{actual_content_sha256}"
+    if processed_path.name != expected_basename:
+        raise DatasetPreparationError("processed pack directory is not its content address")
+    return manifest
+
+
 def load_curated_unix_corpus(
     processed_path: Path,
     *,
+    source_lock: SourceLock,
+    processed_pack_lock: ProcessedPackLock,
     dataset_manifest_path: Path,
     curated_manifest_path: Path,
 ) -> FixtureCorpus:
     """Load the ignored processed corpus plus only the checked-in curated query IDs."""
-    processed_manifest = _load_model_json(processed_path / "manifest.json", ProcessedPackManifest)
-    _verify_processed_pack_files(processed_path, processed_manifest)
+    verify_processed_pack(
+        processed_path,
+        source_lock=source_lock,
+        expected_pack=processed_pack_lock,
+    )
     dataset_manifest = _load_model_json(dataset_manifest_path, DatasetManifest)
-    curated_manifest = verify_curated_query_manifest(processed_path, curated_manifest_path)
+    curated_manifest = _verify_curated_query_selection(
+        processed_path,
+        curated_manifest_path,
+        expected_source_lock_hash=source_lock_sha256(source_lock),
+    )
 
     documents = tuple(
         SourceDocument(
@@ -511,12 +637,31 @@ def load_curated_unix_corpus(
 def verify_curated_query_manifest(
     processed_path: Path,
     curated_manifest_path: Path,
+    *,
+    source_lock: SourceLock,
+    processed_pack_lock: ProcessedPackLock,
 ) -> CuratedQueryManifest:
     """Recompute the checked-in ID-only curation against ignored local source text."""
-    processed_manifest = _load_model_json(processed_path / "manifest.json", ProcessedPackManifest)
-    _verify_processed_pack_files(processed_path, processed_manifest)
+    verify_processed_pack(
+        processed_path,
+        source_lock=source_lock,
+        expected_pack=processed_pack_lock,
+    )
+    return _verify_curated_query_selection(
+        processed_path,
+        curated_manifest_path,
+        expected_source_lock_hash=source_lock_sha256(source_lock),
+    )
+
+
+def _verify_curated_query_selection(
+    processed_path: Path,
+    curated_manifest_path: Path,
+    *,
+    expected_source_lock_hash: str,
+) -> CuratedQueryManifest:
     curated_manifest = load_curated_query_manifest(curated_manifest_path)
-    if curated_manifest.source_lock_sha256 != processed_manifest.source_lock_sha256:
+    if curated_manifest.source_lock_sha256 != expected_source_lock_hash:
         raise DatasetPreparationError("curated query manifest belongs to a different source lock")
     queries = tuple(
         (query.external_id, query.text) for query in iter_processed_queries(processed_path)
@@ -647,21 +792,21 @@ def _process_verified_archive(
         ProcessedFile(name=name, records=counts[name], sha256=_file_sha256(staging / name))
         for name in ("documents.jsonl", "queries.jsonl", "qrels.jsonl")
     )
-    content_payload = {
-        "format_version": 1,
-        "source_lock_sha256": source_lock_sha256(source_lock),
-        "preprocessing_sha256": transformation_specification_sha256(),
-        "files": [file.model_dump(mode="json") for file in files],
-    }
+    locked_source_hash = source_lock_sha256(source_lock)
+    preprocessing_hash = transformation_specification_sha256()
     manifest = ProcessedPackManifest(
         format_version=1,
         dataset=SOURCE_DATASET,
         subset=SOURCE_SUBSET,
         archive_sha256=verified.sha256,
-        source_lock_sha256=source_lock_sha256(source_lock),
+        source_lock_sha256=locked_source_hash,
         preprocessing_version=TRANSFORMATION_VERSION,
-        preprocessing_sha256=transformation_specification_sha256(),
-        content_sha256=_canonical_hash(content_payload),
+        preprocessing_sha256=preprocessing_hash,
+        content_sha256=processed_content_sha256(
+            source_lock_hash=locked_source_hash,
+            preprocessing_hash=preprocessing_hash,
+            files=files,
+        ),
         files=files,
     )
     (staging / "manifest.json").write_bytes(_canonical_json_line(manifest.model_dump(mode="json")))
@@ -809,17 +954,45 @@ def _curation_tags(text: str, *, judgment_count: int) -> tuple[CurationTag, ...]
     return tuple(values)
 
 
-def _verify_processed_pack_files(path: Path, manifest: ProcessedPackManifest) -> None:
-    for expected in manifest.files:
-        candidate = path / expected.name
-        if _file_sha256(candidate) != expected.sha256:
-            raise DatasetPreparationError(
-                "content-addressed pack file hash does not match manifest"
+def _require_exact_processed_pack_inventory(path: Path) -> None:
+    expected_names = {"documents.jsonl", "manifest.json", "qrels.jsonl", "queries.jsonl"}
+    try:
+        if path.is_symlink() or not path.is_dir():
+            raise DatasetPreparationError("processed pack path must be a real directory")
+        entries = tuple(path.iterdir())
+    except OSError as error:
+        raise DatasetPreparationError("processed pack directory is unreadable") from error
+    if {entry.name for entry in entries} != expected_names:
+        raise DatasetPreparationError("processed pack directory inventory is not exact")
+    if any(entry.is_symlink() or not entry.is_file() for entry in entries):
+        raise DatasetPreparationError("processed pack entries must be regular files")
+
+
+def _inspect_processed_pack_files(path: Path) -> tuple[ProcessedFile, ...]:
+    files: list[ProcessedFile] = []
+    for name in ("documents.jsonl", "queries.jsonl", "qrels.jsonl"):
+        candidate = path / name
+        try:
+            with candidate.open("rb") as stream:
+                record_count = sum(1 for _ in stream)
+        except OSError as error:
+            raise DatasetPreparationError(f"processed file {name} is unreadable") from error
+        if record_count < 1:
+            raise DatasetPreparationError(f"processed file {name} contains no records")
+        files.append(
+            ProcessedFile(
+                name=name,
+                records=record_count,
+                sha256=_file_sha256(candidate),
             )
-        with candidate.open("rb") as stream:
-            record_count = sum(1 for _ in stream)
-        if record_count != expected.records:
-            raise DatasetPreparationError("content-addressed pack record count does not match")
+        )
+    return tuple(files)
+
+
+def _verify_processed_pack_files(path: Path, manifest: ProcessedPackManifest) -> None:
+    _require_exact_processed_pack_inventory(path)
+    if _inspect_processed_pack_files(path) != manifest.files:
+        raise DatasetPreparationError("content-addressed pack files do not match manifest")
 
 
 def _iter_model_jsonl[ModelT: BaseModel](path: Path, model: type[ModelT]) -> Iterator[ModelT]:

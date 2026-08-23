@@ -77,6 +77,7 @@ class DatasetArtifactAuditError(RuntimeError):
 
 def audit_repository(root: Path, source_lock: SourceLock) -> ArtifactAuditReport:
     root = root.resolve()
+    _assert_full_history(root)
     current_paths = _current_candidate_paths(root)
     violations: list[str] = []
     current_files_scanned = 0
@@ -129,6 +130,16 @@ def audit_repository(root: Path, source_lock: SourceLock) -> ArtifactAuditReport
         historical_blobs_scanned=historical_blobs_scanned,
         ignored_paths_verified=len(_EXPECTED_IGNORED),
     )
+
+
+def _assert_full_history(root: Path) -> None:
+    shallow = _git_text(root, "rev-parse", "--is-shallow-repository").strip()
+    if shallow not in {"true", "false"}:
+        raise DatasetArtifactAuditError("git returned an invalid shallow-repository state")
+    if shallow == "true":
+        raise DatasetArtifactAuditError(
+            "repository history is shallow; whole-history dataset audit cannot run"
+        )
 
 
 def _current_candidate_paths(root: Path) -> tuple[str, ...]:

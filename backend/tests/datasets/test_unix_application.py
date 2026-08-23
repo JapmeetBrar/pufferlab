@@ -3,12 +3,15 @@ from dataclasses import replace
 from pathlib import Path
 from uuid import UUID
 
+import pufferlab.datasets.unix_application as unix_application_module
 import pytest
 from pufferlab.contracts.datasets import DatasetStatus, DatasetVersion
 from pufferlab.contracts.evals import JudgedQuery, QuerySet
 from pufferlab.datasets.checkpoints import IngestionCheckpointStore
 from pufferlab.datasets.cqadupstack import (
     CuratedQueryManifest,
+    ProcessedPackLock,
+    SourceLock,
     curate_query_ids,
     curated_selection_sha256,
     iter_processed_qrels,
@@ -29,7 +32,7 @@ from pufferlab.datasets.unix_application import (
 )
 from pufferlab.persistence import Database, PufferLabRepository
 
-from .test_cqadupstack import _synthetic_archive
+from .test_cqadupstack import _processed_pack_lock, _synthetic_archive
 
 REPOSITORY_ROOT = Path(__file__).parents[3]
 DATASET_MANIFEST_PATH = REPOSITORY_ROOT / "datasets/cqadupstack-unix/dataset-manifest.json"
@@ -80,9 +83,11 @@ class _Writer:
 def test_builder_preserves_grades_curation_metadata_and_contract_native_seed(
     tmp_path: Path,
 ) -> None:
-    processed, curated_path = _prepared_curated_pack(tmp_path)
+    processed, curated_path, source_lock, processed_pack_lock = _prepared_curated_pack(tmp_path)
     local_pack = load_curated_unix_local_pack(
         processed,
+        source_lock=source_lock,
+        processed_pack_lock=processed_pack_lock,
         dataset_manifest_path=DATASET_MANIFEST_PATH,
         curated_manifest_path=curated_path,
     )
@@ -130,14 +135,23 @@ def test_builder_preserves_grades_curation_metadata_and_contract_native_seed(
 @pytest.mark.asyncio
 async def test_application_service_owns_materialization_checkpoint_resume_and_no_delete(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    processed, curated_path = _prepared_curated_pack(tmp_path)
+    processed, curated_path, source_lock, processed_pack_lock = _prepared_curated_pack(tmp_path)
+    monkeypatch.setattr(unix_application_module, "load_source_lock", lambda path: source_lock)
+    monkeypatch.setattr(
+        unix_application_module,
+        "load_processed_pack_lock",
+        lambda path: processed_pack_lock,
+    )
     writer = _Writer()
     ingestion = IngestionService(_Embedder(), writer, batch_size=20, max_concurrency=2)
-    application = UnixDatasetApplicationService(
+    application = UnixDatasetApplicationService.from_paths(
         ingestion,
         IngestionCheckpointStore(tmp_path.resolve()),
         processed_path=processed,
+        source_lock_path=tmp_path / "source-lock.json",
+        processed_pack_lock_path=tmp_path / "processed-pack-lock.json",
         dataset_manifest_path=DATASET_MANIFEST_PATH,
         curated_manifest_path=curated_path,
     )
@@ -157,7 +171,9 @@ async def test_application_service_owns_materialization_checkpoint_resume_and_no
     assert len(tuple((tmp_path / "ingestion-checkpoints").glob("*.json"))) == 1
 
 
-def _prepared_curated_pack(tmp_path: Path) -> tuple[Path, Path]:
+def _prepared_curated_pack(
+    tmp_path: Path,
+) -> tuple[Path, Path, SourceLock, ProcessedPackLock]:
     archive, source_lock = _synthetic_archive(tmp_path, query_count=60)
     processed = prepare_unix_pack(archive, tmp_path / "processed", source_lock)
     query_rows = tuple(
@@ -177,4 +193,4 @@ def _prepared_curated_pack(tmp_path: Path) -> tuple[Path, Path]:
     )
     curated_path = tmp_path / "curated.json"
     curated_path.write_text(curated.model_dump_json(), encoding="utf-8")
-    return processed, curated_path
+    return processed, curated_path, source_lock, _processed_pack_lock(source_lock, processed)

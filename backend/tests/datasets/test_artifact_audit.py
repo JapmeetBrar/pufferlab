@@ -2,7 +2,10 @@ import hashlib
 from collections import Counter
 from pathlib import Path
 
+import pufferlab.datasets.artifact_audit as artifact_audit_module
+import pytest
 from pufferlab.datasets.artifact_audit import (
+    DatasetArtifactAuditError,
     _content_violation,
     _path_violation,
     audit_repository,
@@ -10,6 +13,7 @@ from pufferlab.datasets.artifact_audit import (
 from pufferlab.datasets.cqadupstack import (
     ForbiddenTokenWindow,
     load_curated_query_manifest,
+    load_processed_pack_lock,
     load_source_lock,
     source_lock_sha256,
 )
@@ -53,13 +57,41 @@ def test_content_inventory_rejects_archives_and_casefolded_hashed_source_windows
     assert _content_violation(b"ordinary tracked source code", lock) is None
 
 
+def test_repository_audit_rejects_shallow_history_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        artifact_audit_module,
+        "_git_text",
+        lambda root, *arguments: "true\n",
+    )
+
+    source_lock = load_source_lock(REPOSITORY_ROOT / "datasets/cqadupstack-unix/source-lock.json")
+    with pytest.raises(DatasetArtifactAuditError, match="history is shallow"):
+        audit_repository(REPOSITORY_ROOT, source_lock)
+
+
 def test_checked_manifests_and_entire_repository_pass_artifact_audit() -> None:
     source_lock = load_source_lock(REPOSITORY_ROOT / "datasets/cqadupstack-unix/source-lock.json")
     curated = load_curated_query_manifest(
         REPOSITORY_ROOT / "datasets/cqadupstack-unix/curated-50.json"
     )
+    processed_pack = load_processed_pack_lock(
+        REPOSITORY_ROOT / "datasets/cqadupstack-unix/processed-pack-lock.json"
+    )
 
     assert curated.source_lock_sha256 == source_lock_sha256(source_lock)
+    assert processed_pack.source_lock_sha256 == source_lock_sha256(source_lock)
+    assert processed_pack.archive_sha256 == source_lock.archive.completed_download_sha256
+    assert processed_pack.preprocessing_sha256 == (source_lock.preprocessing.specification_sha256)
+    assert processed_pack.content_sha256 == (
+        "6d54fb92c04b9f193d081a7c430d8804e24e71855d3cbaa2bb50cde838f181b8"
+    )
+    assert tuple((file.name, file.records) for file in processed_pack.files) == (
+        ("documents.jsonl", source_lock.members["corpus"].records),
+        ("queries.jsonl", source_lock.members["queries"].records),
+        ("qrels.jsonl", source_lock.members["qrels"].records),
+    )
     assert Counter(entry.primary_tag for entry in curated.entries) == {
         "exact_token": 13,
         "semantic": 13,
