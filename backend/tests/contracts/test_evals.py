@@ -32,6 +32,7 @@ def test_eval_run_serializes_contract_version() -> None:
             python_version="3.12",
             platform="test",
             max_concurrency=1,
+            warmup_query_count=3,
             query_embedding_cache_enabled=False,
         ),
         created_at=datetime.now(UTC),
@@ -40,4 +41,6 @@ def test_eval_run_serializes_contract_version() -> None:
         error=None,
     )
 
-    assert eval_run.model_dump(mode="json")["contract_version"] == 1
+    payload = eval_run.model_dump(mode="json")
+    assert payload["contract_version"] == 1
+    assert payload["environment"]["warmup_query_count"] == 3
