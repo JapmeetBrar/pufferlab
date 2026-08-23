@@ -663,11 +663,12 @@ primary replay and records only the safe typed warning; it cannot contribute mem
 count, timing, or client-computed evidence.
 
 Replay accepts no origin, namespace, query text, qrels, expected document IDs, or config body from
-the client. The server derives them from the run and dataset binding. Before credentials, the
-dataset manifest, bound catalog, search runtime, provider, embedder, or reranker are constructed,
-the server authenticates the complete 50-query persisted suite against the checked source lock and
-ID-only curation anchor: exact order, source/query UUIDs, tags, qrels, content hash, query-set UUID,
-dataset binding, and canonical run/config identities must all match. Foreign, duplicated, or
+the client. The server derives them from the run and dataset binding. It first authenticates the
+complete 50-query persisted suite against the checked source lock and ID-only curation anchor:
+exact order, source/query UUIDs, tags, qrels, content hash, query-set UUID, and dataset binding must
+all match. It then loads the checked dataset manifest and requires the run configs to equal the
+derived canonical suite. Both provider-free validation steps finish before credentials, the bound
+catalog, search runtime, provider, embedder, or reranker are constructed. Foreign, duplicated, or
 tampered stored content fails with a direct redacted error and zero provider-capable calls. The
 primary response contains only production-shaped evidence; BM25/ANN raw candidate memberships and
 `provenance_probe` timing remain in separately labeled bounded probes. Probe failure preserves the
