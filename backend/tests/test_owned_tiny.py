@@ -17,6 +17,7 @@ from pufferlab.owned_tiny import (
     OwnedTinyState,
     OwnedTinyStateError,
     _derive_namespace,
+    _FileIdentity,
     owned_tiny_ingest_operation,
     owned_tiny_requirements,
     resolve_owned_tiny_target,
@@ -149,6 +150,423 @@ def test_intent_resume_keeps_exact_namespace_and_binds_credential(
     assert (isolated_state / "receipt.json").read_bytes() == original_bytes
 
 
+def test_private_directory_install_rejects_post_publish_fixed_substitute(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pufferlab import owned_tiny
+
+    state = tmp_path.resolve() / ".pufferlab" / "state" / "owned-tiny-v1"
+    monkeypatch.setattr(owned_tiny, "_production_state_path", lambda: state)
+    monkeypatch.setattr(owned_tiny, "_production_anchor_path", lambda: tmp_path.resolve())
+    real_rename_noreplace = owned_tiny._rename_noreplace
+    preserved = tmp_path / "preserved-staged-pufferlab"
+    attacked = False
+
+    def replace_after_publish(directory_fd: int, source: str, destination: str) -> None:
+        nonlocal attacked
+        real_rename_noreplace(directory_fd, source, destination)
+        if destination == ".pufferlab" and not attacked:
+            attacked = True
+            (tmp_path / ".pufferlab").replace(preserved)
+            (tmp_path / ".pufferlab").mkdir(mode=0o755)
+
+    monkeypatch.setattr(owned_tiny, "_rename_noreplace", replace_after_publish)
+    with pytest.raises(OwnedTinyStateError), owned_tiny_ingest_operation():
+        pass
+
+    assert attacked
+    assert stat_mode(tmp_path / ".pufferlab") == 0o755
+    assert list((tmp_path / ".pufferlab").iterdir()) == []
+    assert stat_mode(preserved) == 0o700
+    assert list(preserved.iterdir()) == []
+
+
+def test_private_directory_install_rejects_staging_source_substitute(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pufferlab import owned_tiny
+
+    state = tmp_path.resolve() / ".pufferlab" / "state" / "owned-tiny-v1"
+    monkeypatch.setattr(owned_tiny, "_production_state_path", lambda: state)
+    monkeypatch.setattr(owned_tiny, "_production_anchor_path", lambda: tmp_path.resolve())
+    real_rename_noreplace = owned_tiny._rename_noreplace
+    preserved = tmp_path / "preserved-private-staging"
+    attacked = False
+
+    def replace_staging_before_publish(
+        directory_fd: int,
+        source: str,
+        destination: str,
+    ) -> None:
+        nonlocal attacked
+        if destination == ".pufferlab" and not attacked:
+            attacked = True
+            (tmp_path / source).replace(preserved)
+            (tmp_path / source).mkdir(mode=0o700)
+        real_rename_noreplace(directory_fd, source, destination)
+
+    monkeypatch.setattr(owned_tiny, "_rename_noreplace", replace_staging_before_publish)
+    with pytest.raises(OwnedTinyStateError), owned_tiny_ingest_operation():
+        pass
+
+    assert attacked
+    assert stat_mode(tmp_path / ".pufferlab") == 0o700
+    assert list((tmp_path / ".pufferlab").iterdir()) == []
+    assert stat_mode(preserved) == 0o700
+    assert list(preserved.iterdir()) == []
+
+
+def test_owner_key_no_replace_collision_is_preserved(
+    isolated_state: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pufferlab import owned_tiny
+
+    real_rename_noreplace = owned_tiny._rename_noreplace
+    collision = b"c" * 32
+    attacked = False
+
+    def collide_before_owner_publish(directory_fd: int, source: str, destination: str) -> None:
+        nonlocal attacked
+        if destination == "owner.key" and not attacked:
+            attacked = True
+            owner_path = isolated_state / "owner.key"
+            owner_path.write_bytes(collision)
+            owner_path.chmod(0o600)
+        real_rename_noreplace(directory_fd, source, destination)
+
+    monkeypatch.setattr(owned_tiny, "_rename_noreplace", collide_before_owner_publish)
+    with pytest.raises(OwnedTinyStateError), owned_tiny_ingest_operation():
+        pass
+
+    assert attacked
+    assert (isolated_state / "owner.key").read_bytes() == collision
+
+
+def test_owner_key_post_publish_substitute_is_not_removed(
+    isolated_state: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pufferlab import owned_tiny
+
+    real_matches = owned_tiny._named_regular_file_matches
+    preserved = isolated_state / "preserved-created-owner"
+    substitute = b"s" * 32
+    attacked = False
+
+    def substitute_after_owner_verification(
+        directory_fd: int,
+        name: str,
+        *,
+        identity: _FileIdentity,
+        raw: bytes,
+    ) -> bool:
+        nonlocal attacked
+        matches = real_matches(directory_fd, name, identity=identity, raw=raw)
+        if name == "owner.key" and matches and not attacked:
+            attacked = True
+            (isolated_state / "owner.key").replace(preserved)
+            (isolated_state / "owner.key").write_bytes(substitute)
+            (isolated_state / "owner.key").chmod(0o600)
+        return matches
+
+    monkeypatch.setattr(
+        owned_tiny,
+        "_named_regular_file_matches",
+        substitute_after_owner_verification,
+    )
+    with pytest.raises(OwnedTinyStateError), owned_tiny_ingest_operation():
+        pass
+
+    assert attacked
+    assert (isolated_state / "owner.key").read_bytes() == substitute
+    assert len(preserved.read_bytes()) == 32
+
+
+@pytest.mark.parametrize("stage", ["write", "file-fsync", "close", "directory-fsync"])
+def test_owner_key_staging_failures_never_publish_partial_fixed_key_and_resume(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stage: str,
+) -> None:
+    from pufferlab import owned_tiny
+
+    state = tmp_path / "owner-key-staging"
+    state.mkdir(mode=0o700)
+    directory_fd = os.open(state, os.O_RDONLY | os.O_DIRECTORY)
+    real_write_all = owned_tiny._write_all
+    real_fsync = owned_tiny.os.fsync
+    real_close = owned_tiny._close_quietly
+
+    def fail_key_write(fd: int, value: bytes) -> None:
+        if stage == "write" and len(value) == 32:
+            raise owned_tiny._StateFailure()
+        real_write_all(fd, value)
+
+    def fail_selected_fsync(fd: int) -> None:
+        info = os.fstat(fd)
+        if stage == "file-fsync" and stat.S_ISREG(info.st_mode) and info.st_size == 32:
+            raise OSError("synthetic owner file fsync failure")
+        if stage == "directory-fsync" and stat.S_ISDIR(info.st_mode):
+            raise OSError("synthetic owner directory fsync failure")
+        real_fsync(fd)
+
+    def fail_key_close(fd: int) -> bool:
+        info = os.fstat(fd)
+        closed = real_close(fd)
+        if stage == "close" and stat.S_ISREG(info.st_mode) and info.st_size == 32:
+            return False
+        return closed
+
+    try:
+        with monkeypatch.context() as attack:
+            attack.setattr(owned_tiny, "_write_all", fail_key_write)
+            attack.setattr(owned_tiny.os, "fsync", fail_selected_fsync)
+            attack.setattr(owned_tiny, "_close_quietly", fail_key_close)
+            with pytest.raises(owned_tiny._StateFailure):
+                owned_tiny._create_owner_key(directory_fd)
+
+        fixed = state / "owner.key"
+        if stage == "directory-fsync":
+            resumed = owned_tiny._read_owner_key(directory_fd, required=True)
+            assert resumed is not None
+            assert len(resumed.key) == 32
+        else:
+            assert not fixed.exists()
+            resumed = owned_tiny._create_owner_key(directory_fd)
+            assert len(resumed.key) == 32
+        assert fixed.is_file()
+        assert stat_mode(fixed) == 0o600
+    finally:
+        os.close(directory_fd)
+
+
+def test_initial_receipt_post_publish_same_byte_substitute_fails_closed(
+    isolated_state: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pufferlab import owned_tiny
+
+    real_matches = owned_tiny._named_regular_file_matches
+    preserved = isolated_state / "preserved-created-receipt"
+    substitute_inode: int | None = None
+    attacked = False
+
+    def substitute_after_receipt_verification(
+        directory_fd: int,
+        name: str,
+        *,
+        identity: _FileIdentity,
+        raw: bytes,
+    ) -> bool:
+        nonlocal attacked, substitute_inode
+        matches = real_matches(directory_fd, name, identity=identity, raw=raw)
+        if name == "receipt.json" and matches and not attacked:
+            attacked = True
+            (isolated_state / "receipt.json").replace(preserved)
+            substitute = isolated_state / "same-byte-created-receipt-substitute"
+            substitute.write_bytes(raw)
+            substitute.chmod(0o600)
+            substitute_inode = substitute.stat().st_ino
+            substitute.replace(isolated_state / "receipt.json")
+        return matches
+
+    monkeypatch.setattr(
+        owned_tiny,
+        "_named_regular_file_matches",
+        substitute_after_receipt_verification,
+    )
+    with (
+        owned_tiny_ingest_operation() as operation,
+        pytest.raises(OwnedTinyStateError, match="could not be persisted"),
+    ):
+        operation.create_intent(api_key=_KEY, region=_REGION)
+
+    assert attacked
+    assert substitute_inode is not None
+    assert (isolated_state / "receipt.json").stat().st_ino == substitute_inode
+    assert preserved.read_bytes() == (isolated_state / "receipt.json").read_bytes()
+
+
+def test_initial_receipt_no_replace_collision_is_preserved(
+    isolated_state: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pufferlab import owned_tiny
+
+    real_rename_noreplace = owned_tiny._rename_noreplace
+    collision_inode: int | None = None
+    attacked = False
+
+    def collide_before_receipt_publish(
+        directory_fd: int,
+        source: str,
+        destination: str,
+    ) -> None:
+        nonlocal attacked, collision_inode
+        if destination == "receipt.json" and not attacked:
+            attacked = True
+            staged_raw = (isolated_state / source).read_bytes()
+            collision = isolated_state / "same-byte-receipt-collider"
+            collision.write_bytes(staged_raw)
+            collision.chmod(0o600)
+            collision_inode = collision.stat().st_ino
+            collision.replace(isolated_state / "receipt.json")
+        real_rename_noreplace(directory_fd, source, destination)
+
+    monkeypatch.setattr(owned_tiny, "_rename_noreplace", collide_before_receipt_publish)
+    with (
+        owned_tiny_ingest_operation() as operation,
+        pytest.raises(OwnedTinyStateError, match="could not be persisted"),
+    ):
+        operation.create_intent(api_key=_KEY, region=_REGION)
+
+    assert attacked
+    assert collision_inode is not None
+    assert (isolated_state / "receipt.json").stat().st_ino == collision_inode
+
+
+def test_forced_random_temporary_collision_is_never_deleted(
+    isolated_state: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pufferlab import owned_tiny
+
+    current = _create_receipt()
+    collision = isolated_state / ".receipt-forced-collision.tmp"
+    collision.write_bytes(b"random-collider")
+    collision.chmod(0o600)
+    monkeypatch.setattr(owned_tiny, "_temporary_name", lambda: collision.name)
+
+    with owned_tiny_ingest_operation() as operation:
+        loaded = operation.load(required=True)
+        assert loaded is not None
+        with pytest.raises(OwnedTinyStateError, match="transition"):
+            operation.transition(loaded, OwnedTinyState.CREATED)
+
+    assert collision.read_bytes() == b"random-collider"
+    assert (isolated_state / "receipt.json").read_bytes() == current.raw
+
+
+def test_transition_restore_preserves_fixed_occupant_and_both_staged_receipts(
+    isolated_state: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pufferlab import owned_tiny
+
+    prior = _create_receipt()
+    fixed_occupant = b"manual-fixed-occupant"
+    real_receipt_matches = owned_tiny._named_receipt_matches
+    real_regular_matches = owned_tiny._named_regular_file_matches
+    forced_mismatch = False
+    inserted_occupant = False
+
+    def reject_displaced_once(*args: object, **kwargs: object) -> bool:
+        nonlocal forced_mismatch
+        matches = real_receipt_matches(*args, **kwargs)
+        if matches and not forced_mismatch:
+            forced_mismatch = True
+            return False
+        return matches
+
+    def occupy_fixed_after_replacement_was_moved(
+        directory_fd: int,
+        name: str,
+        *,
+        identity: _FileIdentity,
+        raw: bytes,
+    ) -> bool:
+        nonlocal inserted_occupant
+        matches = real_regular_matches(
+            directory_fd,
+            name,
+            identity=identity,
+            raw=raw,
+        )
+        if matches and name.startswith(".receipt-") and raw != prior.raw and not inserted_occupant:
+            inserted_occupant = True
+            fixed = isolated_state / "receipt.json"
+            assert not fixed.exists()
+            fixed.write_bytes(fixed_occupant)
+            fixed.chmod(0o600)
+        return matches
+
+    monkeypatch.setattr(owned_tiny, "_named_receipt_matches", reject_displaced_once)
+    monkeypatch.setattr(
+        owned_tiny,
+        "_named_regular_file_matches",
+        occupy_fixed_after_replacement_was_moved,
+    )
+    with owned_tiny_ingest_operation() as operation:
+        current = operation.load(required=True)
+        assert current is not None
+        with pytest.raises(OwnedTinyStateError, match="transition"):
+            operation.transition(current, OwnedTinyState.CREATED)
+
+    assert forced_mismatch
+    assert inserted_occupant
+    assert (isolated_state / "receipt.json").read_bytes() == fixed_occupant
+    staged_receipts = [child.read_bytes() for child in isolated_state.glob(".receipt-*.tmp")]
+    assert prior.raw in staged_receipts
+    assert any(raw != prior.raw and raw.startswith(b"{") for raw in staged_receipts)
+
+
+def test_transition_post_persist_reload_rejects_same_byte_substitute(
+    isolated_state: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pufferlab import owned_tiny
+
+    _create_receipt()
+    real_remove_known = owned_tiny._remove_known_regular_file
+    preserved_replacement = isolated_state / "preserved-installed-transition"
+    substitute_inode: int | None = None
+    attacked = False
+
+    def substitute_before_old_staging_cleanup(
+        directory_fd: int,
+        name: str,
+        *,
+        identity: _FileIdentity,
+        raw: bytes,
+    ) -> None:
+        nonlocal attacked, substitute_inode
+        if name.startswith(".receipt-") and not attacked:
+            attacked = True
+            fixed = isolated_state / "receipt.json"
+            replacement_raw = fixed.read_bytes()
+            fixed.replace(preserved_replacement)
+            substitute = isolated_state / "same-byte-transition-substitute"
+            substitute.write_bytes(replacement_raw)
+            substitute.chmod(0o600)
+            substitute_inode = substitute.stat().st_ino
+            substitute.replace(fixed)
+        real_remove_known(
+            directory_fd,
+            name,
+            identity=identity,
+            raw=raw,
+        )
+
+    monkeypatch.setattr(
+        owned_tiny,
+        "_remove_known_regular_file",
+        substitute_before_old_staging_cleanup,
+    )
+    with owned_tiny_ingest_operation() as operation:
+        current = operation.load(required=True)
+        assert current is not None
+        with pytest.raises(OwnedTinyStateError, match="transition"):
+            operation.transition(current, OwnedTinyState.CREATED)
+
+    assert attacked
+    assert substitute_inode is not None
+    assert (isolated_state / "receipt.json").stat().st_ino == substitute_inode
+    assert (isolated_state / "receipt.json").read_bytes() == preserved_replacement.read_bytes()
+
+
 def test_authenticated_cas_rejects_same_byte_replacement_without_clobbering(
     isolated_state: Path,
 ) -> None:
@@ -168,16 +586,13 @@ def test_authenticated_cas_rejects_same_byte_replacement_without_clobbering(
     assert (isolated_state / "receipt.json").read_bytes() == raw
 
 
-@pytest.mark.parametrize("terminal", [False, True], ids=["transition", "terminal-removal"])
 def test_atomic_exchange_restores_last_moment_receipt_substitute(
     isolated_state: Path,
     monkeypatch: pytest.MonkeyPatch,
-    terminal: bool,
 ) -> None:
     from pufferlab import owned_tiny
 
-    starting_state = OwnedTinyState.NOT_FOUND_VERIFIED if terminal else OwnedTinyState.INTENT
-    _create_receipt(starting_state)
+    _create_receipt(OwnedTinyState.INTENT)
     expected_path = isolated_state / "receipt.json"
     expected_raw = expected_path.read_bytes()
     expected_inode = expected_path.stat().st_ino
@@ -200,18 +615,329 @@ def test_atomic_exchange_restores_last_moment_receipt_substitute(
     with owned_tiny_ingest_operation() as operation:
         current = operation.load(required=True)
         assert current is not None
-        if terminal:
-            with pytest.raises(OwnedTinyStateError, match="could not be removed"):
-                operation.remove_terminal(current)
-        else:
-            with pytest.raises(OwnedTinyStateError, match="transition"):
-                operation.transition(current, OwnedTinyState.CREATED)
+        with pytest.raises(OwnedTinyStateError, match="transition"):
+            operation.transition(current, OwnedTinyState.CREATED)
 
     assert attacked
     assert expected_path.read_bytes() == expected_raw
     assert expected_path.stat().st_ino != expected_inode
     assert preserved_expected.read_bytes() == expected_raw
     assert preserved_expected.stat().st_ino == expected_inode
+
+
+def test_terminal_removal_preserves_substitute_at_atomic_move_boundary(
+    isolated_state: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pufferlab import owned_tiny
+
+    _create_receipt(OwnedTinyState.NOT_FOUND_VERIFIED)
+    receipt_path = isolated_state / "receipt.json"
+    original_raw = receipt_path.read_bytes()
+    original_inode = receipt_path.stat().st_ino
+    preserved_expected = isolated_state / "expected-before-substitution"
+    real_rename_noreplace = owned_tiny._rename_noreplace
+    substitute_inode: int | None = None
+    attacked = False
+
+    def rename_after_substitution(
+        directory_fd: int,
+        source: str,
+        destination: str,
+    ) -> None:
+        nonlocal attacked, substitute_inode
+        if source == "receipt.json" and not attacked:
+            attacked = True
+            receipt_path.replace(preserved_expected)
+            substitute = isolated_state / "manual-move-boundary-substitute"
+            substitute.write_bytes(original_raw)
+            substitute.chmod(0o600)
+            substitute_inode = substitute.stat().st_ino
+            substitute.replace(receipt_path)
+        real_rename_noreplace(directory_fd, source, destination)
+
+    monkeypatch.setattr(
+        owned_tiny,
+        "_rename_noreplace",
+        rename_after_substitution,
+    )
+    with owned_tiny_ingest_operation() as operation:
+        current = operation.load(required=True)
+        assert current is not None
+        with pytest.raises(OwnedTinyStateError, match="could not be removed"):
+            operation.remove_terminal(current)
+
+    assert attacked
+    assert substitute_inode is not None
+    assert receipt_path.read_bytes() == original_raw
+    assert receipt_path.stat().st_ino == substitute_inode
+    assert preserved_expected.read_bytes() == original_raw
+    assert preserved_expected.stat().st_ino == original_inode
+
+
+def test_terminal_removal_wipes_only_held_inode_when_quarantine_path_is_replaced(
+    isolated_state: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pufferlab import owned_tiny
+
+    _create_receipt(OwnedTinyState.NOT_FOUND_VERIFIED)
+    receipt_path = isolated_state / "receipt.json"
+    original_raw = receipt_path.read_bytes()
+    original_inode = receipt_path.stat().st_ino
+    preserved_expected = isolated_state / "held-expected-after-substitution"
+    substitute_inode: int | None = None
+    real_read_bounded = owned_tiny._read_bounded
+    attacked = False
+
+    def substitute_after_held_read(fd: int, maximum: int) -> bytes:
+        nonlocal attacked, substitute_inode
+        raw = real_read_bounded(fd, maximum)
+        quarantines = list(isolated_state.glob(".receipt-*.tmp"))
+        if not attacked and raw == original_raw and not receipt_path.exists() and quarantines:
+            attacked = True
+            quarantine = quarantines[0]
+            quarantine.replace(preserved_expected)
+            substitute = isolated_state / "manual-quarantine-substitute"
+            substitute.write_bytes(original_raw)
+            substitute.chmod(0o600)
+            substitute_inode = substitute.stat().st_ino
+            substitute.replace(quarantine)
+        return raw
+
+    monkeypatch.setattr(owned_tiny, "_read_bounded", substitute_after_held_read)
+    with owned_tiny_ingest_operation() as operation:
+        current = operation.load(required=True)
+        assert current is not None
+        operation.remove_terminal(current)
+
+    assert attacked
+    assert substitute_inode is not None
+    assert not receipt_path.exists()
+    assert preserved_expected.stat().st_ino == original_inode
+    assert preserved_expected.read_bytes() == b""
+    substitutes = [
+        child
+        for child in isolated_state.glob(".receipt-*.tmp")
+        if child.stat().st_ino == substitute_inode
+    ]
+    assert len(substitutes) == 1
+    assert substitutes[0].read_bytes() == original_raw
+
+
+def test_terminal_removal_durably_moves_fixed_receipt_before_wiping_inode(
+    isolated_state: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pufferlab import owned_tiny
+
+    _create_receipt(OwnedTinyState.NOT_FOUND_VERIFIED)
+    real_rename_noreplace = owned_tiny._rename_noreplace
+    real_fsync = owned_tiny.os.fsync
+    real_ftruncate = owned_tiny.os.ftruncate
+    events: list[str] = []
+
+    def record_rename(directory_fd: int, source: str, destination: str) -> None:
+        real_rename_noreplace(directory_fd, source, destination)
+        if source == "receipt.json":
+            events.append("rename")
+
+    def record_fsync(fd: int) -> None:
+        info = os.fstat(fd)
+        events.append("directory-fsync" if stat.S_ISDIR(info.st_mode) else "file-fsync")
+        real_fsync(fd)
+
+    def record_ftruncate(fd: int, length: int) -> None:
+        events.append("ftruncate")
+        real_ftruncate(fd, length)
+
+    with owned_tiny_ingest_operation() as operation:
+        current = operation.load(required=True)
+        assert current is not None
+        monkeypatch.setattr(owned_tiny, "_rename_noreplace", record_rename)
+        monkeypatch.setattr(owned_tiny.os, "fsync", record_fsync)
+        monkeypatch.setattr(owned_tiny.os, "ftruncate", record_ftruncate)
+        operation.remove_terminal(current)
+
+    assert events[:4] == ["rename", "directory-fsync", "ftruncate", "file-fsync"]
+    assert events.count("directory-fsync") >= 2
+    assert not (isolated_state / "receipt.json").exists()
+
+
+def test_terminal_quarantine_collision_preserves_fixed_receipt(
+    isolated_state: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pufferlab import owned_tiny
+
+    prior = _create_receipt(OwnedTinyState.NOT_FOUND_VERIFIED)
+    collision = isolated_state / ".receipt-terminal-collision.tmp"
+    collision.write_bytes(b"terminal-collider")
+    collision.chmod(0o600)
+    monkeypatch.setattr(owned_tiny, "_temporary_name", lambda: collision.name)
+
+    with owned_tiny_ingest_operation() as operation:
+        current = operation.load(required=True)
+        assert current is not None
+        with pytest.raises(OwnedTinyStateError, match="could not be removed"):
+            operation.remove_terminal(current)
+
+    assert (isolated_state / "receipt.json").read_bytes() == prior.raw
+    assert collision.read_bytes() == b"terminal-collider"
+
+
+def test_terminal_prevalidation_fixed_occupant_preserves_both_objects(
+    isolated_state: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pufferlab import owned_tiny
+
+    prior = _create_receipt(OwnedTinyState.NOT_FOUND_VERIFIED)
+    real_rename_noreplace = owned_tiny._rename_noreplace
+    fixed_occupant = b"post-move-fixed-occupant"
+    quarantine_name: str | None = None
+
+    def occupy_fixed_after_terminal_move(
+        directory_fd: int,
+        source: str,
+        destination: str,
+    ) -> None:
+        nonlocal quarantine_name
+        real_rename_noreplace(directory_fd, source, destination)
+        if source == "receipt.json" and quarantine_name is None:
+            quarantine_name = destination
+            fixed = isolated_state / "receipt.json"
+            fixed.write_bytes(fixed_occupant)
+            fixed.chmod(0o600)
+
+    monkeypatch.setattr(owned_tiny, "_rename_noreplace", occupy_fixed_after_terminal_move)
+    with owned_tiny_ingest_operation() as operation:
+        current = operation.load(required=True)
+        assert current is not None
+        with pytest.raises(OwnedTinyStateError, match="could not be removed"):
+            operation.remove_terminal(current)
+
+    assert quarantine_name is not None
+    assert (isolated_state / "receipt.json").read_bytes() == fixed_occupant
+    assert (isolated_state / quarantine_name).read_bytes() == prior.raw
+
+
+def test_terminal_validated_fsync_failure_never_restores_quarantine_as_authority(
+    isolated_state: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pufferlab import owned_tiny
+
+    _create_receipt(OwnedTinyState.NOT_FOUND_VERIFIED)
+    real_fsync = owned_tiny.os.fsync
+    attacked = False
+
+    def fail_zero_inode_fsync(fd: int) -> None:
+        nonlocal attacked
+        info = os.fstat(fd)
+        if stat.S_ISREG(info.st_mode) and info.st_size == 0 and not attacked:
+            attacked = True
+            real_fsync(fd)
+            raise OSError("synthetic post-truncate fsync failure")
+        real_fsync(fd)
+
+    monkeypatch.setattr(owned_tiny.os, "fsync", fail_zero_inode_fsync)
+    with owned_tiny_ingest_operation() as operation:
+        current = operation.load(required=True)
+        assert current is not None
+        with pytest.raises(OwnedTinyStateError, match="could not be removed"):
+            operation.remove_terminal(current)
+
+    assert attacked
+    assert not (isolated_state / "receipt.json").exists()
+    tombstones = list(isolated_state.glob(".receipt-*.tmp"))
+    assert len(tombstones) == 1
+    assert tombstones[0].read_bytes() == b""
+    with owned_tiny_ingest_operation() as operation:
+        assert operation.load(required=False) is None
+
+
+def test_terminal_interruption_after_validation_closes_fd_without_restoring_authority(
+    isolated_state: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pufferlab import owned_tiny
+
+    _create_receipt(OwnedTinyState.NOT_FOUND_VERIFIED)
+    descriptor_count = _open_descriptor_count()
+
+    def interrupt_before_truncate(fd: int, length: int) -> None:
+        del fd, length
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(owned_tiny.os, "ftruncate", interrupt_before_truncate)
+    with (
+        pytest.raises(KeyboardInterrupt),
+        owned_tiny_ingest_operation() as operation,
+    ):
+        current = operation.load(required=True)
+        assert current is not None
+        operation.remove_terminal(current)
+
+    assert not (isolated_state / "receipt.json").exists()
+    quarantines = list(isolated_state.glob(".receipt-*.tmp"))
+    assert len(quarantines) == 1
+    assert quarantines[0].read_bytes()
+    assert _open_descriptor_count() == descriptor_count
+
+
+def test_terminal_interruption_after_file_fsync_closes_fd_and_keeps_fixed_absent(
+    isolated_state: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pufferlab import owned_tiny
+
+    _create_receipt(OwnedTinyState.NOT_FOUND_VERIFIED)
+    real_fsync = owned_tiny.os.fsync
+    file_synced = False
+    descriptor_count = _open_descriptor_count()
+
+    def interrupt_before_directory_fsync(fd: int) -> None:
+        nonlocal file_synced
+        info = os.fstat(fd)
+        if stat.S_ISREG(info.st_mode) and info.st_size == 0:
+            real_fsync(fd)
+            file_synced = True
+            return
+        if stat.S_ISDIR(info.st_mode) and file_synced:
+            raise KeyboardInterrupt()
+        real_fsync(fd)
+
+    monkeypatch.setattr(owned_tiny.os, "fsync", interrupt_before_directory_fsync)
+    with (
+        pytest.raises(KeyboardInterrupt),
+        owned_tiny_ingest_operation() as operation,
+    ):
+        current = operation.load(required=True)
+        assert current is not None
+        operation.remove_terminal(current)
+
+    assert file_synced
+    assert not (isolated_state / "receipt.json").exists()
+    tombstones = list(isolated_state.glob(".receipt-*.tmp"))
+    assert len(tombstones) == 1
+    assert tombstones[0].read_bytes() == b""
+    assert _open_descriptor_count() == descriptor_count
+
+
+def test_crash_moved_terminal_quarantine_is_never_restored_as_authority(
+    isolated_state: Path,
+) -> None:
+    prior = _create_receipt(OwnedTinyState.NOT_FOUND_VERIFIED)
+    quarantine = isolated_state / ".receipt-simulated-crash.tmp"
+    (isolated_state / "receipt.json").replace(quarantine)
+
+    with owned_tiny_ingest_operation() as operation:
+        assert operation.load(required=False) is None
+        replacement = operation.create_intent(api_key=_KEY, region=_REGION)
+
+    assert replacement.receipt.namespace != prior.receipt.namespace
+    assert quarantine.read_bytes() == prior.raw
 
 
 def test_atomic_cas_rechecks_owner_identity_after_temporary_file_sync(
@@ -275,8 +1001,12 @@ def test_state_path_component_symlink_fails_closed(
     )
     monkeypatch.setattr("pufferlab.owned_tiny._production_anchor_path", lambda: tmp_path.resolve())
 
-    with pytest.raises(OwnedTinyStateError), owned_tiny_ingest_operation():
-        pass
+    descriptor_count = _open_descriptor_count()
+    for _ in range(2):
+        with pytest.raises(OwnedTinyStateError) as caught, owned_tiny_ingest_operation():
+            pass
+        assert type(caught.value) is OwnedTinyStateError
+    assert _open_descriptor_count() == descriptor_count
 
 
 def test_nonblocking_process_lock_rejects_concurrent_operation(isolated_state: Path) -> None:

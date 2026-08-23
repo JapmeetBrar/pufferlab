@@ -224,16 +224,22 @@ private helpers. That mode-0700 directory has fixed `owner.key`, `receipt.json`,
 active generated-tiny receipt globally for this local OS user.
 
 Every directory component and file is checked against symlinks; receipt/key files use exclusive
-no-follow mode 0600. Creation and every state transition use an authenticated atomic replacement,
-file plus directory `fsync`, and unchanged owner-key/file identity checks before the prior receipt
-can be replaced or removed. A fixed no-follow mode-0600 sibling lock is acquired with a
+no-follow mode 0600. Missing fixed directories, the owner key, and the initial receipt are fully
+prepared under random private staging names, file-synced where applicable, and published only by
+native atomic no-replace rename; a fixed occupant is never chmodded, overwritten, or removed after
+a stale userspace check. Creation and every state transition use an authenticated atomic
+replacement, file plus directory `fsync`, and unchanged owner-key/file identity checks before the
+prior receipt can be replaced or removed. A fixed no-follow mode-0600 sibling lock is acquired with a
 non-blocking exclusive POSIX `fcntl` lock and held across every ingest/resume/cleanup provider
 operation and receipt transition; contention fails safely before provider construction. Platforms
 without equivalent process locking fail closed. Each transition writes an `O_EXCL|O_NOFOLLOW`
-mode-0600 temporary file in the same directory, flushes and `fsync`s it, atomically replaces the
-receipt, and `fsync`s the directory. It authenticates and reloads the prior bytes and file identity
-immediately before a compare-and-swap transition or removal, so a concurrently or manually
-replaced receipt cannot authorize work. The receipt binds at least format version, purpose,
+mode-0600 temporary file in the same directory, flushes and `fsync`s it, atomically exchanges it
+with the fixed receipt, inspects the displaced inode, and `fsync`s the directory. Mismatch
+restoration first moves the installed replacement to a private quarantine, then restores the
+displaced object only into a vacant fixed locator; a new fixed occupant is never clobbered. It
+authenticates and reloads the prior bytes and file identity immediately before a compare-and-swap
+transition or removal, so a concurrently or manually replaced fixed receipt cannot authorize
+work. The receipt binds at least format version, purpose,
 creating region, nonce, derived namespace, lifecycle state, a non-output HMAC tag of the creating
 credential, and the receipt authentication tag. Neither tag, the credential, nor a
 credential-derived fingerprint is printed or returned.
@@ -255,16 +261,31 @@ intent -> created -> ready -> cleanup_requested -> not_found_verified
 - A repeated cleanup resumes an authenticated `cleanup_requested` receipt idempotently: it repeats
   delete-or-already-absent and bounded not-found verification before completing.
 - Successful absence verification durably transitions to `not_found_verified` before receipt
-  unlink. A rerun that authenticates that terminal receipt performs no second provider/delete call;
-  under the same lock it compare-and-swap unlinks the exact receipt, `fsync`s the directory, and
-  retains the owner key.
+  removal. A rerun that authenticates that terminal receipt performs no second provider/delete
+  call. Under the same lock, one atomic no-replace rename removes the fixed locator; one held
+  descriptor then validates the exact moved inode, canonical bytes, and HMAC. The state directory
+  is synced to make fixed absence durable before wiping and syncing only that inode. The owner key
+  remains. A crash after the fixed move is remote-safe
+  because absence was already durable; random quarantine names are never scanned or restored as
+  authority, so a retry performs no provider action and a later generated ingest may start anew.
 - Before provider construction for either resume or cleanup, the command must HMAC-verify the
   currently supplied API key against the non-output credential tag and must use the authenticated
   receipt's creating region, never the current environment region. A rotated or different key
   fails closed; recovery requires the exact creating key.
 - The receipt is removed only after delete-or-already-absent and a bounded not-found verification;
   the owner key remains. Any provider, verification, cancellation, replacement-file, or close
-  failure retains the receipt and exits nonzero.
+  failure before the terminal fixed-locator move retains the receipt and exits nonzero. A local
+  wipe/fsync failure after exact held-descriptor validation is commit-like: it exits nonzero but
+  never promotes an arbitrary quarantine back to authority; fixed absence remains remote-safe.
+
+The fixed state path, every fixed directory component, `owner.key`, `operation.lock`, and
+`receipt.json` are the local authority boundary and are protected against replacement at every
+mutation. Compliant PufferLab commands are additionally serialized by the stable account-home
+lock. Internal staging uses 128-bit random `O_EXCL` names and preserves observed colliders; those
+random implementation names are not claimed to resist a malicious same-UID directory watcher,
+which can already read `owner.key` and ignore advisory locking. Crash or hostile-interference paths
+may leave ignored random zero-byte or private staging artifacts; they are never authority and no
+finite-residue claim is made for that out-of-boundary case.
 
 Installed commands expose no target argument:
 
@@ -523,8 +544,8 @@ cleanup and the gate CLI. M4-G is the single goal-finalization PR.
   generated/static/unit/browser/privacy/artifact gates, and at most one independently pre-reviewed
   exact generated tiny live doctor/ingest/show/serve/compare/cleanup rehearsal. Cleanup crash tests
   cover immediately before delete, after provider deletion, during not-found verification, and
-  after durable `not_found_verified` but before receipt unlink. One final reviewer-only merge and
-  protected-main verification close the goal.
+  after durable `not_found_verified` but before and after the fixed receipt move and held-inode
+  wipe. One final reviewer-only merge and protected-main verification close the goal.
 
 ## Rollback and recovery boundaries
 
@@ -536,7 +557,9 @@ cleanup and the gate CLI. M4-G is the single goal-finalization PR.
 - M4-C never deletes merely because code is being rolled back. If its behavior is suspect, preserve
   the owner key, lock, authenticated receipt, and exact reviewed code revision before reverting;
   use cleanup only from a revision that independently passed the destructive-path review. Failure
-  retains the receipt for a reviewed recovery rather than guessing a manual target.
+  before the terminal fixed move retains the receipt for reviewed recovery rather than guessing a
+  manual target. After that move, the namespace is already absence-verified; fixed absence and any
+  ignored random quarantine are preserved for review without authorizing another remote action.
 - M4-D/E read existing durable state only. A gate verdict is not persisted and rollback cannot
   change a run.
 - M4-F adds development/CI dependencies and browser behavior only. Reverting it leaves backend,

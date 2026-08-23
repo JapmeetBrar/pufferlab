@@ -444,7 +444,7 @@ def test_cancellation_closes_provider_and_retains_cleanup_requested(
     assert stderr.getvalue() == "error: namespace command cancelled\n"
 
 
-def test_terminal_unlink_failure_retains_authenticated_terminal_receipt(
+def test_terminal_fixed_move_failure_retains_authenticated_terminal_receipt(
     isolated_state: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -453,14 +453,14 @@ def test_terminal_unlink_failure_retains_authenticated_terminal_receipt(
     _create_receipt()
     provider = FakeCleanupProvider()
     _install_provider(monkeypatch, provider)
-    real_unlink = owned_tiny.os.unlink
+    real_rename_noreplace = owned_tiny._rename_noreplace
 
-    def fail_receipt_unlink(path: object, *args: object, **kwargs: object) -> None:
-        if path == "receipt.json":
-            raise OSError("synthetic unlink failure")
-        real_unlink(path, *args, **kwargs)
+    def fail_receipt_move(directory_fd: int, source: str, destination: str) -> None:
+        if source == "receipt.json":
+            raise owned_tiny._StateFailure()
+        real_rename_noreplace(directory_fd, source, destination)
 
-    monkeypatch.setattr(owned_tiny.os, "unlink", fail_receipt_unlink)
+    monkeypatch.setattr(owned_tiny, "_rename_noreplace", fail_receipt_move)
 
     assert main(["namespace", "cleanup-tiny"], settings_factory=_settings) == 1
     assert (isolated_state / "receipt.json").is_file()

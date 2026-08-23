@@ -449,6 +449,43 @@ async def test_generated_ingest_persists_intent_before_factories_and_reaches_rea
 
 
 @pytest.mark.asyncio
+async def test_initial_receipt_publish_collision_fails_before_model_or_provider(
+    isolated_owned_state: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pufferlab import owned_tiny
+
+    events: list[tuple[str, object]] = []
+    ingestor, providers, embedders = _ingestor(events, FakeWriter())
+    real_rename_noreplace = owned_tiny._rename_noreplace
+    collision_inode: int | None = None
+
+    def collide_before_receipt_publish(
+        directory_fd: int,
+        source: str,
+        destination: str,
+    ) -> None:
+        nonlocal collision_inode
+        if destination == "receipt.json" and collision_inode is None:
+            staged = isolated_owned_state / source
+            collision = isolated_owned_state / "receipt-publish-collider"
+            collision.write_bytes(staged.read_bytes())
+            collision.chmod(0o600)
+            collision_inode = collision.stat().st_ino
+            collision.replace(isolated_owned_state / "receipt.json")
+        real_rename_noreplace(directory_fd, source, destination)
+
+    monkeypatch.setattr(owned_tiny, "_rename_noreplace", collide_before_receipt_publish)
+    with pytest.raises(TinyIngestionCommandError, match="intent could not be persisted"):
+        await ingestor.run(_settings(), IngestTinyOptions(), emit=lambda message: None)
+
+    assert collision_inode is not None
+    assert (isolated_owned_state / "receipt.json").stat().st_ino == collision_inode
+    assert providers.calls == []
+    assert embedders.calls == []
+
+
+@pytest.mark.asyncio
 async def test_generated_ingest_resumes_exact_receipt_and_uses_creating_region(
     isolated_owned_state: Path,
 ) -> None:

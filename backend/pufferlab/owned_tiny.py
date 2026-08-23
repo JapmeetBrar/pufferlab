@@ -441,10 +441,11 @@ class _OwnedTinyOperation:
         raw = _encode_receipt(receipt)
         persistence_failed = False
         snapshot = None
+        persisted_identity: _FileIdentity | None = None
         try:
             self._verify_continuity()
             _verify_owner_identity(self._directory.fd, self._owner)
-            _atomic_create_receipt(
+            persisted_identity = _atomic_create_receipt(
                 self._directory.fd,
                 raw,
                 continuity=self._verify_continuity,
@@ -455,6 +456,8 @@ class _OwnedTinyOperation:
         if (
             persistence_failed
             or snapshot is None
+            or persisted_identity is None
+            or not _same_file_object(snapshot.identity, persisted_identity)
             or not hmac.compare_digest(snapshot.raw, raw)
             or snapshot.receipt != receipt
         ):
@@ -505,10 +508,11 @@ class _OwnedTinyOperation:
         replacement_raw = _encode_receipt(receipt)
         persistence_failed = False
         updated = None
+        persisted_identity: _FileIdentity | None = None
         try:
             self._verify_continuity()
             _verify_owner_identity(self._directory.fd, self._owner)
-            _atomic_replace_receipt(
+            persisted_identity = _atomic_replace_receipt(
                 self._directory.fd,
                 prior=snapshot,
                 replacement=replacement_raw,
@@ -521,6 +525,8 @@ class _OwnedTinyOperation:
         if (
             persistence_failed
             or updated is None
+            or persisted_identity is None
+            or not _same_file_object(updated.identity, persisted_identity)
             or not hmac.compare_digest(updated.raw, replacement_raw)
             or updated.receipt != receipt
         ):
@@ -578,7 +584,13 @@ def _begin_operation(
         busy = error.errno in {errno.EACCES, errno.EAGAIN}
         _close_quietly(anchor.fd)
         raise _StateFailure(_FailureKind.BUSY if busy else _FailureKind.INVALID) from None
-    directory = _open_state_directory(path, create=create)
+    try:
+        directory = _open_state_directory(path, create=create)
+    except BaseException:
+        # The anchor flock is still owned locally until the operation object exists.
+        # Release it on every state-tree open failure, including process-control exits.
+        _close_quietly(anchor.fd)
+        raise
     if directory is None:
         _close_quietly(anchor.fd)
         raise _StateFailure(_FailureKind.MISSING)
@@ -635,22 +647,20 @@ def _open_state_directory(path: Path, *, create: bool) -> _StateDirectory | None
                 child = os.open(component, flags, dir_fd=current)
             except FileNotFoundError:
                 if not create:
-                    _close_quietly(current)
+                    closing = current
+                    current = -1
+                    if not _close_quietly(closing):
+                        raise _StateFailure() from None
                     return None
-                try:
-                    os.mkdir(component, mode=0o700, dir_fd=current)
-                    child = os.open(component, flags, dir_fd=current)
-                    os.fchmod(child, 0o700)
-                    os.fsync(current)
-                except OSError:
-                    _close_quietly(current)
-                    raise _StateFailure() from None
+                child = _install_private_directory(current, component, flags=flags)
             except OSError:
-                _close_quietly(current)
                 raise _StateFailure() from None
-            if child < 0 or not _close_quietly(current):
-                if child >= 0:
-                    _close_quietly(child)
+            if child < 0:
+                raise _StateFailure()
+            parent = current
+            current = -1
+            if not _close_quietly(parent):
+                _close_quietly(child)
                 raise _StateFailure()
             current = child
             try:
@@ -676,6 +686,52 @@ def _open_state_directory(path: Path, *, create: bool) -> _StateDirectory | None
         raise
 
 
+def _install_private_directory(parent_fd: int, component: str, *, flags: int) -> int:
+    # POSIX mkdir does not return a descriptor. Stage under a 128-bit random internal name,
+    # validate that private inode, then publish with native no-replace rename. Fixed-path
+    # occupants are never chmodded, replaced, or populated after a stale lookup.
+    staging = _directory_temporary_name()
+    staged_fd = -1
+    installed_fd = -1
+    staged_identity: tuple[int, int] | None = None
+    try:
+        os.mkdir(staging, mode=0o700, dir_fd=parent_fd)
+        staged_fd = os.open(staging, flags, dir_fd=parent_fd)
+        staged = os.fstat(staged_fd)
+        if (
+            not stat.S_ISDIR(staged.st_mode)
+            or staged.st_uid != os.geteuid()
+            or stat.S_IMODE(staged.st_mode) != 0o700
+        ):
+            raise _StateFailure()
+        staged_identity = _directory_identity(staged)
+        _rename_noreplace(parent_fd, staging, component)
+        installed_fd = os.open(component, flags, dir_fd=parent_fd)
+        installed = os.fstat(installed_fd)
+        if (
+            not stat.S_ISDIR(installed.st_mode)
+            or installed.st_uid != os.geteuid()
+            or stat.S_IMODE(installed.st_mode) != 0o700
+            or _directory_identity(installed) != staged_identity
+        ):
+            raise _StateFailure()
+        os.fsync(parent_fd)
+        staged_closed = _close_quietly(staged_fd)
+        staged_fd = -1
+        if not staged_closed:
+            raise _StateFailure()
+        return installed_fd
+    except (OSError, _StateFailure):
+        if installed_fd >= 0:
+            _close_quietly(installed_fd)
+        if staged_fd >= 0:
+            _close_quietly(staged_fd)
+        # Never touch the published fixed component here. A random staging directory left by
+        # ambiguity is inert and is never scanned as authority.
+        del staged_identity
+        raise _StateFailure() from None
+
+
 def _open_coordination_anchor(path: Path) -> _CoordinationAnchor:
     if not path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts[1:]):
         raise _StateFailure()
@@ -685,7 +741,9 @@ def _open_coordination_anchor(path: Path) -> _CoordinationAnchor:
         current = os.open("/", flags)
         for component in path.parts[1:]:
             child = os.open(component, flags, dir_fd=current)
-            if not _close_quietly(current):
+            parent = current
+            current = -1
+            if not _close_quietly(parent):
                 _close_quietly(child)
                 raise _StateFailure()
             current = child
@@ -713,7 +771,7 @@ def _verify_operation_continuity(
         held_anchor = os.fstat(anchor.fd)
         held_directory = os.fstat(directory.fd)
         held_lock = _validate_regular_file(lock_fd)
-    except OSError:
+    except (OSError, _StateFailure):
         raise _StateFailure() from None
     if (
         not stat.S_ISDIR(held_anchor.st_mode)
@@ -815,32 +873,39 @@ def _validate_existing_lock(directory_fd: int) -> bool:
 
 def _create_owner_key(directory_fd: int) -> _OwnerKey:
     key = secrets.token_bytes(_OWNER_KEY_BYTES)
-    fd = -1
+    temporary = _owner_temporary_name()
+    identity = _prepare_temporary(directory_fd, temporary, key)
+    installed = False
     try:
-        fd = os.open(
+        _rename_noreplace(directory_fd, temporary, _OWNER_KEY_NAME)
+        installed = True
+        if not _named_regular_file_matches(
+            directory_fd,
             _OWNER_KEY_NAME,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_NONBLOCK,
-            0o600,
-            dir_fd=directory_fd,
-        )
-        os.fchmod(fd, 0o600)
-        _validate_regular_file(fd)
-        _clear_nonblocking(fd)
-        _write_all(fd, key)
-        os.fsync(fd)
-        if not _close_quietly(fd):
+            identity=identity,
+            raw=key,
+        ):
             raise _StateFailure()
-        fd = -1
         os.fsync(directory_fd)
     except (OSError, _StateFailure):
-        if fd >= 0:
-            _close_quietly(fd)
-        _unlink_quietly(directory_fd, _OWNER_KEY_NAME)
-        with suppress(OSError):
-            os.fsync(directory_fd)
+        # A no-replace collision leaves the fixed key untouched. Once published, never remove or
+        # overwrite that fixed pathname after a userspace identity check; a post-publication
+        # substitute and the staged inode are preserved for fail-closed recovery.
+        if not installed:
+            with suppress(_StateFailure):
+                _remove_known_regular_file(
+                    directory_fd,
+                    temporary,
+                    identity=identity,
+                    raw=key,
+                )
         raise _StateFailure() from None
     owner = _read_owner_key(directory_fd, required=True)
-    if owner is None:
+    if (
+        owner is None
+        or not _same_file_object(owner.identity, identity)
+        or not hmac.compare_digest(owner.key, key)
+    ):
         raise _StateFailure()
     return owner
 
@@ -935,37 +1000,34 @@ def _atomic_create_receipt(
     raw: bytes,
     *,
     continuity: Callable[[], None] | None = None,
-) -> None:
+) -> _FileIdentity:
     temporary = _temporary_name()
-    fd = -1
+    identity = _prepare_temporary(directory_fd, temporary, raw)
+    installed = False
     try:
-        fd = _create_temporary(directory_fd, temporary)
-        _write_all(fd, raw)
-        os.fsync(fd)
-        if not _close_quietly(fd):
-            raise _StateFailure()
-        fd = -1
         if continuity is not None:
             continuity()
-        os.link(
-            temporary,
+        _rename_noreplace(directory_fd, temporary, _RECEIPT_NAME)
+        installed = True
+        if not _named_regular_file_matches(
+            directory_fd,
             _RECEIPT_NAME,
-            src_dir_fd=directory_fd,
-            dst_dir_fd=directory_fd,
-            follow_symlinks=False,
-        )
-        os.unlink(temporary, dir_fd=directory_fd)
+            identity=identity,
+            raw=raw,
+        ):
+            raise _StateFailure()
         os.fsync(directory_fd)
-    except OSError:
-        if fd >= 0:
-            _close_quietly(fd)
-        _unlink_quietly(directory_fd, temporary)
+        return identity
+    except (OSError, _StateFailure):
+        if not installed:
+            with suppress(_StateFailure):
+                _remove_known_regular_file(
+                    directory_fd,
+                    temporary,
+                    identity=identity,
+                    raw=raw,
+                )
         raise _StateFailure() from None
-    except _StateFailure:
-        if fd >= 0:
-            _close_quietly(fd)
-        _unlink_quietly(directory_fd, temporary)
-        raise
 
 
 def _atomic_replace_receipt(
@@ -975,7 +1037,7 @@ def _atomic_replace_receipt(
     replacement: bytes,
     owner: _OwnerKey,
     continuity: Callable[[], None],
-) -> None:
+) -> _FileIdentity:
     temporary = _temporary_name()
     replacement_identity = _prepare_temporary(directory_fd, temporary, replacement)
     try:
@@ -1012,9 +1074,28 @@ def _atomic_replace_receipt(
         )
         raise _StateFailure()
 
+    if not _named_regular_file_matches(
+        directory_fd,
+        _RECEIPT_NAME,
+        identity=replacement_identity,
+        raw=replacement,
+    ):
+        _restore_exchange(
+            directory_fd,
+            temporary,
+            replacement_identity=replacement_identity,
+            replacement=replacement,
+        )
+        raise _StateFailure()
+
     try:
-        os.unlink(temporary, dir_fd=directory_fd)
-    except OSError:
+        _remove_known_regular_file(
+            directory_fd,
+            temporary,
+            identity=prior.identity,
+            raw=prior.raw,
+        )
+    except (OSError, _StateFailure):
         _restore_exchange(
             directory_fd,
             temporary,
@@ -1026,6 +1107,7 @@ def _atomic_replace_receipt(
         os.fsync(directory_fd)
     except OSError:
         raise _StateFailure() from None
+    return replacement_identity
 
 
 def _remove_receipt_cas(
@@ -1035,96 +1117,126 @@ def _remove_receipt_cas(
     owner: _OwnerKey,
     continuity: Callable[[], None],
 ) -> None:
-    # Keep the named receipt authenticated through the exchange. A process crash before the
-    # identity decision therefore leaves a resumable terminal receipt, never an opaque marker.
-    terminal_copy = prior.raw
-    temporary = _temporary_name()
-    terminal_copy_identity = _prepare_temporary(directory_fd, temporary, terminal_copy)
+    # The fixed-locator mutation is one exclusive move, never verify-then-unlink. The namespace
+    # is already durably not_found_verified, so a crash after this linearization cannot orphan a
+    # live namespace. The moved inode stays bound to one held descriptor through authentication,
+    # wipe, and fsync; a replacement of the random quarantine name is never truncated.
+    quarantine = _temporary_name()
+    fd = -1
+    validated_prior = False
     try:
         continuity()
         _verify_owner_identity(directory_fd, owner)
-        _exchange_paths(directory_fd, temporary, _RECEIPT_NAME)
+        _rename_noreplace(directory_fd, _RECEIPT_NAME, quarantine)
     except _StateFailure:
-        _remove_known_regular_file(
-            directory_fd,
-            temporary,
-            identity=terminal_copy_identity,
-            raw=terminal_copy,
-        )
         raise
 
-    displaced_matches = _named_receipt_matches(
-        directory_fd,
-        temporary,
-        expected=prior,
-        owner_key=owner.key,
-    )
-    terminal_copy_matches = _named_regular_file_matches(
-        directory_fd,
-        _RECEIPT_NAME,
-        identity=terminal_copy_identity,
-        raw=terminal_copy,
-    )
-    if not displaced_matches or not terminal_copy_matches:
-        _restore_exchange(
-            directory_fd,
-            temporary,
-            replacement_identity=terminal_copy_identity,
-            replacement=terminal_copy,
-        )
-        raise _StateFailure()
-
     try:
-        os.unlink(_RECEIPT_NAME, dir_fd=directory_fd)
-    except OSError:
-        _restore_exchange(
-            directory_fd,
-            temporary,
-            replacement_identity=terminal_copy_identity,
-            replacement=terminal_copy,
+        fd = os.open(
+            quarantine,
+            os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK,
+            dir_fd=directory_fd,
         )
-        raise _StateFailure() from None
-
-    if not _named_receipt_matches(
-        directory_fd,
-        temporary,
-        expected=prior,
-        owner_key=owner.key,
-    ):
-        raise _StateFailure()
-    try:
-        os.unlink(temporary, dir_fd=directory_fd)
+        before = _validate_regular_file(fd)
+        _clear_nonblocking(fd)
+        raw = _read_bounded(fd, _MAX_RECEIPT_BYTES + 1)
+        after = _validate_regular_file(fd)
+        current = _decode_receipt(raw, owner.key)
+        if (
+            not _same_file_object(_identity(before), _identity(after))
+            or before.st_size != after.st_size
+            or before.st_mtime_ns != after.st_mtime_ns
+            or not _same_file_object(_identity(after), prior.identity)
+            or not hmac.compare_digest(raw, prior.raw)
+            or current != prior.receipt
+            or _read_named_regular_file(
+                directory_fd,
+                _RECEIPT_NAME,
+                maximum=_MAX_RECEIPT_BYTES,
+            )
+            is not None
+        ):
+            raise _StateFailure()
+        # Make fixed-locator absence durable while the authenticated moved inode still contains
+        # its complete terminal receipt. Only then may a power loss recover either the old fixed
+        # entry or the full quarantine, never a fixed entry that points at a wiped inode.
         os.fsync(directory_fd)
-    except OSError:
-        restored = False
-        with suppress(_StateFailure):
-            _rename_noreplace(directory_fd, temporary, _RECEIPT_NAME)
-            os.fsync(directory_fd)
-            restored = True
-        if not restored:
-            with suppress(_StateFailure):
-                _atomic_create_receipt(
-                    directory_fd,
-                    prior.raw,
-                    continuity=continuity,
-                )
+        validated_prior = True
+        os.ftruncate(fd, 0)
+        os.fsync(fd)
+        wiped = _validate_regular_file(fd)
+        if not _same_file_object(_identity(wiped), prior.identity) or wiped.st_size != 0:
+            raise _StateFailure()
+        os.fsync(directory_fd)
+    except (OSError, _StateFailure):
+        if fd >= 0:
+            _close_quietly(fd)
+            fd = -1
+        # Before exact held-FD validation, restore only by no-replace move. After validation,
+        # terminal removal is commit-like: never install whatever may now occupy the random
+        # quarantine as fixed authority. The remote namespace was already absence-verified, and
+        # fixed absence makes every retry/provider path fail closed with zero remote action.
+        if not validated_prior:
+            with suppress(_StateFailure, OSError):
+                _rename_noreplace(directory_fd, quarantine, _RECEIPT_NAME)
+                os.fsync(directory_fd)
         raise _StateFailure() from None
+    except BaseException:
+        if fd >= 0:
+            _close_quietly(fd)
+            fd = -1
+        if not validated_prior:
+            with suppress(_StateFailure, OSError):
+                _rename_noreplace(directory_fd, quarantine, _RECEIPT_NAME)
+                os.fsync(directory_fd)
+        raise
+
+    if not _close_quietly(fd):
+        raise _StateFailure()
+    fd = -1
+
+    # Random staging names are not authority locators. Compliant commands cannot race this
+    # cleanup because they share the stable account anchor; an uncooperative same-UID directory
+    # watcher is outside this local capability boundary (and can already read owner.key). If the
+    # name changed, leave it intact instead of deleting it. Crashes may leave a zero-byte 0600
+    # tombstone; no code scans or restores such names as authority.
+    if _named_regular_file_matches(
+        directory_fd,
+        quarantine,
+        identity=prior.identity,
+        raw=b"",
+    ):
+        try:
+            os.unlink(quarantine, dir_fd=directory_fd)
+            os.fsync(directory_fd)
+        except OSError:
+            raise _StateFailure() from None
 
 
 def _prepare_temporary(directory_fd: int, name: str, raw: bytes) -> _FileIdentity:
     fd = -1
+    created_identity: _FileIdentity | None = None
     try:
         fd = _create_temporary(directory_fd, name)
+        created_identity = _identity(_validate_regular_file(fd))
         _write_all(fd, raw)
         os.fsync(fd)
         identity = _identity(_validate_regular_file(fd))
-        if not _close_quietly(fd):
+        closed = _close_quietly(fd)
+        fd = -1
+        if not closed:
             raise _StateFailure()
         return identity
     except (OSError, _StateFailure):
         if fd >= 0:
             _close_quietly(fd)
-        _unlink_quietly(directory_fd, name)
+        if created_identity is not None:
+            with suppress(_StateFailure):
+                _remove_known_random_file(
+                    directory_fd,
+                    name,
+                    identity=created_identity,
+                )
         raise _StateFailure() from None
 
 
@@ -1135,18 +1247,32 @@ def _restore_exchange(
     replacement_identity: _FileIdentity,
     replacement: bytes,
 ) -> None:
-    _exchange_paths(directory_fd, temporary, _RECEIPT_NAME)
-    if not _named_regular_file_matches(
+    replacement_quarantine = _temporary_name()
+    _rename_noreplace(directory_fd, _RECEIPT_NAME, replacement_quarantine)
+    moved_replacement_matches = _named_regular_file_matches(
         directory_fd,
-        temporary,
+        replacement_quarantine,
         identity=replacement_identity,
         raw=replacement,
-    ):
+    )
+    if not moved_replacement_matches:
+        with suppress(_StateFailure):
+            _rename_noreplace(
+                directory_fd,
+                replacement_quarantine,
+                _RECEIPT_NAME,
+            )
         raise _StateFailure()
     try:
-        os.unlink(temporary, dir_fd=directory_fd)
+        _rename_noreplace(directory_fd, temporary, _RECEIPT_NAME)
+        _remove_known_regular_file(
+            directory_fd,
+            replacement_quarantine,
+            identity=replacement_identity,
+            raw=replacement,
+        )
         os.fsync(directory_fd)
-    except OSError:
+    except (OSError, _StateFailure):
         raise _StateFailure() from None
 
 
@@ -1163,6 +1289,35 @@ def _remove_known_regular_file(
         identity=identity,
         raw=raw,
     ):
+        raise _StateFailure()
+    try:
+        os.unlink(name, dir_fd=directory_fd)
+    except OSError:
+        raise _StateFailure() from None
+
+
+def _remove_known_random_file(
+    directory_fd: int,
+    name: str,
+    *,
+    identity: _FileIdentity,
+) -> None:
+    # Internal 128-bit O_EXCL staging names are serialized by the stable account lock. They are
+    # deliberately not authority locators; preserve any collider or replacement whose inode does
+    # not match the object created by this invocation.
+    try:
+        fd = os.open(
+            name,
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+            dir_fd=directory_fd,
+        )
+    except OSError:
+        raise _StateFailure() from None
+    try:
+        current = _identity(_validate_regular_file(fd))
+    finally:
+        closed = _close_quietly(fd)
+    if not closed or not _same_file_object(current, identity):
         raise _StateFailure()
     try:
         os.unlink(name, dir_fd=directory_fd)
@@ -1307,6 +1462,14 @@ def _create_temporary(directory_fd: int, name: str) -> int:
 
 def _temporary_name() -> str:
     return f".receipt-{secrets.token_hex(16)}.tmp"
+
+
+def _directory_temporary_name() -> str:
+    return f".owned-tiny-directory-{secrets.token_hex(16)}.tmp"
+
+
+def _owner_temporary_name() -> str:
+    return f".owner-{secrets.token_hex(16)}.tmp"
 
 
 def _credential_tag(owner_key: bytes, api_key: str) -> str:
@@ -1498,11 +1661,6 @@ def _write_all(fd: int, value: bytes) -> None:
             offset += written
     except OSError:
         raise _StateFailure() from None
-
-
-def _unlink_quietly(directory_fd: int, name: str) -> None:
-    with suppress(OSError):
-        os.unlink(name, dir_fd=directory_fd)
 
 
 def _close_quietly(fd: int) -> bool:
