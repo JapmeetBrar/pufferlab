@@ -54,8 +54,9 @@ namespace, and immutable configs and returns new evidence labeled `live_replay`.
 - The old Milestone 2 run reports `original_stage_evidence_available=false`. Missing stage evidence
   produces `NOT_OBSERVABLE`; it is never inferred from final ranks or a trace ID.
 - Every replay request separates the production-shaped primary result from any second,
-  counterfactual provenance probe. Each evidence item carries its own origin, timestamp, and trace;
-  no cross-request observation is presented as the cause of the primary result.
+  counterfactual provenance probe. Each live or derived evidence item carries its exact source
+  origin, timestamp, and trace; stored unavailability carries null trace/time. No cross-request
+  observation is presented as the cause of the primary result.
 - If the exact namespace is absent or not ready, replay returns the safe namespace-unavailable
   error while stored evidence remains usable.
 - A queued row is durable pending work. The one-worker API reclaims valid queued rows after restart
@@ -120,7 +121,8 @@ POST /api/v1/eval-runs/{run_id}/queries/{query_id}/replay
   resolves the dataset and config hashes, and never accepts query text, expected IDs, or namespace
   from the browser. The response is explicitly non-original evidence. Its production-shaped result
   is labeled `live_replay_primary`; a separate BM25/ANN provenance probe, when requested, is labeled
-  `live_replay_counterfactual_probe`. Every observation has its own `observed_at` and trace ID.
+  `live_replay_counterfactual_probe`. Every live or derived observation has its exact source
+  `observed_at` and trace ID; stored `NOT_OBSERVABLE` has neither.
 
 ### Run ownership and crash recovery
 
@@ -351,8 +353,9 @@ PR; its own merge/check record remains canonical in GitHub.
 2. The browser imports domain types only from generated OpenAPI TypeScript.
 3. Dashboard reads and deep-link restoration never perform provider work implicitly.
 4. Config IDs resolve to one persisted dataset revision; browser input never selects a namespace.
-5. Original stored, primary replay, counterfactual-probe, and client-computed evidence retain their
-   own origin/timestamp/trace; cross-request observations are never merged or made causal.
+5. Primary replay, counterfactual-probe, and client-computed evidence retain their exact source
+   origin/timestamp/trace; stored unavailability retains its origin with null trace/time.
+   Cross-request observations are never merged or made causal.
 6. Query/document text, qrels, credentials, vectors, provider bodies, database/export files, and
    live screenshots remain outside Git and PR/check output.
 7. `EvidenceItem` values are allowlisted and bounded; arbitrary provider payloads never cross the

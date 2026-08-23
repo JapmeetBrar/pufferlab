@@ -18,17 +18,21 @@ from pufferlab.contracts.forensics import (
     ForensicCode,
     ForensicObservation,
     ForensicWarningCode,
+    PresenceEvidenceValue,
     ProbeStageMembership,
     RankEvidenceValue,
     ReplayCounterfactualProbe,
     ReplayProbeCandidate,
     RrfContributionEvidenceValue,
     ScoreEvidenceValue,
+    WarningEvidenceValue,
 )
 from pufferlab.contracts.retrieval import RetrievalConfigSummary, RetrievalMode
 from pufferlab.contracts.search import (
     ConfigSearchResult,
+    RetrievalStage,
     SearchCompareResponse,
+    SearchHit,
     StageTiming,
     TimingStage,
 )
@@ -90,6 +94,40 @@ def _primary() -> SearchCompareResponse:
         rank_movements=[],
         overlap=[],
         observability_notice="Primary replay contains production-shaped final results.",
+    )
+
+
+def _primary_with_final_hit() -> SearchCompareResponse:
+    primary = _primary()
+    primary.results[0].hits = [
+        SearchHit(
+            document_id=UUID(int=400),
+            external_id="doc-400",
+            title="Bounded result",
+            body_excerpt="Server-returned excerpt.",
+            final_rank=1,
+            final_score=_score(),
+            stage_membership=[],
+        )
+    ]
+    return primary
+
+
+def _probe() -> ReplayCounterfactualProbe:
+    return ReplayCounterfactualProbe(
+        config_id=_CONFIG_IDS[0],
+        observed_at=_NOW,
+        trace_id=_TRACE_ID,
+        duration_ms=1.0,
+        bm25_candidate_count=1,
+        vector_candidate_count=0,
+        candidates=[
+            ReplayProbeCandidate(
+                document_id=UUID(int=400),
+                stage_membership=[ProbeStageMembership(stage="bm25_candidates", rank=1)],
+            )
+        ],
+        warnings=[],
     )
 
 
@@ -189,17 +227,34 @@ def test_counterfactual_evidence_cannot_claim_observed_causality() -> None:
 
 
 def test_stored_run_forensics_are_honestly_not_observable() -> None:
+    unavailable = EvidenceItem(
+        label="original_stage_evidence",
+        value=WarningEvidenceValue(code=ForensicWarningCode.ORIGINAL_STAGE_EVIDENCE_UNAVAILABLE),
+        origin=EvidenceOrigin.STORED_RUN,
+        observed_at=None,
+        trace_id=None,
+    )
     observation = ForensicObservation(
         code=ForensicCode.NOT_OBSERVABLE,
         statement="The M2 outcome did not persist stage membership or scores.",
         origin=EvidenceOrigin.STORED_RUN,
-        observed_at=_NOW,
+        observed_at=None,
         trace_id=None,
-        evidence=[],
+        evidence=[unavailable],
         certainty=EvidenceCertainty.INSUFFICIENT,
     )
 
     assert observation.trace_id is None
+    assert observation.observed_at is None
+    assert observation.evidence[0].observed_at is None
+    for invented_source in (
+        {"trace_id": _TRACE_ID, "observed_at": None},
+        {"trace_id": None, "observed_at": _NOW},
+    ):
+        with pytest.raises(ValidationError, match="require null trace/time"):
+            ForensicObservation.model_validate({**observation.model_dump(), **invented_source})
+        with pytest.raises(ValidationError, match="cannot claim a source trace/time"):
+            EvidenceItem.model_validate({**unavailable.model_dump(), **invented_source})
     with pytest.raises(ValidationError, match="no original stage evidence"):
         ForensicObservation.model_validate(
             {
@@ -213,7 +268,7 @@ def test_stored_run_forensics_are_honestly_not_observable() -> None:
             label="fabricated_bm25_rank",
             value=RankEvidenceValue(stage="bm25_candidates", rank=1),
             origin=EvidenceOrigin.STORED_RUN,
-            observed_at=_NOW,
+            observed_at=None,
             trace_id=None,
         )
     with pytest.raises(ValidationError, match="limited to unavailability warnings"):
@@ -225,7 +280,7 @@ def test_stored_run_forensics_are_honestly_not_observable() -> None:
                         "label": "fabricated_bm25_rank",
                         "value": {"kind": "rank", "stage": "bm25_candidates", "rank": 1},
                         "origin": "stored_run",
-                        "observed_at": _NOW.isoformat(),
+                        "observed_at": None,
                         "trace_id": None,
                     }
                 ],
@@ -366,21 +421,7 @@ def test_counterfactual_probe_rejects_rank_beyond_candidate_count() -> None:
 
 
 def test_counterfactual_observation_binds_exact_probe_trace_time_and_count() -> None:
-    probe = ReplayCounterfactualProbe(
-        config_id=_CONFIG_IDS[0],
-        observed_at=_NOW,
-        trace_id=_TRACE_ID,
-        duration_ms=1.0,
-        bm25_candidate_count=1,
-        vector_candidate_count=0,
-        candidates=[
-            ReplayProbeCandidate(
-                document_id=UUID(int=400),
-                stage_membership=[ProbeStageMembership(stage="bm25_candidates", rank=1)],
-            )
-        ],
-        warnings=[],
-    )
+    probe = _probe()
     rank = EvidenceItem(
         label="bm25_rank",
         value=RankEvidenceValue(stage="bm25_candidates", rank=1),
@@ -444,4 +485,205 @@ def test_client_computed_origin_cannot_be_supplied_without_source_trace() -> Non
             origin=EvidenceOrigin.CLIENT_COMPUTED,
             observed_at=_NOW,
             trace_id=None,
+        )
+
+
+def test_client_computed_primary_source_requires_exact_time_for_observation_and_evidence() -> None:
+    primary = _primary()
+    actual_trace = primary.results[0].trace_id
+    wrong_observation_time = ForensicObservation(
+        code=ForensicCode.RERANKED_DOWN,
+        statement="A client computation referenced the primary replay.",
+        origin=EvidenceOrigin.CLIENT_COMPUTED,
+        observed_at=_LATER,
+        trace_id=actual_trace,
+        evidence=[],
+        certainty=EvidenceCertainty.OBSERVED,
+    )
+
+    with pytest.raises(ValidationError, match="primary source trace/time"):
+        EvalRunQueryReplayResponse(
+            run_id=UUID(int=300),
+            query_id=_QUERY_ID,
+            config_ids=_CONFIG_IDS,
+            primary_observed_at=_NOW,
+            primary=primary,
+            counterfactual_probes=[],
+            observations=[wrong_observation_time],
+            observability_notice="Original stage evidence is unavailable; this is a live replay.",
+        )
+
+    wrong_evidence_time = _evidence(
+        origin=EvidenceOrigin.CLIENT_COMPUTED,
+        trace_id=actual_trace,
+        observed_at=_LATER,
+    )
+    right_observation_time = wrong_observation_time.model_copy(
+        update={"observed_at": _NOW, "evidence": [wrong_evidence_time]}
+    )
+    with pytest.raises(ValidationError, match="primary source trace/time"):
+        EvalRunQueryReplayResponse(
+            run_id=UUID(int=300),
+            query_id=_QUERY_ID,
+            config_ids=_CONFIG_IDS,
+            primary_observed_at=_NOW,
+            primary=primary,
+            counterfactual_probes=[],
+            observations=[right_observation_time],
+            observability_notice="Original stage evidence is unavailable; this is a live replay.",
+        )
+
+
+def test_client_computed_probe_source_requires_exact_time_and_rank_bounds() -> None:
+    probe = _probe()
+    impossible_contribution = EvidenceItem(
+        label="rrf_contribution",
+        value=RrfContributionEvidenceValue(
+            stage="bm25_candidates",
+            rank=100,
+            weight=1.0,
+            rank_constant=60,
+            contribution=1.0 / 160.0,
+        ),
+        origin=EvidenceOrigin.CLIENT_COMPUTED,
+        observed_at=probe.observed_at,
+        trace_id=probe.trace_id,
+    )
+    observation = ForensicObservation(
+        code=ForensicCode.OUTSIDE_FUSION_TOP_K,
+        statement="A client computation used the separately returned probe.",
+        origin=EvidenceOrigin.CLIENT_COMPUTED,
+        observed_at=probe.observed_at,
+        trace_id=probe.trace_id,
+        evidence=[impossible_contribution],
+        certainty=EvidenceCertainty.COUNTERFACTUAL,
+    )
+
+    with pytest.raises(ValidationError, match="fit its positive probe count"):
+        EvalRunQueryReplayResponse(
+            run_id=UUID(int=300),
+            query_id=_QUERY_ID,
+            config_ids=_CONFIG_IDS,
+            primary_observed_at=_NOW,
+            primary=_primary(),
+            counterfactual_probes=[probe],
+            observations=[observation],
+            observability_notice="Original stage evidence is unavailable; this is a live replay.",
+        )
+
+    impossible_rank = impossible_contribution.model_copy(
+        update={
+            "label": "bm25_rank",
+            "value": RankEvidenceValue(stage="bm25_candidates", rank=100),
+        }
+    )
+    with pytest.raises(ValidationError, match="fit its positive probe count"):
+        EvalRunQueryReplayResponse(
+            run_id=UUID(int=300),
+            query_id=_QUERY_ID,
+            config_ids=_CONFIG_IDS,
+            primary_observed_at=_NOW,
+            primary=_primary(),
+            counterfactual_probes=[probe],
+            observations=[observation.model_copy(update={"evidence": [impossible_rank]})],
+            observability_notice="Original stage evidence is unavailable; this is a live replay.",
+        )
+
+    impossible_membership = impossible_contribution.model_copy(
+        update={
+            "label": "vector_membership",
+            "value": PresenceEvidenceValue(stage="vector_candidates", present=True),
+        }
+    )
+    with pytest.raises(
+        ValidationError, match="membership evidence requires a positive probe count"
+    ):
+        EvalRunQueryReplayResponse(
+            run_id=UUID(int=300),
+            query_id=_QUERY_ID,
+            config_ids=_CONFIG_IDS,
+            primary_observed_at=_NOW,
+            primary=_primary(),
+            counterfactual_probes=[probe],
+            observations=[observation.model_copy(update={"evidence": [impossible_membership]})],
+            observability_notice="Original stage evidence is unavailable; this is a live replay.",
+        )
+
+    wrong_time = observation.model_copy(update={"observed_at": _LATER, "evidence": []})
+    with pytest.raises(ValidationError, match="probe source trace/time"):
+        EvalRunQueryReplayResponse(
+            run_id=UUID(int=300),
+            query_id=_QUERY_ID,
+            config_ids=_CONFIG_IDS,
+            primary_observed_at=_NOW,
+            primary=_primary(),
+            counterfactual_probes=[probe],
+            observations=[wrong_time],
+            observability_notice="Original stage evidence is unavailable; this is a live replay.",
+        )
+
+    wrong_evidence_time = impossible_contribution.model_copy(
+        update={
+            "observed_at": _LATER,
+            "value": RankEvidenceValue(stage="bm25_candidates", rank=1),
+        }
+    )
+    with pytest.raises(ValidationError, match="probe source trace/time"):
+        EvalRunQueryReplayResponse(
+            run_id=UUID(int=300),
+            query_id=_QUERY_ID,
+            config_ids=_CONFIG_IDS,
+            primary_observed_at=_NOW,
+            primary=_primary(),
+            counterfactual_probes=[probe],
+            observations=[observation.model_copy(update={"evidence": [wrong_evidence_time]})],
+            observability_notice="Original stage evidence is unavailable; this is a live replay.",
+        )
+
+
+def test_client_computed_primary_rank_must_exist_in_returned_hits() -> None:
+    primary = _primary_with_final_hit()
+    actual_trace = primary.results[0].trace_id
+    actual_rank = EvidenceItem(
+        label="final_rank",
+        value=RankEvidenceValue(stage=RetrievalStage.FINAL, rank=1),
+        origin=EvidenceOrigin.CLIENT_COMPUTED,
+        observed_at=_NOW,
+        trace_id=actual_trace,
+    )
+    observation = ForensicObservation(
+        code=ForensicCode.RERANKED_DOWN,
+        statement="A client computation used the final rank returned by the primary replay.",
+        origin=EvidenceOrigin.CLIENT_COMPUTED,
+        observed_at=_NOW,
+        trace_id=actual_trace,
+        evidence=[actual_rank],
+        certainty=EvidenceCertainty.OBSERVED,
+    )
+    response = EvalRunQueryReplayResponse(
+        run_id=UUID(int=300),
+        query_id=_QUERY_ID,
+        config_ids=_CONFIG_IDS,
+        primary_observed_at=_NOW,
+        primary=primary,
+        counterfactual_probes=[],
+        observations=[observation],
+        observability_notice="Original stage evidence is unavailable; this is a live replay.",
+    )
+
+    assert response.observations[0].evidence[0].value == actual_rank.value
+
+    fabricated_rank = actual_rank.model_copy(
+        update={"value": RankEvidenceValue(stage=RetrievalStage.FINAL, rank=2)}
+    )
+    with pytest.raises(ValidationError, match="actual returned hit membership/rank"):
+        EvalRunQueryReplayResponse(
+            run_id=response.run_id,
+            query_id=response.query_id,
+            config_ids=response.config_ids,
+            primary_observed_at=response.primary_observed_at,
+            primary=response.primary,
+            counterfactual_probes=[],
+            observations=[observation.model_copy(update={"evidence": [fabricated_rank]})],
+            observability_notice=response.observability_notice,
         )

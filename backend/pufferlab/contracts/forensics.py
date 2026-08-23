@@ -12,6 +12,7 @@ from pydantic import AwareDatetime, Field, model_validator
 from pufferlab.contracts.common import ContractModel, ContractVersion, ObservedScore, ScoreKind
 from pufferlab.contracts.datasets import DataOrigin
 from pufferlab.contracts.search import (
+    ConfigSearchResult,
     RetrievalStage,
     SearchCompareResponse,
     TimingStage,
@@ -156,24 +157,22 @@ class EvidenceItem(ContractModel):
     )
     value: ForensicEvidenceValue
     origin: EvidenceOrigin
-    observed_at: AwareDatetime
+    observed_at: AwareDatetime | None
     trace_id: UUID | None
 
     @model_validator(mode="after")
     def validate_trace_provenance(self) -> EvidenceItem:
-        if (
-            self.origin
-            in {
-                EvidenceOrigin.LIVE_REPLAY_PRIMARY,
-                EvidenceOrigin.LIVE_REPLAY_COUNTERFACTUAL_PROBE,
-                EvidenceOrigin.CLIENT_COMPUTED,
-            }
-            and self.trace_id is None
-        ):
-            raise ValueError("live and derived evidence require the exact source trace ID")
+        if self.origin in {
+            EvidenceOrigin.LIVE_REPLAY_PRIMARY,
+            EvidenceOrigin.LIVE_REPLAY_COUNTERFACTUAL_PROBE,
+            EvidenceOrigin.CLIENT_COMPUTED,
+        } and (self.trace_id is None or self.observed_at is None):
+            raise ValueError("live and derived evidence require the exact source trace and time")
         if self.origin is EvidenceOrigin.STORED_RUN:
-            if self.trace_id is not None:
-                raise ValueError("stored-run unavailability evidence cannot claim a source trace")
+            if self.trace_id is not None or self.observed_at is not None:
+                raise ValueError(
+                    "stored-run unavailability evidence cannot claim a source trace/time"
+                )
             if not isinstance(self.value, WarningEvidenceValue) or (
                 self.value.code is not ForensicWarningCode.ORIGINAL_STAGE_EVIDENCE_UNAVAILABLE
             ):
@@ -187,7 +186,7 @@ class ForensicObservation(ContractModel):
     code: ForensicCode
     statement: str = Field(min_length=1, max_length=512)
     origin: EvidenceOrigin
-    observed_at: AwareDatetime
+    observed_at: AwareDatetime | None
     trace_id: UUID | None
     evidence: list[EvidenceItem] = Field(max_length=16)
     certainty: EvidenceCertainty
@@ -197,16 +196,12 @@ class ForensicObservation(ContractModel):
         labels = [item.label for item in self.evidence]
         if len(labels) != len(set(labels)):
             raise ValueError("forensic evidence labels must be unique per observation")
-        if (
-            self.origin
-            in {
-                EvidenceOrigin.LIVE_REPLAY_PRIMARY,
-                EvidenceOrigin.LIVE_REPLAY_COUNTERFACTUAL_PROBE,
-                EvidenceOrigin.CLIENT_COMPUTED,
-            }
-            and self.trace_id is None
-        ):
-            raise ValueError("live and derived observations require a trace ID")
+        if self.origin in {
+            EvidenceOrigin.LIVE_REPLAY_PRIMARY,
+            EvidenceOrigin.LIVE_REPLAY_COUNTERFACTUAL_PROBE,
+            EvidenceOrigin.CLIENT_COMPUTED,
+        } and (self.trace_id is None or self.observed_at is None):
+            raise ValueError("live and derived observations require a source trace and time")
         if self.origin is not EvidenceOrigin.CLIENT_COMPUTED and any(
             item.origin is not self.origin for item in self.evidence
         ):
@@ -220,6 +215,10 @@ class ForensicObservation(ContractModel):
             and self.code is not ForensicCode.NOT_OBSERVABLE
         ):
             raise ValueError("P0 stored outcomes contain no original stage evidence")
+        if self.origin is EvidenceOrigin.STORED_RUN and (
+            self.trace_id is not None or self.observed_at is not None
+        ):
+            raise ValueError("stored-run unavailability observations require null trace/time")
         if self.code is ForensicCode.NOT_OBSERVABLE:
             if self.certainty is not EvidenceCertainty.INSUFFICIENT:
                 raise ValueError("NOT_OBSERVABLE requires insufficient certainty")
@@ -357,8 +356,8 @@ class EvalRunQueryReplayResponse(ContractModel):
             raise ValueError("primary replay query identity must match the requested run query")
         if [result.config.id for result in self.primary.results] != self.config_ids:
             raise ValueError("primary replay results must retain requested config order")
-        primary_traces = {result.trace_id for result in self.primary.results}
-        if len(primary_traces) != len(self.primary.results):
+        primary_by_trace = {result.trace_id: result for result in self.primary.results}
+        if len(primary_by_trace) != len(self.primary.results):
             raise ValueError("primary config results require distinct source traces")
         if any(
             timing.stage is TimingStage.PROVENANCE_PROBE
@@ -381,7 +380,7 @@ class EvalRunQueryReplayResponse(ContractModel):
         probes_by_trace = {probe.trace_id: probe for probe in self.counterfactual_probes}
         if len(probes_by_trace) != len(self.counterfactual_probes):
             raise ValueError("counterfactual probes require distinct source traces")
-        if primary_traces & probes_by_trace.keys():
+        if primary_by_trace.keys() & probes_by_trace.keys():
             raise ValueError("primary and counterfactual sources cannot share a trace")
         for observation in self.observations:
             self._validate_source_binding(
@@ -390,7 +389,7 @@ class EvalRunQueryReplayResponse(ContractModel):
                 observation.observed_at,
                 observation.certainty,
                 observation.evidence,
-                primary_traces,
+                primary_by_trace,
                 probes_by_trace,
             )
         return self
@@ -399,10 +398,10 @@ class EvalRunQueryReplayResponse(ContractModel):
         self,
         origin: EvidenceOrigin,
         trace_id: UUID | None,
-        observed_at: AwareDatetime,
+        observed_at: AwareDatetime | None,
         certainty: EvidenceCertainty,
         evidence: list[EvidenceItem],
-        primary_traces: set[UUID],
+        primary_by_trace: dict[UUID, ConfigSearchResult],
         probes_by_trace: dict[UUID, ReplayCounterfactualProbe],
     ) -> None:
         self._validate_one_source(
@@ -411,7 +410,7 @@ class EvalRunQueryReplayResponse(ContractModel):
             observed_at,
             certainty,
             None,
-            primary_traces,
+            primary_by_trace,
             probes_by_trace,
         )
         for item in evidence:
@@ -421,7 +420,7 @@ class EvalRunQueryReplayResponse(ContractModel):
                 item.observed_at,
                 certainty,
                 item.value,
-                primary_traces,
+                primary_by_trace,
                 probes_by_trace,
             )
 
@@ -429,21 +428,26 @@ class EvalRunQueryReplayResponse(ContractModel):
         self,
         origin: EvidenceOrigin,
         trace_id: UUID | None,
-        observed_at: AwareDatetime,
+        observed_at: AwareDatetime | None,
         certainty: EvidenceCertainty,
         value: ForensicEvidenceValue | None,
-        primary_traces: set[UUID],
+        primary_by_trace: dict[UUID, ConfigSearchResult],
         probes_by_trace: dict[UUID, ReplayCounterfactualProbe],
     ) -> None:
         if origin is EvidenceOrigin.STORED_RUN:
+            if trace_id is not None or observed_at is not None:
+                raise ValueError("stored-run forensic sources require null trace/time")
             return
-        if trace_id is None:
-            raise ValueError("live and derived forensic sources require a trace")
+        if trace_id is None or observed_at is None:
+            raise ValueError("live and derived forensic sources require a trace/time")
         if origin is EvidenceOrigin.LIVE_REPLAY_PRIMARY:
-            if trace_id not in primary_traces or observed_at != self.primary_observed_at:
+            primary = primary_by_trace.get(trace_id)
+            if primary is None or observed_at != self.primary_observed_at:
                 raise ValueError(
                     "primary forensic evidence must bind to a primary result trace/time"
                 )
+            if value is not None:
+                self._validate_primary_evidence_value(value, primary)
             return
         if origin is EvidenceOrigin.LIVE_REPLAY_COUNTERFACTUAL_PROBE:
             probe = probes_by_trace.get(trace_id)
@@ -452,10 +456,45 @@ class EvalRunQueryReplayResponse(ContractModel):
             if value is not None:
                 self._validate_probe_evidence_value(value, probe)
             return
-        if trace_id not in primary_traces and trace_id not in probes_by_trace:
+        primary = primary_by_trace.get(trace_id)
+        if primary is not None:
+            if observed_at != self.primary_observed_at:
+                raise ValueError(
+                    "client-computed evidence must bind to its primary source trace/time"
+                )
+            if value is not None:
+                self._validate_primary_evidence_value(value, primary)
+            return
+        probe = probes_by_trace.get(trace_id)
+        if probe is None:
             raise ValueError("client-computed evidence must bind to a returned source trace")
-        if trace_id in probes_by_trace and certainty is EvidenceCertainty.OBSERVED:
+        if observed_at != probe.observed_at:
+            raise ValueError("client-computed evidence must bind to its probe source trace/time")
+        if certainty is EvidenceCertainty.OBSERVED:
             raise ValueError("probe-derived client computation cannot claim observed certainty")
+        if value is not None:
+            self._validate_probe_evidence_value(value, probe)
+
+    @staticmethod
+    def _validate_primary_evidence_value(
+        value: ForensicEvidenceValue,
+        primary: ConfigSearchResult,
+    ) -> None:
+        if not isinstance(value, (RankEvidenceValue, RrfContributionEvidenceValue)):
+            return
+        if value.stage is RetrievalStage.FINAL:
+            returned_ranks = {hit.final_rank for hit in primary.hits}
+        else:
+            returned_ranks = {
+                membership.rank
+                for hit in primary.hits
+                for membership in hit.stage_membership
+                if membership.stage is value.stage
+            }
+        if value.rank not in returned_ranks:
+            raise ValueError(
+                "primary-derived rank evidence must match an actual returned hit membership/rank"
+            )
 
     @staticmethod
     def _validate_probe_evidence_value(
@@ -470,10 +509,15 @@ class EvalRunQueryReplayResponse(ContractModel):
             value.stage not in counts or value.count != counts[value.stage]
         ):
             raise ValueError("counterfactual count evidence must equal its probe count")
-        if isinstance(value, (ScoreEvidenceValue, PresenceEvidenceValue)) and (
-            value.stage not in counts
+        if (
+            isinstance(value, (ScoreEvidenceValue, PresenceEvidenceValue))
+            and value.stage not in counts
         ):
             raise ValueError("counterfactual stage evidence is limited to probe candidate stages")
+        if isinstance(value, ScoreEvidenceValue) and counts[value.stage] == 0:
+            raise ValueError("counterfactual score evidence requires a positive probe count")
+        if isinstance(value, PresenceEvidenceValue) and value.present and counts[value.stage] == 0:
+            raise ValueError("counterfactual membership evidence requires a positive probe count")
         if isinstance(value, (RankEvidenceValue, RrfContributionEvidenceValue)):
             count = counts.get(value.stage)
             if count is None or count == 0 or value.rank > count:

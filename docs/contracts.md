@@ -578,14 +578,14 @@ class EvidenceItem(BaseModel):
     label: str  # 1..64, machine-readable
     value: ForensicEvidenceValue
     origin: EvidenceOrigin
-    observed_at: AwareDatetime
+    observed_at: AwareDatetime | None
     trace_id: UUID | None
 
 class ForensicObservation(BaseModel):
     code: ForensicCode
     statement: str  # 1..512
     origin: EvidenceOrigin
-    observed_at: AwareDatetime
+    observed_at: AwareDatetime | None
     trace_id: UUID | None
     evidence: list[EvidenceItem]  # at most 16, unique labels
     certainty: Literal["observed", "counterfactual", "insufficient"]
@@ -598,20 +598,24 @@ bodies are rejected. RRF contributions require bounded rank/weight/constant inpu
 `weight / (rank_constant + rank)` arithmetic.
 
 Stored M2 outcomes did not retain stage membership or stage scores. They may therefore emit only
-`NOT_OBSERVABLE` with `certainty=insufficient`; ranks, metrics, and timing remain honestly available
-in the query-detail outcome itself. Primary replay, counterfactual probe, and client-computed items
-each retain their own timestamp and exact source trace. Probe-derived evidence cannot claim
+`NOT_OBSERVABLE` with `certainty=insufficient` and null trace/time; ranks, metrics, and timing remain
+honestly available in the query-detail outcome itself. Primary replay, counterfactual probe, and
+client-computed items each retain their exact source timestamp and trace. Probe-derived evidence
+cannot claim
 `certainty=observed` or causal responsibility for a primary ordering. A non-derived observation
 cannot merge origins or traces; a client-computed observation preserves the origin of every bounded
 input and becomes counterfactual whenever any input came from the separate probe.
 
-`stored_run` forensic evidence is limited to the typed original-stage-unavailable warning; stored
-final ranks, metrics, and timings remain in the durable outcome rather than being re-cast as stage
-proof. Every primary forensic trace/time must match an actual primary config result and the primary
-replay timestamp. Every counterfactual trace/time must match one returned probe. Probe membership
-ranks must be unique per stage and fit a positive returned candidate count; counterfactual
-rank/count evidence is checked against that same probe. Client-computed evidence must name one
-returned source trace and inherits counterfactual certainty when that source is a probe.
+`stored_run` forensic evidence is limited to the typed original-stage-unavailable warning with null
+trace/time; stored final ranks, metrics, and timings remain in the durable outcome rather than being
+re-cast as stage proof. Every primary forensic trace/time must match an actual primary config result
+and the primary replay timestamp. Every counterfactual trace/time must match one returned probe.
+Probe membership ranks must be unique per stage and fit a positive returned candidate count;
+counterfactual rank/count evidence is checked against that same probe. Client-computed evidence must
+name one returned source trace, use exactly that primary/probe timestamp, and apply the same probe
+bounds, including positive counts for claimed score/membership inputs.
+Primary-derived rank-like inputs must match an actual returned final or stage-membership rank.
+Probe-derived client computations inherit counterfactual certainty.
 
 ```python
 class EvalRunQueryReplayRequest(BaseModel):
