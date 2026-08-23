@@ -1,5 +1,12 @@
 """Versioned API and domain contracts."""
 
+from pufferlab.contracts.capabilities import (
+    CapabilitiesResponse,
+    CapabilityActionCode,
+    CapabilityRequirementCode,
+    CapabilityState,
+    LivePlaygroundCapability,
+)
 from pufferlab.contracts.catalog import (
     DatasetDetailResponse,
     DatasetListResponse,
@@ -26,6 +33,7 @@ from pufferlab.contracts.forensics import (
     EvalRunQueryReplayResponse,
     ForensicObservation,
 )
+from pufferlab.contracts.gates import GateMetricName, GatePolicy, GateReport, GateVerdict
 from pufferlab.contracts.health import HealthResponse
 from pufferlab.contracts.retrieval import (
     RetrievalConfig,
@@ -36,6 +44,10 @@ from pufferlab.contracts.search import SearchCompareRequest, SearchCompareRespon
 
 __all__ = [
     "CancelEvalRunResponse",
+    "CapabilitiesResponse",
+    "CapabilityActionCode",
+    "CapabilityRequirementCode",
+    "CapabilityState",
     "CreateEvalRunRequest",
     "CreateEvalRunResponse",
     "DataOrigin",
@@ -54,8 +66,13 @@ __all__ = [
     "FilterPredicate",
     "ForensicObservation",
     "FtsProfile",
+    "GateMetricName",
+    "GatePolicy",
+    "GateReport",
+    "GateVerdict",
     "HealthResponse",
     "IndexProfile",
+    "LivePlaygroundCapability",
     "ObservedScore",
     "QuerySetListResponse",
     "RegressionResponse",
