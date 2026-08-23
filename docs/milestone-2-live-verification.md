@@ -1,5 +1,9 @@
 # Milestone 2 live evaluation verification
 
+> **Historical record:** this Milestone 2 session-script workflow is superseded by the current
+> [PufferLab operator runbook](synthetic-demo.md). Do not use its raw server or namespace commands
+> as current operating instructions.
+
 Use this runbook only on `codex/m2-live-finalization`, after M2-E is merged and protected `main`
 is green. The objective is one fresh 47,382-document Unix namespace, one persisted 50-query run
 across BM25, ANN, server RRF, and local reranking, an independent recomputation from SQLite, and

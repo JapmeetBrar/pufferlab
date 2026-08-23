@@ -1,5 +1,9 @@
 # Milestone 1 Live Verification
 
+> **Historical record:** this Milestone 1 session-script workflow is superseded by the current
+> [PufferLab operator runbook](synthetic-demo.md). Do not use its raw server or namespace commands
+> as current operating instructions.
+
 Use this runbook on the `codex/m1-live-verification` finalization branch to prove the complete
 browser → FastAPI → turbopuffer → browser path against the checked-in 20-document fixture. Keep one
 coordinator shell open from namespace creation through cleanup. A successful run includes the real

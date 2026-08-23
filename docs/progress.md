@@ -296,7 +296,9 @@ reviewer-only merge, and protected-main checks are canonical in GitHub.
 - [ ] Doctor/serve and the Playground expose actionable local configuration state without provider
   calls, secret values, namespace values, model initialization, or remote-health claims.
 - [ ] Generated tiny ingestion durably owns and resumes one exact HMAC-derived namespace; cleanup
-  accepts no caller target/path/token and retains its authenticated receipt on every failure.
+  accepts no caller target/path/token, retains authenticated authority on every pre-terminal-move
+  failure, and treats post-move fixed absence/quarantine as provider-free committed remote absence
+  without restoring ignored bytes as authority.
 - [ ] A completed durable run can produce a provider-free CI gate verdict with source-authenticated
   Unix/synthetic judgments, structurally validated outcomes, recomputed quality over trusted local
   ranked IDs, bounded safe output, and stable pass/policy/invalid/internal exit codes.
