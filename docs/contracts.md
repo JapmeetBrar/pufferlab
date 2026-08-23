@@ -1,6 +1,6 @@
 # PufferLab Shared Contracts v1
 
-- **Status:** Freeze before parallel implementation
+- **Status:** Implemented v1 contract; additive changes require regeneration and review
 - **Source of truth in code:** Pydantic models under `backend/pufferlab/contracts/`
 - **Frontend types:** generated from FastAPI OpenAPI; do not maintain a second handwritten domain model
 
@@ -582,6 +582,8 @@ class EvidenceItem(BaseModel):
     trace_id: UUID | None
 
 class ForensicObservation(BaseModel):
+    config_id: UUID
+    document_id: UUID
     code: ForensicCode
     statement: str  # 1..512
     origin: EvidenceOrigin
@@ -617,11 +619,23 @@ bounds, including positive counts for claimed score/membership inputs.
 Primary-derived rank-like inputs must match an actual returned final or stage-membership rank.
 Probe-derived client computations inherit counterfactual certainty.
 
+`config_id` and `document_id` are mandatory observation targets. The config must belong to the
+requested replay pair. Rank, score, presence, count, filter, and RRF evidence is validated against
+that exact config/document in the returned primary or probe source; a valid-shaped observation from
+another target is rejected rather than rendered in the forensic drawer.
+
 ```python
 class EvalRunQueryReplayRequest(BaseModel):
     contract_version: Literal[1] = 1
     config_ids: list[UUID]  # exactly two distinct persisted IDs
     include_counterfactual_probe: bool = False
+
+class ReplayFailedCounterfactualProbe(BaseModel):
+    origin: Literal["live_replay_counterfactual_probe"]
+    config_id: UUID
+    observed_at: AwareDatetime
+    trace_id: UUID
+    warning: ForensicWarning  # code must be provenance_probe_failed
 
 class EvalRunQueryReplayResponse(BaseModel):
     contract_version: Literal[1] = 1
@@ -633,15 +647,31 @@ class EvalRunQueryReplayResponse(BaseModel):
     primary_observed_at: AwareDatetime
     primary: SearchCompareResponse
     counterfactual_probes: list[ReplayCounterfactualProbe]
+    failed_counterfactual_probes: list[ReplayFailedCounterfactualProbe] = Field(
+        default_factory=list,
+        max_length=2,
+    )
     observations: list[ForensicObservation]
     original_stage_evidence_available: Literal[False] = False
     observability_notice: str
 ```
 
+A failed optional probe has its own bounded source instead of being folded into a primary result.
+Successful and failed probes uniquely target requested config IDs. Primary result traces,
+successful-probe traces, and failed-probe traces are all distinct. A failed probe preserves the
+primary replay and records only the safe typed warning; it cannot contribute membership, score,
+count, timing, or client-computed evidence.
+
 Replay accepts no origin, namespace, query text, qrels, expected document IDs, or config body from
-the client. The server derives them from the run and dataset binding. The primary response contains
-only production-shaped evidence; BM25/ANN raw candidate memberships and `provenance_probe` timing
-remain in separately labeled bounded probes. Probe failure preserves the primary result.
+the client. The server derives them from the run and dataset binding. Before credentials, the
+dataset manifest, bound catalog, search runtime, provider, embedder, or reranker are constructed,
+the server authenticates the complete 50-query persisted suite against the checked source lock and
+ID-only curation anchor: exact order, source/query UUIDs, tags, qrels, content hash, query-set UUID,
+dataset binding, and canonical run/config identities must all match. Foreign, duplicated, or
+tampered stored content fails with a direct redacted error and zero provider-capable calls. The
+primary response contains only production-shaped evidence; BM25/ANN raw candidate memberships and
+`provenance_probe` timing remain in separately labeled bounded probes. Probe failure preserves the
+primary result.
 
 Forbidden statements include “turbopuffer searched cluster X,” “the cache was cold,” “the filter
 ran before ANN,” and counterfactual-probe inputs caused the primary order. Those claims remain

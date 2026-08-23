@@ -2,12 +2,17 @@
 
 PufferLab is a search evaluation and query-forensics workbench for turbopuffer. It compares lexical, vector, hybrid, and reranked retrieval; runs judged query sets; surfaces regressions; and opens failures in an evidence-based debugger.
 
-The project has completed its first live vertical slice and is building its durable judged-evaluation
-milestone. See:
+The local product now includes a durable SQLite-backed run history, aggregate and per-query
+regression analysis, stable query deep links, an evidence-honest forensic drawer, and an explicit
+live replay path. Stored-run pages are provider-free; only clearly labeled actions can start new
+provider work. See:
 
 - [Project decision and implementation brief](docs/project-decision-and-implementation-brief.md)
 - [Shared contracts](docs/contracts.md)
 - [Implementation plan](docs/implementation-plan.md)
+- [Milestone 3 execution plan](docs/milestone-3-execution.md)
+- [Offline synthetic demo](docs/synthetic-demo.md)
+- [Observability and demo runbook](docs/observability.md)
 - [Milestone 1 live-verification runbook](docs/live-verification.md)
 - [CQADupStack Unix local-pack runbook](docs/datasets/cqadupstack-unix.md)
 
@@ -18,6 +23,61 @@ milestone. See:
 - Node.js 22+
 - pnpm 11+
 
+If `pnpm` is not installed, install the repository's pinned major before continuing:
+
+```bash
+npm install --global pnpm@11
+```
+
+## Five-minute provider-free demo
+
+Install the locked Python and browser dependencies from the repository root:
+
+```bash
+uv sync --locked
+cd web
+pnpm install --frozen-lockfile
+cd ..
+```
+
+In terminal 1, choose one ignored local data directory, seed the deterministic demo, and start the
+API with exactly one worker:
+
+```bash
+export PUFFERLAB_DATA_DIR=data/demo
+uv run pufferlab demo seed
+uv run uvicorn pufferlab.main:app --app-dir backend --workers 1
+```
+
+The seed command creates the directory when needed and writes one complete 50-query, four-config,
+200-outcome run. It requires no `.env`, API key, model download, provider, or network access.
+
+In terminal 2, start the dashboard:
+
+```bash
+cd web
+pnpm dev
+```
+
+Open `http://localhost:5173/runs`, then use this interview flow:
+
+1. Open the run labeled **Synthetic demo**. Its durable metrics and all provider-free reads come
+   from `data/demo/pufferlab.sqlite3`.
+2. In **Regressions and gains**, change candidate/order/row controls. The run URL records those
+   choices as `candidate`, `order`, and `limit` query parameters.
+3. Choose **Inspect recorded query** on a regression. The server-issued URL is
+   `/playground?run=<uuid>&query=<uuid>&left=<uuid>&right=<uuid>`; it contains identities, not query
+   text.
+4. Choose **Inspect document** to open the forensic drawer. Its URL adds only a `document=<uuid>`.
+   Refresh, use Back to close it, then Forward to restore it.
+5. Confirm that original stage evidence is `NOT_OBSERVABLE`, synthetic timing is unavailable, and
+   live replay is disabled for this read-only origin.
+
+The equivalent recorded-query route is
+`/runs/<run-uuid>/queries/<query-uuid>?left=<uuid>&right=<uuid>[&document=<uuid>]`. Merely opening,
+refreshing, or navigating either form performs GET-only durable reads and never starts provider
+work. See [the demo runbook](docs/synthetic-demo.md) for idempotence and cleanup boundaries.
+
 ## Ingest the tiny fixture
 
 Copy the server-only settings file, add your turbopuffer API key, and keep the default region or
@@ -25,7 +85,7 @@ replace it with the region for your account:
 
 ```bash
 cp .env.example .env
-uv sync --extra live-search
+uv sync --locked --extra live-search
 uv run pufferlab dataset ingest-tiny
 ```
 
@@ -56,7 +116,7 @@ First prepare the ignored CQADupStack Unix pack using the
 directory and persist the READY dataset, curated 50-query set, and four immutable configurations:
 
 ```bash
-uv sync --extra live-search
+uv sync --locked --extra live-search
 uv run pufferlab dataset ingest-unix \
   --processed-pack data/cqadupstack-unix/processed/cqadupstack-unix-6d54fb92c04b9f193d081a7c430d8804e24e71855d3cbaa2bb50cde838f181b8
 ```
@@ -91,9 +151,11 @@ uv run pufferlab eval export <run-id> --output exports/<run-id>.json
 Exports contain typed ranks, metrics, timings, warnings, and redacted failures—never query/document
 text, credentials, request bodies, or vectors.
 
-## Backend
+## Serve persisted live runs
 
-After copying the printed namespace assignment into `.env`, start the API:
+For the tiny-fixture Playground, copy the ingestion command's printed namespace assignment into
+`.env`. For persisted evaluation runs, point `PUFFERLAB_DATA_DIR` at the same SQLite directory used
+by the CLI. Then start the API:
 
 ```bash
 uv run uvicorn pufferlab.main:app --app-dir backend --workers 1
@@ -103,20 +165,34 @@ The API is served at `http://localhost:8000`; health is available at `GET /api/v
 interactive API documentation at `/docs`.
 
 PufferLab's local evaluation controller deliberately supports exactly one Uvicorn worker. Startup
-holds an exclusive guard beside `data/pufferlab.sqlite3`, migrates the database, marks orphaned
-running jobs interrupted, and reclaims valid queued jobs oldest-first. A second API worker fails
-startup instead of executing the same durable run twice.
+holds an exclusive guard beside the configured `pufferlab.sqlite3`, migrates the database, marks
+orphaned running jobs interrupted, and reclaims valid queued jobs oldest-first. A second API worker
+fails startup instead of executing the same durable run twice.
 
-The config catalog is available without provider credentials. The live BM25-versus-vector compare
-path uses the optional local embedding runtime and ingested namespace configured above. The backend
-loads the fixture's exact pinned `BAAI/bge-small-en-v1.5` revision lazily on the first vector
-comparison. `TURBOPUFFER_API_KEY` and the query vector stay inside the backend process.
+Run history, run detail, regressions, query detail, and export are SQLite reads and remain usable
+without a provider. The live BM25-versus-vector Playground and explicit query replay use the
+optional local embedding runtime and the exact persisted provider namespace. The backend loads the
+fixture's pinned `BAAI/bge-small-en-v1.5` revision lazily on the first vector comparison.
+`TURBOPUFFER_API_KEY` and query vectors stay inside the backend process.
+
+Live replay is deliberately different from opening a stored run. It is available only for an exact
+stored live run/query/config binding and only after the user presses **Run live replay
+(cost-bearing)**. The server authenticates the complete persisted 50-query suite against the
+checked source anchor before it constructs credential, embedding, reranking, or provider-capable
+objects. It derives query text, graded judgments, configs, and namespace server-side; the browser
+cannot supply them.
+
+> **Cost and credential warning:** live replay can incur embedding and turbopuffer usage. Confirm
+> that `.env` contains the intended server-only key and region and that the run's original namespace
+> is still ready. Selecting **Include separate counterfactual provenance probes** makes additional
+> provider requests. Never paste the key, licensed query text, qrels, namespace, provider bodies, or
+> raw vectors into logs, screenshots, issues, or pull requests.
 
 ## Frontend
 
 ```bash
 cd web
-pnpm install
+pnpm install --frozen-lockfile
 pnpm generate:api
 pnpm dev
 ```
@@ -126,6 +202,7 @@ Vite serves the app at `http://localhost:5173` and proxies `/api` to the backend
 ## Checks
 
 ```bash
+uv sync --locked
 uv run ruff check backend scripts
 uv run ruff format --check backend scripts
 uv run mypy
