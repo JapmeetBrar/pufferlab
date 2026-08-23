@@ -298,6 +298,19 @@ def test_gate_report_rejects_inconsistent_math_population_metric_and_verdict() -
             GateReport.model_validate(attacked)
 
 
+def test_gate_report_excludes_every_candidate_failure_from_paired_queries() -> None:
+    payload = _passing_report().model_dump(mode="json")
+    payload["checks"][0].update(
+        passed=False,
+        failed_candidate_queries=1,
+        observed_error_rate=0.02,
+    )
+    payload["verdict"] = "policy_failed"
+
+    with pytest.raises(ValidationError, match="candidate failures must be excluded"):
+        GateReport.model_validate(payload)
+
+
 @pytest.mark.parametrize(
     ("model", "payload"),
     [

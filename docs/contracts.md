@@ -824,8 +824,8 @@ run/baseline/candidate UUIDs, the selected metric, and exactly four typed checks
 4. `per_query_drop`
 
 Every threshold is inclusive. Candidate error rate uses all 50 attempts. Paired plus excluded
-query counts total 50, and aggregate/per-query checks use that same nonzero paired population. A
-passing verdict requires all four checks to pass. The per-query check reports its total violation
-count and at most the first ten unique violations ordered by observed delta ascending, then query
-UUID ascending. Invalid policy or evidence remains a separate safe CLI error rather than a third
-gate-report verdict.
+query counts total 50, every failed candidate attempt is excluded from that paired population, and
+aggregate/per-query checks use the same nonzero paired population. A passing verdict requires all
+four checks to pass. The per-query check reports its total violation count and at most the first
+ten unique violations ordered by observed delta ascending, then query UUID ascending. Invalid
+policy or evidence remains a separate safe CLI error rather than a third gate-report verdict.

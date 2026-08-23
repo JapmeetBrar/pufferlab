@@ -160,7 +160,9 @@ class GateReport(_FrozenGateModel):
     def validate_report(self) -> "GateReport":
         if self.baseline_config_id == self.candidate_config_id:
             raise ValueError("gate baseline and candidate configs must be distinct")
-        _error_rate, coverage, aggregate, per_query = self.checks
+        error_rate, coverage, aggregate, per_query = self.checks
+        if coverage.excluded_query_count < error_rate.failed_candidate_queries:
+            raise ValueError("candidate failures must be excluded from the paired-query population")
         if aggregate.metric is not self.metric or per_query.metric is not self.metric:
             raise ValueError("every quality check must use the report metric")
         if not (
