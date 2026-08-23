@@ -130,6 +130,11 @@ class EvaluationApplicationService:
             raise PersistenceValidationError(
                 "evaluation runs require BM25, vector, server RRF, and local reranker configs"
             )
+        config_by_mode = {config.mode: config for config in configs}
+        _validate_canonical_configs(
+            self._repository.get_dataset_version(query_set.dataset_version_id),
+            tuple(config_by_mode[mode] for mode in _CONFIG_MODE_ORDER),
+        )
         if environment.max_concurrency != request.max_concurrency:
             raise PersistenceValidationError(
                 "run environment concurrency must match the create-run request"
@@ -373,9 +378,16 @@ def _validate_canonical_seed(
         raise PersistenceValidationError("evaluation dataset revision must be ready")
     if seed.query_set.query_count != 50 or len(seed.judged_queries) != 50:
         raise PersistenceValidationError("evaluation seeding requires the curated 50-query set")
-    if any(config.dataset_version_id != seed.dataset_version.id for config in configs):
+    _validate_canonical_configs(seed.dataset_version, configs)
+
+
+def _validate_canonical_configs(
+    dataset_version: DatasetVersion,
+    configs: tuple[RetrievalConfig, ...],
+) -> None:
+    if any(config.dataset_version_id != dataset_version.id for config in configs):
         raise PersistenceValidationError(
-            "every seeded retrieval config must bind to the evaluation dataset revision"
+            "every evaluation retrieval config must bind to the dataset revision"
         )
     if any(
         config.result_k != 50
@@ -391,8 +403,8 @@ def _validate_canonical_seed(
 
     lexical = LexicalSpec()
     vector = VectorSpec(
-        attribute=seed.dataset_version.index_profile.vector_attribute,
-        embedding_model=seed.dataset_version.index_profile.embedding_model,
+        attribute=dataset_version.index_profile.vector_attribute,
+        embedding_model=dataset_version.index_profile.embedding_model,
     )
     rrf = RrfSpec()
     reranker = RerankerSpec(

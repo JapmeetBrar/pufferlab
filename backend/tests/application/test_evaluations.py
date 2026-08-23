@@ -537,6 +537,14 @@ def test_seed_rejects_noncanonical_candidate_depth_and_reranker_depth(
     with pytest.raises(PersistenceValidationError, match="pinned local-reranker suite"):
         service.seed(seed, (*configs[:3], wrong_reranker_depth))
 
+    repository.put_dataset_version(seed.dataset_version)
+    for config in (wrong_candidate_depth, *configs[1:]):
+        repository.put_retrieval_config(config)
+    repository.put_query_set(seed.query_set, seed.judged_queries)
+    request = _request(seed, configs, warmup_query_count=0)
+    with pytest.raises(PersistenceValidationError, match="candidate_k=100"):
+        service.create_run(request, _environment(request))
+
 
 def _assert_no_exposed_fields(value: object) -> None:
     forbidden = {
