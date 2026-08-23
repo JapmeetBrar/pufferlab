@@ -4,6 +4,23 @@
  */
 
 export interface paths {
+    "/api/v1/capabilities": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Local Capabilities */
+        get: operations["get_local_capabilities"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/configs": {
         parameters: {
             query?: never;
@@ -303,6 +320,27 @@ export interface components {
             /** Changes */
             changes: components["schemas"]["RelevantRankChange"][];
         };
+        /** CapabilitiesResponse */
+        CapabilitiesResponse: {
+            /** @default 1 */
+            contract_version: components["schemas"]["ContractVersion"];
+            live_playground: components["schemas"]["LivePlaygroundCapability"];
+        };
+        /**
+         * CapabilityActionCode
+         * @enum {string}
+         */
+        CapabilityActionCode: "configure_api_key" | "configure_search_namespace" | "configure_region" | "install_live_search_runtime" | "resolve_owned_tiny_receipt" | "use_owned_tiny_credential" | "use_owned_tiny_region";
+        /**
+         * CapabilityRequirementCode
+         * @enum {string}
+         */
+        CapabilityRequirementCode: "api_key" | "search_namespace" | "region" | "live_search_runtime" | "owned_tiny_receipt_invalid" | "owned_tiny_credential_mismatch" | "owned_tiny_region_mismatch";
+        /**
+         * CapabilityState
+         * @enum {string}
+         */
+        CapabilityState: "locally_configured" | "action_required";
         /** ConfigRunSummary */
         ConfigRunSummary: {
             /** Completed Queries */
@@ -1011,6 +1049,16 @@ export interface components {
             text: string;
         };
         /**
+         * LivePlaygroundCapability
+         * @description Local readiness only; this contract never asserts remote provider health.
+         */
+        LivePlaygroundCapability: {
+            next_action: components["schemas"]["CapabilityActionCode"] | null;
+            /** Requirements */
+            requirements: components["schemas"]["CapabilityRequirementCode"][];
+            state: components["schemas"]["CapabilityState"];
+        };
+        /**
          * LogicalOp
          * @enum {string}
          */
@@ -1585,6 +1633,26 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    get_local_capabilities: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CapabilitiesResponse"];
+                };
+            };
+        };
+    };
     list_retrieval_configs: {
         parameters: {
             query?: never;

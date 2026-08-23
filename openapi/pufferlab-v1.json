@@ -137,6 +137,57 @@
         "title": "CandidateRelevantRankChanges",
         "type": "object"
       },
+      "CapabilitiesResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "contract_version": {
+            "$ref": "#/components/schemas/ContractVersion",
+            "default": 1
+          },
+          "live_playground": {
+            "$ref": "#/components/schemas/LivePlaygroundCapability"
+          }
+        },
+        "required": [
+          "live_playground"
+        ],
+        "title": "CapabilitiesResponse",
+        "type": "object"
+      },
+      "CapabilityActionCode": {
+        "enum": [
+          "configure_api_key",
+          "configure_search_namespace",
+          "configure_region",
+          "install_live_search_runtime",
+          "resolve_owned_tiny_receipt",
+          "use_owned_tiny_credential",
+          "use_owned_tiny_region"
+        ],
+        "title": "CapabilityActionCode",
+        "type": "string"
+      },
+      "CapabilityRequirementCode": {
+        "enum": [
+          "api_key",
+          "search_namespace",
+          "region",
+          "live_search_runtime",
+          "owned_tiny_receipt_invalid",
+          "owned_tiny_credential_mismatch",
+          "owned_tiny_region_mismatch"
+        ],
+        "title": "CapabilityRequirementCode",
+        "type": "string"
+      },
+      "CapabilityState": {
+        "enum": [
+          "locally_configured",
+          "action_required"
+        ],
+        "title": "CapabilityState",
+        "type": "string"
+      },
       "ConfigRunSummary": {
         "additionalProperties": false,
         "properties": {
@@ -1980,6 +2031,40 @@
         "title": "JudgedQuery",
         "type": "object"
       },
+      "LivePlaygroundCapability": {
+        "additionalProperties": false,
+        "description": "Local readiness only; this contract never asserts remote provider health.",
+        "properties": {
+          "next_action": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CapabilityActionCode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "requirements": {
+            "items": {
+              "$ref": "#/components/schemas/CapabilityRequirementCode"
+            },
+            "maxItems": 7,
+            "title": "Requirements",
+            "type": "array"
+          },
+          "state": {
+            "$ref": "#/components/schemas/CapabilityState"
+          }
+        },
+        "required": [
+          "state",
+          "requirements",
+          "next_action"
+        ],
+        "title": "LivePlaygroundCapability",
+        "type": "object"
+      },
       "LogicalOp": {
         "enum": [
           "and",
@@ -3432,6 +3517,27 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/api/v1/capabilities": {
+      "get": {
+        "operationId": "get_local_capabilities",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CapabilitiesResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Local Capabilities",
+        "tags": [
+          "capabilities"
+        ]
+      }
+    },
     "/api/v1/configs": {
       "get": {
         "operationId": "list_retrieval_configs",

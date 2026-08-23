@@ -686,6 +686,7 @@ P0 endpoints:
 GET    /api/v1/health
 GET    /api/v1/datasets
 GET    /api/v1/datasets/{dataset_version_id}
+GET    /api/v1/capabilities
 GET    /api/v1/query-sets?dataset_version_id=...
 GET    /api/v1/configs                                      # existing Playground catalog
 GET    /api/v1/datasets/{dataset_version_id}/configs         # persisted eval catalog
@@ -700,10 +701,9 @@ GET    /api/v1/eval-runs/{run_id}/export
 POST   /api/v1/eval-runs/{run_id}/queries/{query_id}/replay
 ```
 
-Milestone 4 contract freeze does not add `/api/v1/capabilities` to this HTTP surface. M4-B mounts
-that route only after its provider-free inspector exists; until then the capability models remain
-unreachable from OpenAPI. Evaluation-gate policy and report models are CLI-only and never enter the
-HTTP schema.
+M4-B mounts `/api/v1/capabilities` only through its provider-free local inspector, so the capability
+models are now reachable from OpenAPI. Evaluation-gate policy and report models are CLI-only and
+never enter the HTTP schema.
 
 Polling `GET /eval-runs/{run_id}` is the P0 progress mechanism. No WebSocket/SSE contract is reserved.
 There is no P0 `POST /configs`.
@@ -788,7 +788,7 @@ provider payloads, query/document text, qrels, or tracebacks.
 
 ### Local Playground capability
 
-The future versioned capability response has exactly one `live_playground` member. Its state is
+The versioned capability response has exactly one `live_playground` member. Its state is
 `locally_configured` or `action_required`. Requirements are a unique ordered subsequence of:
 
 1. `api_key`
@@ -806,8 +806,8 @@ The corresponding action codes, in the same order, are `configure_api_key`,
 requires a non-empty tuple, and its action must correspond to the first unmet requirement. The
 contract communicates only local configuration state and never remote health.
 
-M4-A adds `configuration_required` to the already reachable `ApiErrorCode` enum but does not yet
-map it to runtime behavior. M4-B owns the direct pre-factory search error and frontend handling.
+M4-B maps `configuration_required` to a direct HTTP 503 before provider, embedder, or reranker
+factories and teaches the manual frontend error guard to preserve that generated enum value.
 
 ### Provider-free evaluation gate
 

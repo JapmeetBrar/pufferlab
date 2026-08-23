@@ -21,6 +21,7 @@ from pufferlab.api.router import api_router
 from pufferlab.application.evaluation_controls import ProviderFreeEvaluationControls
 from pufferlab.application.evaluation_runtime import EvaluationApiRuntime
 from pufferlab.application.evaluation_views import EvaluationViewService
+from pufferlab.application.readiness import CapabilityInspector, LocalCapabilityInspector
 from pufferlab.application.view_errors import EvaluationViewError
 from pufferlab.config import Settings, get_settings
 from pufferlab.persistence.database import Database
@@ -38,8 +39,14 @@ def create_app(
     evaluation_views: EvaluationViewFacade | None = None,
     evaluation_controls: EvaluationControlFacade | None = None,
     evaluation_runtime: EvaluationApiRuntime | None = None,
+    capability_inspector: CapabilityInspector | None = None,
 ) -> FastAPI:
     resolved_settings = settings or get_settings()
+    resolved_capability_inspector = (
+        capability_inspector
+        if capability_inspector is not None
+        else LocalCapabilityInspector(resolved_settings)
+    )
     resolved_search_backend = (
         search_backend
         if search_backend is not None
@@ -103,6 +110,7 @@ def create_app(
         lifespan=lifespan,
     )
     app.state.settings = resolved_settings
+    app.state.capability_inspector = resolved_capability_inspector
     app.state.search_backend = resolved_search_backend
     app.state.evaluation_views = evaluation_views
     app.state.evaluation_controls = resolved_evaluation_controls

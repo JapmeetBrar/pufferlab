@@ -7,7 +7,7 @@ import asyncio
 import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Protocol, TextIO
+from typing import TYPE_CHECKING, Protocol, TextIO
 from uuid import UUID, uuid4
 
 from pufferlab.cli.evaluation import (
@@ -41,6 +41,10 @@ from pufferlab.contracts.common import ContractModel
 from pufferlab.contracts.evals import EvalRun, EvalRunStatus
 from pufferlab.datasets.ingestion import IngestionReport
 from pufferlab.synthetic_demo import SyntheticDemoSeedResult
+
+if TYPE_CHECKING:
+    from pufferlab.cli.doctor import DoctorDependencies
+    from pufferlab.cli.serve import ServeDependencies
 
 _UNIX_PREFIX = "pufferlab-unix-"
 _UNIX_DATASET_DIR = Path("datasets/cqadupstack-unix")
@@ -80,6 +84,8 @@ def main(
     settings_factory: Callable[[], Settings] = Settings,
     ingest_runner: _IngestRunner | None = None,
     synthetic_demo_seed_runner: _SyntheticDemoSeedRunner | None = None,
+    doctor_dependencies: DoctorDependencies | None = None,
+    serve_dependencies: ServeDependencies | None = None,
     cli_application_factory: CliApplicationFactory | None = None,
     run_id_factory: Callable[[], UUID] = uuid4,
     stdout: TextIO | None = None,
@@ -89,6 +95,27 @@ def main(
     error_output = stderr or sys.stderr
     parser = _parser()
     arguments = parser.parse_args(argv)
+
+    if arguments.command == "serve":
+        return _run_serve_command(
+            arguments,
+            dependencies=serve_dependencies,
+            output=output,
+            error_output=error_output,
+        )
+
+    if arguments.command == "doctor":
+        if arguments.dataset_version is not None and arguments.mode not in {"evaluation", "all"}:
+            parser.error("--dataset-version is accepted only for doctor evaluation or all")
+        if arguments.live and arguments.mode == "demo":
+            parser.error("--live is accepted only for doctor live-tiny, evaluation, or all")
+        return _run_doctor_command(
+            arguments,
+            settings_factory=settings_factory,
+            dependencies=doctor_dependencies,
+            output=output,
+            error_output=error_output,
+        )
 
     if arguments.command == "dataset" and arguments.dataset_command == "ingest-tiny":
         return _run_tiny_ingest(
@@ -216,6 +243,65 @@ def _run_synthetic_demo_seed(
         print("error: synthetic demo seed failed", file=error_output)
         return 1
     return 0
+
+
+def _run_doctor_command(
+    arguments: argparse.Namespace,
+    *,
+    settings_factory: Callable[[], Settings],
+    dependencies: DoctorDependencies | None,
+    output: TextIO,
+    error_output: TextIO,
+) -> int:
+    from pufferlab.cli.doctor import DoctorMode, render_doctor, run_doctor
+
+    try:
+        execution = asyncio.run(
+            run_doctor(
+                settings_factory(),
+                mode=DoctorMode(arguments.mode),
+                dataset_version_id=arguments.dataset_version,
+                live=arguments.live,
+                dependencies=dependencies,
+            )
+        )
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        print("error: doctor cancelled", file=error_output)
+        return 130
+    except Exception:
+        print("error: doctor failed", file=error_output)
+        return 1
+    if execution.exit_code == 130:
+        print("error: doctor cancelled", file=error_output)
+        return 130
+    for line in render_doctor(execution.report):
+        print(line, file=output)
+    return execution.exit_code
+
+
+def _run_serve_command(
+    arguments: argparse.Namespace,
+    *,
+    dependencies: ServeDependencies | None,
+    output: TextIO,
+    error_output: TextIO,
+) -> int:
+    from pufferlab.cli.serve import (
+        ServeOptions,
+        render_serve_finish,
+        render_serve_start,
+        run_serve,
+    )
+
+    options = ServeOptions(host=arguments.host, port=arguments.port)
+    print(render_serve_start(options), file=output, flush=True)
+    execution = run_serve(options, dependencies=dependencies)
+    output_lines, error_lines = render_serve_finish(execution)
+    for line in output_lines:
+        print(line, file=output, flush=True)
+    for line in error_lines:
+        print(line, file=error_output, flush=True)
+    return execution.exit_code
 
 
 def _run_tiny_ingest(
@@ -407,6 +493,9 @@ def _parser() -> argparse.ArgumentParser:
     )
     commands = parser.add_subparsers(dest="command", required=True)
 
+    _add_doctor_parser(commands)
+    _add_serve_parser(commands)
+
     dataset = commands.add_parser("dataset", help="Prepare and ingest evaluation datasets.")
     dataset_commands = dataset.add_subparsers(dest="dataset_command", required=True)
     _add_tiny_ingest_parser(dataset_commands)
@@ -446,6 +535,55 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     return parser
+
+
+def _add_doctor_parser(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    doctor = commands.add_parser(
+        "doctor",
+        help="Inspect local PufferLab readiness without changing durable state.",
+        description=(
+            "Inspect provider-free local readiness. --live explicitly adds at most one "
+            "metadata-only turbopuffer request; no search, write, create, or delete is issued."
+        ),
+    )
+    doctor.add_argument(
+        "--mode",
+        choices=("demo", "live-tiny", "evaluation", "all"),
+        required=True,
+    )
+    doctor.add_argument(
+        "--dataset-version",
+        type=_uuid,
+        help="Exact persisted evaluation dataset UUID (evaluation/all only).",
+    )
+    doctor.add_argument(
+        "--live",
+        action="store_true",
+        help="Explicitly perform one metadata-only check for the resolved live target.",
+    )
+
+
+def _add_serve_parser(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    serve = commands.add_parser(
+        "serve",
+        help="Serve the local API with one loopback-only worker.",
+        description=(
+            "Serve the local API with one worker on an exact loopback address. Worker count, "
+            "reload, proxy headers, application target, logging, and shutdown bounds are fixed."
+        ),
+    )
+    serve.add_argument(
+        "--host",
+        type=_serve_host,
+        default="127.0.0.1",
+        help="Exact loopback host: 127.0.0.1, ::1, or localhost (default: 127.0.0.1).",
+    )
+    serve.add_argument(
+        "--port",
+        type=_serve_port,
+        default=8000,
+        help="Loopback TCP port from 1 through 65535 (default: 8000).",
+    )
 
 
 def _add_tiny_ingest_parser(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -624,3 +762,18 @@ def _uuid(value: str) -> UUID:
         return UUID(value)
     except ValueError:
         raise argparse.ArgumentTypeError("must be a UUID") from None
+
+
+def _serve_host(value: str) -> str:
+    if value not in {"127.0.0.1", "::1", "localhost"}:
+        raise argparse.ArgumentTypeError("must be an exact loopback host")
+    return value
+
+
+def _serve_port(value: str) -> int:
+    if not value.isascii() or not value.isdecimal():
+        raise argparse.ArgumentTypeError("must be an integer from 1 through 65535")
+    port = int(value)
+    if not 1 <= port <= 65535:
+        raise argparse.ArgumentTypeError("must be an integer from 1 through 65535")
+    return port

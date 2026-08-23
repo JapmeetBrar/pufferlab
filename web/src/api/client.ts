@@ -22,6 +22,7 @@ export class ApiRequestError extends Error {
 function isApiErrorCode(value: unknown): value is ApiErrorDetail["code"] {
   return (
     value === "validation_error" ||
+    value === "configuration_required" ||
     value === "not_found" ||
     value === "namespace_not_ready" ||
     value === "provider_error" ||
