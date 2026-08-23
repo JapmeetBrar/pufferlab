@@ -112,8 +112,9 @@ rank and score movement.
 - Confirm the API and seed/live CLI use the same `PUFFERLAB_DATA_DIR`.
 - Return to `/runs` and follow a server-issued link from the current database. A UUID from another
   local database correctly returns 404.
-- Start Uvicorn with `--workers 1`. If the ownership guard is held, stop the older PufferLab API
-  instead of bypassing the guard.
+- Start the installed one-worker server with `uv run pufferlab serve`; follow the allocated-port
+  commands in the [current operator runbook](synthetic-demo.md). If the ownership guard is held,
+  stop the older PufferLab API instead of bypassing the guard.
 - A partial, failed, cancelled, or interrupted run remains inspectable; missing attempts are
   explicit coverage states and must not be converted to zero-valued quality.
 

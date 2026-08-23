@@ -129,11 +129,14 @@ curation metadata in application memory without parsing the ID-only manifest aga
 From the repository root, the end-to-end commands after local-pack preparation are:
 
 ```bash
-uv sync --extra live-search
+uv sync --locked --extra live-search
 uv run pufferlab dataset ingest-unix --processed-pack \
   data/cqadupstack-unix/processed/cqadupstack-unix-6d54fb92c04b9f193d081a7c430d8804e24e71855d3cbaa2bb50cde838f181b8
 uv run pufferlab eval run --seeded-defaults
-uv run pufferlab eval export <run-id> --output exports/<run-id>.json
+printf 'Run ID from eval run: '
+read -r RUN_ID
+test -n "$RUN_ID"
+uv run pufferlab eval export "$RUN_ID" --output "exports/$RUN_ID.json"
 ```
 
 The ingestion command itself persists the dataset/query/config seed. `pufferlab config seed` is an
@@ -151,8 +154,9 @@ stable-ID upserts.
 
 The checkpoint and ingestion interfaces expose no delete operation. A caller-supplied namespace is
 bound to the checkpoint and used only through a fixed-length filename hash; it is never interpreted
-as a cleanup target. Only the separate live-test ownership workflow may delete an internally
-generated, pattern-validated test namespace.
+as a cleanup target. Only installed `pufferlab namespace cleanup-tiny` can delete, and only through
+the authenticated fixed generated-tiny receipt. Pattern or spelling never grants authority; Unix
+namespaces are never eligible.
 
 ## Git boundary and audit
 

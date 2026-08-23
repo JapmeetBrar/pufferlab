@@ -285,6 +285,171 @@ def test_cleanup_reconciles_every_active_state(
     assert not (isolated_state / "receipt.json").exists()
 
 
+def test_cleanup_rerun_after_crash_immediately_after_cleanup_request(
+    isolated_state: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pufferlab import owned_tiny
+
+    snapshot = _create_receipt()
+    provider = FakeCleanupProvider()
+    factory = _install_provider(monkeypatch, provider)
+    real_transition = owned_tiny._OwnedTinyOperation.transition
+    interrupted = False
+
+    def interrupt_after_cleanup_request(
+        operation: owned_tiny._OwnedTinyOperation,
+        current: object,
+        state: OwnedTinyState,
+    ) -> object:
+        nonlocal interrupted
+        transitioned = real_transition(operation, current, state)  # type: ignore[arg-type]
+        if state is OwnedTinyState.CLEANUP_REQUESTED and not interrupted:
+            interrupted = True
+            raise SystemExit("private-after-cleanup-request-marker")
+        return transitioned
+
+    monkeypatch.setattr(
+        owned_tiny._OwnedTinyOperation,
+        "transition",
+        interrupt_after_cleanup_request,
+    )
+
+    assert main(["namespace", "cleanup-tiny"], settings_factory=_settings) == 1
+    assert interrupted
+    assert factory.calls == []
+    assert provider.delete_calls == []
+    assert _receipt_state() is OwnedTinyState.CLEANUP_REQUESTED
+
+    assert main(["namespace", "cleanup-tiny"], settings_factory=_settings) == 0
+    assert factory.calls == [(_KEY, _REGION)]
+    assert provider.delete_calls == [snapshot.receipt.namespace]
+    assert provider.metadata_calls == [snapshot.receipt.namespace]
+    assert provider.close_calls == 1
+    assert not (isolated_state / "receipt.json").exists()
+
+
+def test_cleanup_rerun_after_crash_between_delete_and_verification(
+    isolated_state: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _create_receipt()
+    first_provider = FakeCleanupProvider()
+    first_factory = _install_provider(monkeypatch, first_provider)
+
+    async def interrupt_before_verification(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise SystemExit("private-after-delete-marker")
+
+    with monkeypatch.context() as crash:
+        crash.setattr("pufferlab.cli.namespace._verify_not_found", interrupt_before_verification)
+        assert main(["namespace", "cleanup-tiny"], settings_factory=_settings) == 1
+
+    assert first_factory.calls == [(_KEY, _REGION)]
+    assert first_provider.delete_calls == [snapshot.receipt.namespace]
+    assert first_provider.metadata_calls == []
+    assert first_provider.close_calls == 1
+    assert _receipt_state() is OwnedTinyState.CLEANUP_REQUESTED
+
+    second_provider = FakeCleanupProvider()
+    second_provider.delete_error = _provider_error(ApiErrorCode.NOT_FOUND)
+    second_factory = _install_provider(monkeypatch, second_provider)
+
+    assert main(["namespace", "cleanup-tiny"], settings_factory=_settings) == 0
+    assert second_factory.calls == [(_KEY, _REGION)]
+    assert second_provider.delete_calls == [snapshot.receipt.namespace]
+    assert second_provider.metadata_calls == [snapshot.receipt.namespace]
+    assert second_provider.close_calls == 1
+    assert not (isolated_state / "receipt.json").exists()
+
+
+def test_cleanup_rerun_after_crash_during_not_found_polling(
+    isolated_state: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _create_receipt()
+    first_provider = FakeCleanupProvider()
+    first_provider.metadata_outcomes = ["present"]
+    first_factory = _install_provider(monkeypatch, first_provider)
+
+    async def interrupt_polling(delay: float) -> None:
+        del delay
+        raise SystemExit("private-not-found-poll-marker")
+
+    with monkeypatch.context() as crash:
+        crash.setattr("pufferlab.cli.namespace.asyncio.sleep", interrupt_polling)
+        assert main(["namespace", "cleanup-tiny"], settings_factory=_settings) == 1
+
+    assert first_factory.calls == [(_KEY, _REGION)]
+    assert first_provider.delete_calls == [snapshot.receipt.namespace]
+    assert first_provider.metadata_calls == [snapshot.receipt.namespace]
+    assert first_provider.close_calls == 1
+    assert _receipt_state() is OwnedTinyState.CLEANUP_REQUESTED
+
+    second_provider = FakeCleanupProvider()
+    second_provider.delete_error = _provider_error(ApiErrorCode.NOT_FOUND)
+    second_factory = _install_provider(monkeypatch, second_provider)
+
+    assert main(["namespace", "cleanup-tiny"], settings_factory=_settings) == 0
+    assert second_factory.calls == [(_KEY, _REGION)]
+    assert second_provider.delete_calls == [snapshot.receipt.namespace]
+    assert second_provider.metadata_calls == [snapshot.receipt.namespace]
+    assert second_provider.close_calls == 1
+    assert not (isolated_state / "receipt.json").exists()
+
+
+def test_terminal_cleanup_rerun_after_crash_uses_no_provider(
+    isolated_state: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pufferlab import owned_tiny
+
+    snapshot = _create_receipt()
+    provider = FakeCleanupProvider()
+    factory = _install_provider(monkeypatch, provider)
+    real_remove_terminal = owned_tiny._OwnedTinyOperation.remove_terminal
+    interrupted = False
+
+    def interrupt_once_before_terminal_removal(
+        operation: owned_tiny._OwnedTinyOperation,
+        current: object,
+    ) -> None:
+        nonlocal interrupted
+        if not interrupted:
+            interrupted = True
+            raise SystemExit("private-before-terminal-removal-marker")
+        real_remove_terminal(operation, current)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        owned_tiny._OwnedTinyOperation,
+        "remove_terminal",
+        interrupt_once_before_terminal_removal,
+    )
+
+    assert main(["namespace", "cleanup-tiny"], settings_factory=_settings) == 1
+    assert interrupted
+    assert factory.calls == [(_KEY, _REGION)]
+    assert provider.delete_calls == [snapshot.receipt.namespace]
+    assert provider.metadata_calls == [snapshot.receipt.namespace]
+    assert provider.close_calls == 1
+    assert _receipt_state() is OwnedTinyState.NOT_FOUND_VERIFIED
+
+    provider_calls = (
+        tuple(factory.calls),
+        tuple(provider.delete_calls),
+        tuple(provider.metadata_calls),
+        provider.close_calls,
+    )
+    assert main(["namespace", "cleanup-tiny"], settings_factory=lambda: _settings(key=None)) == 0
+    assert (
+        tuple(factory.calls),
+        tuple(provider.delete_calls),
+        tuple(provider.metadata_calls),
+        provider.close_calls,
+    ) == provider_calls
+    assert not (isolated_state / "receipt.json").exists()
+
+
 def test_terminal_rerun_unlinks_without_key_or_provider_call(
     isolated_state: Path,
     monkeypatch: pytest.MonkeyPatch,
