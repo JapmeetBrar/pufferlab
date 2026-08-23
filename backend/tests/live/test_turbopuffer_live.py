@@ -14,6 +14,7 @@ from pufferlab.contracts.errors import ApiErrorCode
 from pufferlab.providers.errors import ProviderError
 from pufferlab.providers.turbopuffer import TurbopufferProvider
 from pufferlab.providers.types import ProviderSchema, WriteDocument
+from pufferlab.retrieval.rrf import reconstruct_rrf
 
 _LIVE_NAMESPACE_PREFIX = "pufferlab-live-test-"
 
@@ -24,7 +25,7 @@ def _unit_vector(dimensions: int, hot_dimension: int) -> list[float]:
 
 @pytest.mark.live
 @pytest.mark.asyncio
-async def test_live_write_bm25_ann_and_exact_cleanup() -> None:
+async def test_live_write_bm25_ann_server_rrf_parity_and_exact_cleanup() -> None:
     if os.environ.get("PUFFERLAB_RUN_LIVE") != "1":
         pytest.skip("set PUFFERLAB_RUN_LIVE=1 to run live turbopuffer tests")
     settings = Settings()
@@ -125,13 +126,53 @@ async def test_live_write_bm25_ann_and_exact_cleanup() -> None:
             include_attributes=("title", "body"),
             distance_metric="cosine_distance",
         )
+        hybrid = await provider.query_hybrid_rrf(
+            namespace=namespace_id,
+            text_attribute="body",
+            query_text="pufferfish search",
+            vector_attribute="vector",
+            query_vector=puffer_vector,
+            candidate_k=3,
+            result_k=3,
+            include_attributes=("title", "body"),
+            rank_constant=60,
+            weights=(1.0, 1.0),
+            distance_metric="cosine_distance",
+        )
+        probe = await provider.probe_hybrid_candidates(
+            namespace=namespace_id,
+            text_attribute="body",
+            query_text="pufferfish search",
+            vector_attribute="vector",
+            query_vector=puffer_vector,
+            candidate_k=3,
+            include_attributes=("title", "body"),
+            distance_metric="cosine_distance",
+        )
+        reconstructed = reconstruct_rrf(
+            (
+                tuple(document.id for document in probe.bm25_documents),
+                tuple(document.id for document in probe.ann_documents),
+            ),
+            rank_constant=60,
+            weights=(1.0, 1.0),
+        )
 
         assert bm25.documents
         assert ann.documents
         assert bm25.documents[0].score.direction.value == "higher_is_better"
         assert ann.documents[0].score.direction.value == "lower_is_better"
+        assert [document.id for document in hybrid.documents] == [
+            entry.document_id for entry in reconstructed[: len(hybrid.documents)]
+        ]
+        assert [document.score.value for document in hybrid.documents] == pytest.approx(
+            [entry.score for entry in reconstructed[: len(hybrid.documents)]]
+        )
+        assert all(document.score.kind.value == "rrf" for document in hybrid.documents)
         assert bm25.client_duration_ms >= 0
         assert ann.client_duration_ms >= 0
+        assert hybrid.client_duration_ms >= 0
+        assert probe.client_duration_ms >= 0
     finally:
         try:
             if created_namespace_id is not None:

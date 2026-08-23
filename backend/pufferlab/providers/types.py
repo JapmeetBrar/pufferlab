@@ -73,6 +73,15 @@ class ProviderQueryResult:
 
 
 @dataclass(frozen=True, slots=True)
+class ProviderHybridProbeResult:
+    """Debug-only raw lists from one same-snapshot BM25/ANN multi-query."""
+
+    bm25_documents: tuple[ProviderDocument, ...]
+    ann_documents: tuple[ProviderDocument, ...]
+    client_duration_ms: float
+
+
+@dataclass(frozen=True, slots=True)
 class ProviderWriteResult:
     rows_affected: int
     client_duration_ms: float

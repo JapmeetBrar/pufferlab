@@ -110,7 +110,7 @@ async def test_runtime_uses_exact_manifest_and_lazily_reuses_clients() -> None:
         provider_factory=provider_factory,
         embedder_factory=embedder_factory,
     )
-    bm25, vector = runtime.list_configs()
+    bm25, vector, _, _ = runtime.list_configs()
 
     assert provider_factory.calls == []
     assert embedder_factory.calls == []
@@ -153,7 +153,7 @@ async def test_runtime_discovers_configs_without_server_credentials() -> None:
     )
     summaries = runtime.list_configs()
 
-    assert len(summaries) == 2
+    assert len(summaries) == 4
     with pytest.raises(SearchError, match="not configured") as caught:
         await runtime.compare(
             SearchCompareRequest(

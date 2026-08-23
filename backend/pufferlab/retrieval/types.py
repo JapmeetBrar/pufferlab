@@ -10,6 +10,7 @@ from pufferlab.contracts.search import SearchCompareRequest, SearchCompareRespon
 from pufferlab.providers.types import (
     ConsistencyLevel,
     DistanceMetric,
+    ProviderHybridProbeResult,
     ProviderQueryResult,
 )
 
@@ -59,6 +60,39 @@ class RetrievalProvider(Protocol):
         consistency: ConsistencyLevel = "strong",
         distance_metric: DistanceMetric | None = None,
     ) -> ProviderQueryResult: ...
+
+    async def query_hybrid_rrf(
+        self,
+        *,
+        namespace: str,
+        text_attribute: str,
+        query_text: str,
+        vector_attribute: str,
+        query_vector: Sequence[float],
+        candidate_k: int,
+        result_k: int,
+        include_attributes: Sequence[str],
+        rank_constant: int,
+        weights: tuple[float, float],
+        filters: FilterNode | None = None,
+        consistency: ConsistencyLevel = "strong",
+        distance_metric: DistanceMetric | None = None,
+    ) -> ProviderQueryResult: ...
+
+    async def probe_hybrid_candidates(
+        self,
+        *,
+        namespace: str,
+        text_attribute: str,
+        query_text: str,
+        vector_attribute: str,
+        query_vector: Sequence[float],
+        candidate_k: int,
+        include_attributes: Sequence[str],
+        filters: FilterNode | None = None,
+        consistency: ConsistencyLevel = "strong",
+        distance_metric: DistanceMetric | None = None,
+    ) -> ProviderHybridProbeResult: ...
 
     async def close(self) -> None: ...
 

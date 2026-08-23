@@ -31,6 +31,7 @@ from pufferlab.providers.types import (
     ProviderDeleteResult,
     ProviderDocument,
     ProviderDocumentIdInventory,
+    ProviderHybridProbeResult,
     ProviderNamespaceMetadata,
     ProviderQueryResult,
     ProviderSchema,
@@ -45,6 +46,8 @@ class _AsyncNamespace(Protocol):
     async def write(self, **kwargs: object) -> object: ...
 
     async def query(self, **kwargs: object) -> object: ...
+
+    async def multi_query(self, **kwargs: object) -> object: ...
 
     async def metadata(self, **kwargs: object) -> object: ...
 
@@ -208,6 +211,122 @@ class TurbopufferProvider:
             operation="query_ann",
         )
 
+    async def query_hybrid_rrf(
+        self,
+        *,
+        namespace: str,
+        text_attribute: str,
+        query_text: str,
+        vector_attribute: str,
+        query_vector: Sequence[float],
+        candidate_k: int,
+        result_k: int,
+        include_attributes: Sequence[str],
+        rank_constant: int,
+        weights: tuple[float, float],
+        filters: FilterNode | None = None,
+        consistency: ConsistencyLevel = "strong",
+        distance_metric: DistanceMetric | None = None,
+    ) -> ProviderQueryResult:
+        """Execute production hybrid retrieval as one same-snapshot server RRF call."""
+
+        queries = self._hybrid_subqueries(
+            text_attribute=text_attribute,
+            query_text=query_text,
+            vector_attribute=vector_attribute,
+            query_vector=query_vector,
+            candidate_k=candidate_k,
+            include_attributes=include_attributes,
+            filters=filters,
+            distance_metric=distance_metric,
+        )
+        provider_namespace = self._namespace(namespace)
+        start = self._clock()
+        response = await _call_sdk(
+            provider_namespace.multi_query(
+                queries=queries,
+                consistency={"level": consistency},
+                limit={"total": result_k},
+                rerank_by=(
+                    "RRF",
+                    {
+                        "rank_constant": rank_constant,
+                        "weights": list(weights),
+                    },
+                ),
+            ),
+            operation="query_hybrid_rrf",
+        )
+        result_rows = _multi_query_rows(response, expected_results=1)
+        documents = tuple(
+            _row_to_document(
+                row,
+                score_kind=ScoreKind.RRF,
+                vector_attributes=(vector_attribute,),
+            )
+            for row in result_rows[0]
+        )
+        return ProviderQueryResult(
+            documents=documents,
+            client_duration_ms=_elapsed_ms(start, self._clock()),
+        )
+
+    async def probe_hybrid_candidates(
+        self,
+        *,
+        namespace: str,
+        text_attribute: str,
+        query_text: str,
+        vector_attribute: str,
+        query_vector: Sequence[float],
+        candidate_k: int,
+        include_attributes: Sequence[str],
+        filters: FilterNode | None = None,
+        consistency: ConsistencyLevel = "strong",
+        distance_metric: DistanceMetric | None = None,
+    ) -> ProviderHybridProbeResult:
+        """Return raw hybrid lists through a separate, explicitly debug-only request."""
+
+        queries = self._hybrid_subqueries(
+            text_attribute=text_attribute,
+            query_text=query_text,
+            vector_attribute=vector_attribute,
+            query_vector=query_vector,
+            candidate_k=candidate_k,
+            include_attributes=include_attributes,
+            filters=filters,
+            distance_metric=distance_metric,
+        )
+        provider_namespace = self._namespace(namespace)
+        start = self._clock()
+        response = await _call_sdk(
+            provider_namespace.multi_query(
+                queries=queries,
+                consistency={"level": consistency},
+            ),
+            operation="probe_hybrid_candidates",
+        )
+        bm25_rows, ann_rows = _multi_query_rows(response, expected_results=2)
+        return ProviderHybridProbeResult(
+            bm25_documents=tuple(
+                _row_to_document(
+                    row,
+                    score_kind=ScoreKind.BM25,
+                    vector_attributes=(vector_attribute,),
+                )
+                for row in bm25_rows
+            ),
+            ann_documents=tuple(
+                _row_to_document(
+                    row,
+                    score_kind=ScoreKind.VECTOR_DISTANCE,
+                    vector_attributes=(vector_attribute,),
+                )
+                for row in ann_rows
+            ),
+            client_duration_ms=_elapsed_ms(start, self._clock()),
+        )
+
     async def namespace_metadata(self, namespace: str) -> ProviderNamespaceMetadata:
         provider_namespace = self._namespace(namespace)
         start = self._clock()
@@ -324,6 +443,36 @@ class TurbopufferProvider:
         return self._namespaces[namespace]
 
     @staticmethod
+    def _hybrid_subqueries(
+        *,
+        text_attribute: str,
+        query_text: str,
+        vector_attribute: str,
+        query_vector: Sequence[float],
+        candidate_k: int,
+        include_attributes: Sequence[str],
+        filters: FilterNode | None,
+        distance_metric: DistanceMetric | None,
+    ) -> list[dict[str, object]]:
+        common: dict[str, object] = {
+            "limit": candidate_k,
+            "include_attributes": list(include_attributes),
+        }
+        if filters is not None:
+            common["filters"] = filter_to_turbopuffer(filters)
+        lexical = {
+            **common,
+            "rank_by": (text_attribute, "BM25", query_text),
+        }
+        vector = {
+            **common,
+            "rank_by": (vector_attribute, "ANN", list(query_vector)),
+        }
+        if distance_metric is not None:
+            vector["distance_metric"] = distance_metric
+        return [lexical, vector]
+
+    @staticmethod
     def _query_kwargs(
         *,
         rank_by: tuple[object, ...],
@@ -383,6 +532,28 @@ def _row_id(row: object) -> str | int:
     if not isinstance(document_id, str | int) or isinstance(document_id, bool):
         raise ValueError("turbopuffer row is missing a valid id")
     return document_id
+
+
+def _multi_query_rows(
+    response: object,
+    *,
+    expected_results: int,
+) -> tuple[tuple[object, ...], ...]:
+    results = getattr(response, "results", None)
+    if not isinstance(results, Sequence) or isinstance(results, str | bytes | bytearray):
+        raise ValueError("turbopuffer multi-query response is missing results")
+    if len(results) != expected_results:
+        raise ValueError("turbopuffer multi-query returned an unexpected result count")
+    result_rows: list[tuple[object, ...]] = []
+    for result in results:
+        rows = getattr(result, "rows", None)
+        if rows is None:
+            result_rows.append(())
+        elif isinstance(rows, Sequence) and not isinstance(rows, str | bytes | bytearray):
+            result_rows.append(tuple(rows))
+        else:
+            raise ValueError("turbopuffer multi-query returned invalid rows")
+    return tuple(result_rows)
 
 
 def _object_to_mapping(value: object) -> dict[str, object]:

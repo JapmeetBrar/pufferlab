@@ -11,6 +11,12 @@ from pufferlab.contracts.search import SearchCompareRequest, SearchCompareRespon
 from pufferlab.datasets.loader import load_fixture_corpus
 from pufferlab.datasets.models import DatasetManifest
 from pufferlab.datasets.schema import compile_namespace_write_spec
+from pufferlab.providers.rerankers import (
+    DEFAULT_RERANKER_MODEL,
+    DEFAULT_RERANKER_REVISION,
+    Reranker,
+    SentenceTransformersReranker,
+)
 from pufferlab.providers.turbopuffer import TurbopufferProvider
 from pufferlab.retrieval.config import SearchConfigCatalog, build_search_catalog
 from pufferlab.retrieval.embeddings import SentenceTransformerQueryEmbedder
@@ -34,6 +40,10 @@ class _EmbedderFactory(Protocol):
     ) -> QueryEmbedder: ...
 
 
+class _RerankerFactory(Protocol):
+    def __call__(self, *, model: str, revision: str) -> Reranker: ...
+
+
 class RuntimeSearchBackend:
     """Expose config discovery eagerly and initialize network/model clients on first compare."""
 
@@ -44,6 +54,7 @@ class RuntimeSearchBackend:
         manifest: DatasetManifest,
         provider_factory: _ProviderFactory | None = None,
         embedder_factory: _EmbedderFactory | None = None,
+        reranker_factory: _RerankerFactory | None = None,
     ) -> None:
         self._settings = settings
         self._manifest = manifest
@@ -54,6 +65,7 @@ class RuntimeSearchBackend:
         self._embedder_factory: _EmbedderFactory = (
             embedder_factory or SentenceTransformerQueryEmbedder
         )
+        self._reranker_factory: _RerankerFactory = reranker_factory or SentenceTransformersReranker
         self._service: SearchCompareService | None = None
         self._service_lock = asyncio.Lock()
         self._closed = False
@@ -110,12 +122,17 @@ class RuntimeSearchBackend:
                 api_key=secret,
                 region=self._settings.turbopuffer_region,
             )
+            reranker = self._reranker_factory(
+                model=DEFAULT_RERANKER_MODEL,
+                revision=DEFAULT_RERANKER_REVISION,
+            )
             service = SearchCompareService(
                 namespace=namespace,
                 catalog=self._catalog,
                 write_spec=self._write_spec,
                 provider=provider,
                 query_embedder=embedder,
+                reranker=reranker,
             )
         except Exception:
             failure = search_unavailable()
