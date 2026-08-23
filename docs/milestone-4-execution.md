@@ -132,9 +132,10 @@ The response reports a `live_playground` capability with:
 
 - state `locally_configured` or `action_required`;
 - a deterministic ordered list drawn only from `api_key`, `search_namespace`, `region`,
-  `live_search_runtime`, `owned_tiny_credential_mismatch`, and
-  `owned_tiny_region_mismatch`; the receipt mismatch codes apply only when an authenticated fixed
-  receipt's exact namespace is the configured Playground namespace;
+  `live_search_runtime`, `owned_tiny_receipt_invalid`, `owned_tiny_credential_mismatch`, and
+  `owned_tiny_region_mismatch`; invalid fixed receipt bytes fail closed, while credential/region
+  mismatch codes apply only when an authenticated receipt's exact namespace is the configured
+  Playground namespace;
 - an allowlisted next-action code used by the frontend to render checked-in instructions.
 
 It never returns the key, namespace, region, environment-file path, data-directory path, model
@@ -168,9 +169,12 @@ changing database mtime; evaluation inspection opens an already existing databas
 versions are action-required rather than guessed. It resolves every target namespace from an
 authenticated fixed tiny receipt or SQLite dataset row, never from a raw namespace argument.
 `--live` is an explicit, potentially billable metadata-only check; it makes at most one metadata
-request per selected target, performs no write, document search/retrieval query, create, or delete,
-closes the provider under success/error/cancellation, and reports only `metadata_reachable` plus
-`index_up_to_date` or `index_updating`. A blank region is a local configuration failure. Receipt
+request per selected target by constructing the pinned turbopuffer client with `max_retries=0` and
+never wrapping it in application retries. Retryable status, transport, timeout, and close failures
+therefore still produce exactly one outbound attempt. The check performs no write, document
+search/retrieval query, create, or delete, closes the provider under success/error/cancellation, and
+reports only `metadata_reachable` plus `index_up_to_date` or `index_updating`. A blank region is a
+local configuration failure. Receipt
 corruption, credential mismatch, and current-region mismatch are distinct allowlisted
 action-required codes and never expose either value. These states do not prove schema, exact corpus
 identity, authentication for other operations, or working BM25/ANN retrieval.
@@ -437,8 +441,9 @@ cleanup and the gate CLI. M4-G is the single goal-finalization PR.
   database/directory/sidecar creation, migration, recovery, write, byte change, or mtime change;
   `serve` intentionally retains the existing API startup migration/recovery semantics;
   action-required state precedes provider factories; optional metadata-only live check closes under
-  every exit; stable outputs/exits and exact redaction attacks pass; serve is loopback-only and
-  fixes one worker.
+  every exit and proves one outbound attempt under retryable status/transport/timeout failures;
+  stable outputs/exits and exact redaction attacks pass; serve is loopback-only and fixes one
+  worker.
 
 ### M4-C — Owned tiny lifecycle
 
