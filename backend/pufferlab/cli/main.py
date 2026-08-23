@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import io
 import sys
 from collections.abc import Callable, Sequence
+from contextlib import redirect_stderr
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, TextIO
 from uuid import UUID, uuid4
+
+from pydantic import ValidationError
 
 from pufferlab.cli.evaluation import (
     CliApplication,
@@ -26,6 +30,7 @@ from pufferlab.cli.evaluation import (
     validate_export_destination,
     write_canonical_export,
 )
+from pufferlab.cli.gates import GateCliExecution, run_gate_cli
 from pufferlab.cli.ingest import (
     IngestTinyOptions,
     TinyFixtureIngestor,
@@ -39,6 +44,7 @@ from pufferlab.cli.synthetic_demo import (
 from pufferlab.config import Settings
 from pufferlab.contracts.common import ContractModel
 from pufferlab.contracts.evals import EvalRun, EvalRunStatus
+from pufferlab.contracts.gates import GateMetricName, GatePolicy
 from pufferlab.datasets.ingestion import IngestionReport
 from pufferlab.synthetic_demo import SyntheticDemoSeedResult
 
@@ -64,6 +70,18 @@ class _SyntheticDemoSeedRunner(Protocol):
     def __call__(self, settings: Settings) -> SyntheticDemoSeedResult: ...
 
 
+class _GateRunner(Protocol):
+    def __call__(
+        self,
+        *,
+        database_path: Path,
+        run_id: UUID,
+        candidate_config_id: UUID,
+        policy: GatePolicy,
+        output_format: str,
+    ) -> GateCliExecution: ...
+
+
 class _EvaluationInterrupted(Exception):
     """Carry only safe, durable interrupt-cleanup state across ``asyncio.run``."""
 
@@ -87,6 +105,7 @@ def main(
     doctor_dependencies: DoctorDependencies | None = None,
     serve_dependencies: ServeDependencies | None = None,
     cli_application_factory: CliApplicationFactory | None = None,
+    gate_runner: _GateRunner | None = None,
     run_id_factory: Callable[[], UUID] = uuid4,
     stdout: TextIO | None = None,
     stderr: TextIO | None = None,
@@ -94,7 +113,33 @@ def main(
     output = stdout or sys.stdout
     error_output = stderr or sys.stderr
     parser = _parser()
-    arguments = parser.parse_args(argv)
+    raw_arguments = tuple(sys.argv[1:] if argv is None else argv)
+    if raw_arguments[:2] == ("eval", "gate"):
+        try:
+            with redirect_stderr(io.StringIO()):
+                arguments = parser.parse_args(raw_arguments)
+        except SystemExit as caught:
+            exit_code = caught.code
+            caught.__traceback__ = None
+            caught.__context__ = None
+            caught.__cause__ = None
+            del caught
+            raw_arguments = ()
+            argv = None
+            if exit_code == 0:
+                return 0
+            try:
+                error_output.write("error: invalid evaluation gate arguments\n")
+            except BaseException as write_error:
+                write_error.__traceback__ = None
+                write_error.__context__ = None
+                write_error.__cause__ = None
+                return 1
+            return 2
+        raw_arguments = ()
+        argv = None
+    else:
+        arguments = parser.parse_args(raw_arguments)
 
     if arguments.command == "serve":
         return _run_serve_command(
@@ -138,6 +183,15 @@ def main(
         return _run_synthetic_demo_seed(
             settings_factory=settings_factory,
             seed_runner=synthetic_demo_seed_runner,
+            output=output,
+            error_output=error_output,
+        )
+
+    if arguments.command == "eval" and arguments.eval_command == "gate":
+        return _run_gate_command(
+            arguments,
+            settings_factory=settings_factory,
+            gate_runner=gate_runner,
             output=output,
             error_output=error_output,
         )
@@ -251,6 +305,65 @@ def _run_synthetic_demo_seed(
         print("error: synthetic demo seed failed", file=error_output)
         return 1
     return 0
+
+
+def _run_gate_command(
+    arguments: argparse.Namespace,
+    *,
+    settings_factory: Callable[[], Settings],
+    gate_runner: _GateRunner | None,
+    output: TextIO,
+    error_output: TextIO,
+) -> int:
+    database_path = Path()
+    try:
+        settings = settings_factory()
+        database_path = settings.database_path
+        del settings
+        execution = (gate_runner or run_gate_cli)(
+            database_path=database_path,
+            run_id=arguments.run_id,
+            candidate_config_id=arguments.candidate,
+            policy=GatePolicy(
+                metric=arguments.metric,
+                min_delta=arguments.min_delta,
+                max_query_drop=arguments.max_query_drop,
+                max_error_rate=arguments.max_error_rate,
+                min_paired_queries=arguments.min_paired_queries,
+            ),
+            output_format=arguments.format,
+        )
+    except ValidationError as caught:
+        caught.__traceback__ = None
+        caught.__context__ = None
+        caught.__cause__ = None
+        execution = GateCliExecution(
+            exit_code=2,
+            error_lines=("error: evaluation gate policy or evidence is invalid",),
+        )
+    except BaseException as caught:
+        caught.__traceback__ = None
+        caught.__context__ = None
+        caught.__cause__ = None
+        execution = GateCliExecution(
+            exit_code=1,
+            error_lines=("error: evaluation gate failed",),
+        )
+    database_path = Path()
+    if execution.output_lines:
+        stream = output
+        payload = "\n".join(execution.output_lines) + "\n"
+    else:
+        stream = error_output
+        payload = "\n".join(execution.error_lines) + "\n"
+    try:
+        stream.write(payload)
+        return execution.exit_code
+    except BaseException as caught:
+        caught.__traceback__ = None
+        caught.__context__ = None
+        caught.__cause__ = None
+        return 1
 
 
 def _run_doctor_command(
@@ -599,6 +712,7 @@ def _parser() -> argparse.ArgumentParser:
     evaluation_commands = evaluation.add_subparsers(dest="eval_command", required=True)
     _add_eval_run_parser(evaluation_commands)
     _add_eval_export_parser(evaluation_commands)
+    _add_eval_gate_parser(evaluation_commands)
 
     demo = commands.add_parser("demo", help="Manage the provider-free offline dashboard demo.")
     demo_commands = demo.add_subparsers(dest="demo_command", required=True)
@@ -806,6 +920,34 @@ def _add_eval_export_parser(commands: argparse._SubParsersAction[argparse.Argume
     )
 
 
+def _add_eval_gate_parser(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    gate = commands.add_parser(
+        "gate",
+        help="Evaluate one completed durable run against a finite quality policy.",
+        description=(
+            "Authenticate and recompute one completed 50-query evaluation from an existing "
+            "read-only SQLite catalog. No provider, model, migration, recovery, or write runs."
+        ),
+    )
+    gate.add_argument("run_id", type=_uuid, help="Completed durable evaluation run UUID.")
+    gate.add_argument(
+        "--candidate",
+        type=_uuid,
+        required=True,
+        help="One of the run's three immutable candidate config UUIDs.",
+    )
+    gate.add_argument(
+        "--metric",
+        type=_gate_metric,
+        default=GateMetricName.NDCG_AT_10,
+    )
+    gate.add_argument("--min-delta", type=_gate_float, default=0.0)
+    gate.add_argument("--max-query-drop", type=_gate_float, default=0.2)
+    gate.add_argument("--max-error-rate", type=_gate_float, default=0.0)
+    gate.add_argument("--min-paired-queries", type=_gate_int, default=50)
+    gate.add_argument("--format", type=_gate_format, default="text")
+
+
 def _failure_message(arguments: argparse.Namespace) -> str:
     if arguments.command == "dataset":
         return "Unix dataset ingestion failed"
@@ -841,6 +983,33 @@ def _uuid(value: str) -> UUID:
         return UUID(value)
     except ValueError:
         raise argparse.ArgumentTypeError("must be a UUID") from None
+
+
+def _gate_metric(value: str) -> GateMetricName:
+    try:
+        return GateMetricName(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("must be ndcg@10, recall@50, or mrr@10") from None
+
+
+def _gate_format(value: str) -> str:
+    if value not in {"text", "json"}:
+        raise argparse.ArgumentTypeError("must be text or json")
+    return value
+
+
+def _gate_float(value: str) -> float:
+    try:
+        return float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("must be a number") from None
+
+
+def _gate_int(value: str) -> int:
+    try:
+        return int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("must be an integer") from None
 
 
 def _serve_host(value: str) -> str:
