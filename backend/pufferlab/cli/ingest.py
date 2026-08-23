@@ -118,6 +118,14 @@ class _WriterFactory(Protocol):
     def __call__(self, provider: _IngestionProvider) -> NamespaceWriter: ...
 
 
+@dataclass(frozen=True, slots=True)
+class _BoundIngestionOutcome:
+    report: IngestionReport | None = None
+    failure: str | None = None
+    exit_code: int = 1
+    cancelled: bool = False
+
+
 class _ContinuityCheckedIngestionProvider:
     def __init__(
         self,
@@ -216,6 +224,37 @@ class TinyFixtureIngestor:
         *,
         emit: Callable[[str], None],
     ) -> IngestionReport:
+        outcome = await self._execute_run_outcome(settings, options, emit=emit)
+        self = None  # type: ignore[assignment]
+        settings = None  # type: ignore[assignment]
+        options = None  # type: ignore[assignment]
+        emit = None  # type: ignore[assignment]
+        return _finish_bound_ingestion(outcome)
+
+    async def _execute_run_outcome(
+        self,
+        settings: Settings,
+        options: IngestTinyOptions,
+        *,
+        emit: Callable[[str], None],
+    ) -> _BoundIngestionOutcome:
+        try:
+            report = await self._run_ingestion(settings, options, emit=emit)
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            return _BoundIngestionOutcome(cancelled=True)
+        except TinyIngestionCommandError as error:
+            return _BoundIngestionOutcome(failure=str(error), exit_code=error.exit_code)
+        except BaseException:
+            return _BoundIngestionOutcome(failure="tiny fixture ingestion runtime failed")
+        return _BoundIngestionOutcome(report=report)
+
+    async def _run_ingestion(
+        self,
+        settings: Settings,
+        options: IngestTinyOptions,
+        *,
+        emit: Callable[[str], None],
+    ) -> IngestionReport:
         corpus = _load_corpus(settings)
         write_spec = compile_namespace_write_spec(corpus.manifest)
         api_key = _required_api_key(settings)
@@ -229,7 +268,7 @@ class TinyFixtureIngestor:
             )
         if options.namespace is not None:
             namespace = resolve_owned_namespace(options.namespace)
-            execution = self._run_bound_ingestion(
+            explicit_outcome = await self._run_bound_ingestion(
                 corpus=corpus,
                 api_key=api_key,
                 region=current_region,
@@ -239,9 +278,11 @@ class TinyFixtureIngestor:
                 emit=emit,
             )
             api_key = ""
-            return await execution
+            namespace = ""
+            return _finish_bound_ingestion(explicit_outcome)
 
         state_failure: tuple[str, int] | None = None
+        outcome: _BoundIngestionOutcome | None = None
         try:
             with owned_tiny_ingest_operation() as operation:
                 snapshot = operation.load(required=False)
@@ -266,7 +307,7 @@ class TinyFixtureIngestor:
                     if current.receipt.state is OwnedTinyState.INTENT:
                         current = operation.transition(current, OwnedTinyState.CREATED)
 
-                execution = self._run_bound_ingestion(
+                outcome = await self._run_bound_ingestion(
                     corpus=corpus,
                     api_key=api_key,
                     region=snapshot.receipt.creating_region,
@@ -278,16 +319,14 @@ class TinyFixtureIngestor:
                     before_provider=lambda: operation.authenticate_current(current),
                 )
                 api_key = ""
-                report = await execution
-                if current.receipt.state is OwnedTinyState.INTENT:
+                if outcome.report is not None and current.receipt.state is OwnedTinyState.INTENT:
                     raise TinyIngestionCommandError(
                         "tiny fixture ingestion finished without a confirmed namespace write"
                     )
-                if current.receipt.state is OwnedTinyState.CREATED:
+                if outcome.report is not None and current.receipt.state is OwnedTinyState.CREATED:
                     current = operation.transition(current, OwnedTinyState.READY)
-                if current.receipt.state is not OwnedTinyState.READY:
+                if outcome.report is not None and current.receipt.state is not OwnedTinyState.READY:
                     raise TinyIngestionCommandError("owned tiny receipt did not reach readiness")
-                return report
         except TinyIngestionCommandError:
             raise
         except OwnedTinyStateError as error:
@@ -295,7 +334,11 @@ class TinyFixtureIngestor:
             state_failure = (str(error), error.exit_code)
         if state_failure is not None:
             raise TinyIngestionCommandError(state_failure[0], exit_code=state_failure[1]) from None
-        raise AssertionError("owned tiny ingestion did not produce a report")
+        assert outcome is not None
+        snapshot = None
+        current = None  # type: ignore[assignment]
+        operation = None  # type: ignore[assignment]
+        return _finish_bound_ingestion(outcome)
 
     async def _run_bound_ingestion(
         self,
@@ -309,20 +352,19 @@ class TinyFixtureIngestor:
         emit: Callable[[str], None],
         on_checkpoint: Callable[[IngestionCheckpoint], None] | None = None,
         before_provider: Callable[[], None] | None = None,
-    ) -> IngestionReport:
-        _emit_plan(
-            emit,
-            corpus=corpus,
-            region=region,
-            namespace=namespace,
-            write_spec=write_spec,
-        )
-
+    ) -> _BoundIngestionOutcome:
         provider: _IngestionProvider | None = None
         report: IngestionReport | None = None
-        failure: TinyIngestionCommandError | None = None
+        failure: str | None = None
         cancelled = False
         try:
+            _emit_plan(
+                emit,
+                corpus=corpus,
+                region=region,
+                namespace=namespace,
+                write_spec=write_spec,
+            )
             embedder = self._embedder_factory(
                 model=corpus.manifest.embedding.model,
                 revision=corpus.manifest.embedding.revision,
@@ -356,47 +398,52 @@ class TinyFixtureIngestor:
             )
         except asyncio.CancelledError:
             cancelled = True
+        except KeyboardInterrupt:
+            cancelled = True
         except IngestionError:
-            failure = TinyIngestionCommandError(
-                "tiny fixture ingestion failed before readiness was verified"
-            )
-        except Exception:
-            failure = TinyIngestionCommandError("tiny fixture ingestion runtime failed")
+            failure = "tiny fixture ingestion failed before readiness was verified"
+        except BaseException:
+            failure = "tiny fixture ingestion runtime failed"
         finally:
             if provider is not None:
-                close_failed, close_cancelled = await _drain_provider_close(provider)
-                cancelled = cancelled or close_cancelled
-                if close_failed and failure is None:
-                    failure = TinyIngestionCommandError(
-                        "tiny fixture ingestion runtime did not close cleanly"
-                    )
+                close_control = await _drain_provider_close(provider)
+                cancelled = cancelled or close_control.cancelled
+                if (
+                    (close_control.failed or close_control.internal_failure)
+                    and failure is None
+                    and not cancelled
+                ):
+                    failure = "tiny fixture ingestion runtime did not close cleanly"
                 provider = None
 
-        if cancelled:
-            api_key = ""
-            _raise_ingest_cancelled()
-        if failure is not None:
-            api_key = ""
-            raise failure from None
         api_key = ""
+        if cancelled:
+            return _BoundIngestionOutcome(cancelled=True)
+        if failure is not None:
+            return _BoundIngestionOutcome(failure=failure)
         assert report is not None
-        readiness = report.readiness
-        assert readiness is not None
-        exact_document_ids = len(readiness.document_ids) == len(corpus.documents)
-        emit(
-            f"verified remote_documents={readiness.document_count} "
-            f"exact_document_ids={str(exact_document_ids).lower()} "
-            f"observed_schema_hash={readiness.schema_hash} "
-            f"distance_metric={corpus.manifest.vector.distance_metric} "
-            f"metadata_ready={str(readiness.metadata_ready).lower()} "
-            f"indexes_ready={str(readiness.indexes_ready).lower()}"
-        )
-        emit(
-            f"ready namespace={report.namespace} documents={report.documents_completed} "
-            f"schema_hash={report.schema_hash}"
-        )
-        emit(f"PUFFERLAB_SEARCH_NAMESPACE={report.namespace}")
-        return report
+        try:
+            readiness = report.readiness
+            assert readiness is not None
+            exact_document_ids = len(readiness.document_ids) == len(corpus.documents)
+            emit(
+                f"verified remote_documents={readiness.document_count} "
+                f"exact_document_ids={str(exact_document_ids).lower()} "
+                f"observed_schema_hash={readiness.schema_hash} "
+                f"distance_metric={corpus.manifest.vector.distance_metric} "
+                f"metadata_ready={str(readiness.metadata_ready).lower()} "
+                f"indexes_ready={str(readiness.indexes_ready).lower()}"
+            )
+            emit(
+                f"ready namespace={report.namespace} documents={report.documents_completed} "
+                f"schema_hash={report.schema_hash}"
+            )
+            emit(f"PUFFERLAB_SEARCH_NAMESPACE={report.namespace}")
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            return _BoundIngestionOutcome(cancelled=True)
+        except BaseException:
+            return _BoundIngestionOutcome(failure="tiny fixture ingestion runtime failed")
+        return _BoundIngestionOutcome(report=report)
 
 
 class _CompactProgress:
@@ -511,29 +558,65 @@ def _sentence_transformers_available() -> bool:
     return importlib.util.find_spec("sentence_transformers") is not None
 
 
-async def _drain_provider_close(provider: _IngestionProvider) -> tuple[bool, bool]:
+@dataclass(frozen=True, slots=True)
+class _IngestionCloseControl:
+    failed: bool
+    cancelled: bool = False
+    internal_failure: bool = False
+
+
+async def _capture_provider_close(provider: _IngestionProvider) -> _IngestionCloseControl:
     try:
-        close_task = asyncio.create_task(provider.close())
-    except Exception:
-        return True, False
+        await provider.close()
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        return _IngestionCloseControl(failed=True, cancelled=True)
+    except BaseException:
+        return _IngestionCloseControl(failed=True, internal_failure=True)
+    return _IngestionCloseControl(failed=False)
+
+
+async def _drain_provider_close(provider: _IngestionProvider) -> _IngestionCloseControl:
+    close_coroutine = _capture_provider_close(provider)
+    try:
+        close_task = asyncio.create_task(close_coroutine)
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        close_coroutine.close()
+        return _IngestionCloseControl(failed=True, cancelled=True)
+    except BaseException:
+        close_coroutine.close()
+        return _IngestionCloseControl(failed=True, internal_failure=True)
     cancelled = False
+    internal_failure = False
     while not close_task.done():
         try:
             await asyncio.shield(close_task)
-        except asyncio.CancelledError:
+        except (KeyboardInterrupt, asyncio.CancelledError):
             cancelled = True
-        except Exception:
-            break
-    close_failed = False
+        except BaseException:
+            internal_failure = True
     try:
-        close_task.result()
-    except asyncio.CancelledError:
+        result = close_task.result()
+    except (KeyboardInterrupt, asyncio.CancelledError):
         cancelled = True
-        close_failed = True
-    except Exception:
-        close_failed = True
-    return close_failed, cancelled
+        result = _IngestionCloseControl(failed=True, cancelled=True)
+    except BaseException:
+        internal_failure = True
+        result = _IngestionCloseControl(failed=True, internal_failure=True)
+    return _IngestionCloseControl(
+        failed=result.failed or cancelled or internal_failure,
+        cancelled=result.cancelled or cancelled,
+        internal_failure=result.internal_failure or internal_failure,
+    )
 
 
 def _raise_ingest_cancelled() -> NoReturn:
     raise asyncio.CancelledError() from None
+
+
+def _finish_bound_ingestion(outcome: _BoundIngestionOutcome) -> IngestionReport:
+    if outcome.cancelled:
+        _raise_ingest_cancelled()
+    if outcome.failure is not None:
+        raise TinyIngestionCommandError(outcome.failure, exit_code=outcome.exit_code) from None
+    assert outcome.report is not None
+    return outcome.report

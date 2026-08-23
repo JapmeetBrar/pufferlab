@@ -338,6 +338,9 @@ def _run_tiny_ingest(
     except (KeyboardInterrupt, asyncio.CancelledError):
         print("error: tiny fixture ingestion cancelled", file=error_output)
         return 130
+    except SystemExit:
+        print("error: tiny fixture ingestion failed", file=error_output)
+        return 1
     except TinyIngestionCommandError as error:
         print(f"error: {error}", file=error_output)
         return error.exit_code
@@ -375,6 +378,9 @@ def _run_namespace_command(
     except (KeyboardInterrupt, asyncio.CancelledError):
         print("error: namespace command cancelled", file=error_output)
         return 130
+    except SystemExit:
+        print("error: namespace command failed", file=error_output)
+        return 1
     except NamespaceCommandError as error:
         print(f"error: {error}", file=error_output)
         return error.exit_code

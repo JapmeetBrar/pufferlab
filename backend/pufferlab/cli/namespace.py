@@ -70,7 +70,29 @@ async def cleanup_owned_tiny(
 ) -> None:
     """Delete and verify absence of only the exact authenticated fixed receipt target."""
 
-    state_failure: tuple[str, int] | None = None
+    outcome = await _execute_cleanup_owned_tiny(settings, emit=emit)
+    settings = settings.model_copy(update={"turbopuffer_api_key": None})
+    if outcome.cancelled:
+        _raise_cancelled()
+    if outcome.message is not None:
+        _raise_namespace_outcome(outcome)
+
+
+@dataclass(frozen=True, slots=True)
+class _NamespaceOutcome:
+    message: str | None = None
+    exit_code: int = 0
+    cancelled: bool = False
+
+
+async def _execute_cleanup_owned_tiny(
+    settings: Settings,
+    *,
+    emit: Callable[[str], None],
+) -> _NamespaceOutcome:
+    """Return only a value-free result after all authority and provider frames unwind."""
+
+    api_key = ""
     try:
         with owned_tiny_existing_operation() as operation:
             snapshot = operation.load(required=True)
@@ -78,26 +100,31 @@ async def cleanup_owned_tiny(
             if snapshot.receipt.state is OwnedTinyState.NOT_FOUND_VERIFIED:
                 operation.remove_terminal(snapshot)
                 _emit_cleanup_complete(emit)
-                return
+                return _NamespaceOutcome()
 
             secret = settings.turbopuffer_api_key
             if secret is None:
-                raise NamespaceCommandError(
-                    "TURBOPUFFER_API_KEY is required for owned tiny cleanup",
+                return _NamespaceOutcome(
+                    message="TURBOPUFFER_API_KEY is required for owned tiny cleanup",
                     exit_code=2,
                 )
-            api_key = ""
             key_failed = False
+            key_cancelled = False
             try:
                 api_key = secret.get_secret_value()
-            except Exception:
+            except (KeyboardInterrupt, asyncio.CancelledError):
+                key_cancelled = True
+            except BaseException:
                 key_failed = True
             secret = None
             settings = settings.model_copy(update={"turbopuffer_api_key": None})
+            if key_cancelled:
+                api_key = ""
+                return _NamespaceOutcome(cancelled=True)
             if key_failed or not api_key:
                 api_key = ""
-                raise NamespaceCommandError(
-                    "TURBOPUFFER_API_KEY is required for owned tiny cleanup",
+                return _NamespaceOutcome(
+                    message="TURBOPUFFER_API_KEY is required for owned tiny cleanup",
                     exit_code=2,
                 )
             operation.require_credential(snapshot, api_key)
@@ -110,59 +137,100 @@ async def cleanup_owned_tiny(
                 snapshot = operation.transition(snapshot, OwnedTinyState.CLEANUP_REQUESTED)
             elif snapshot.receipt.state is not OwnedTinyState.CLEANUP_REQUESTED:
                 api_key = ""
-                raise NamespaceCommandError("owned tiny cleanup state is invalid")
+                return _NamespaceOutcome(message="owned tiny cleanup state is invalid", exit_code=1)
 
             operation.authenticate_current(snapshot)
             provider: _CleanupProvider | None = None
+            provider_started = False
             factory_failed = False
+            factory_cancelled = False
+            control = _CleanupControl(succeeded=False)
+            close_control = _CloseControl(failed=False)
             try:
-                provider = _PROVIDER_FACTORY(
-                    api_key=api_key,
-                    region=snapshot.receipt.creating_region,
-                )
-            except Exception:
-                factory_failed = True
-            api_key = ""
-            if factory_failed or provider is None:
-                raise NamespaceCommandError("owned tiny cleanup provider could not start")
+                try:
+                    provider = _PROVIDER_FACTORY(
+                        api_key=api_key,
+                        region=snapshot.receipt.creating_region,
+                    )
+                    provider_started = provider is not None
+                except (KeyboardInterrupt, asyncio.CancelledError):
+                    factory_cancelled = True
+                except BaseException:
+                    factory_failed = True
+                api_key = ""
+                if provider is not None:
+                    cleanup_snapshot = snapshot
+                    try:
+                        control = await _delete_and_verify(
+                            provider,
+                            namespace=snapshot.receipt.namespace,
+                            before_provider_action=lambda: operation.authenticate_current(
+                                cleanup_snapshot
+                            ),
+                        )
+                    except (KeyboardInterrupt, asyncio.CancelledError):
+                        control = _CleanupControl(succeeded=False, cancelled=True)
+                    except BaseException:
+                        control = _CleanupControl(succeeded=False, internal_failure=True)
+            finally:
+                api_key = ""
+                if provider is not None:
+                    close_control = await _drain_close(provider)
+                    provider = None
 
-            cleanup_snapshot = snapshot
-            control = await _delete_verify_and_close(
-                provider,
-                namespace=snapshot.receipt.namespace,
-                before_provider_action=lambda: operation.authenticate_current(cleanup_snapshot),
-            )
-            provider = None
+            if factory_cancelled:
+                return _NamespaceOutcome(cancelled=True)
+            if factory_failed or not provider_started:
+                if close_control.cancelled:
+                    return _NamespaceOutcome(cancelled=True)
+                return _NamespaceOutcome(
+                    message="owned tiny cleanup provider could not start",
+                    exit_code=1,
+                )
             if control.cancelled:
-                _raise_cancelled()
-            if not control.succeeded:
-                raise NamespaceCommandError("owned tiny cleanup was not verified")
+                return _NamespaceOutcome(cancelled=True)
+            if control.internal_failure:
+                return _NamespaceOutcome(
+                    message="owned tiny cleanup was not verified",
+                    exit_code=1,
+                )
+            if close_control.cancelled:
+                return _NamespaceOutcome(cancelled=True)
+            if close_control.internal_failure or close_control.failed or not control.succeeded:
+                return _NamespaceOutcome(
+                    message="owned tiny cleanup was not verified",
+                    exit_code=1,
+                )
 
             snapshot = operation.transition(snapshot, OwnedTinyState.NOT_FOUND_VERIFIED)
             operation.remove_terminal(snapshot)
             _emit_cleanup_complete(emit)
-    except NamespaceCommandError:
-        raise
+            return _NamespaceOutcome()
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        api_key = ""
+        return _NamespaceOutcome(cancelled=True)
     except OwnedTinyCredentialMismatchError as error:
         api_key = ""
-        state_failure = (str(error), error.exit_code)
+        return _NamespaceOutcome(message=str(error), exit_code=error.exit_code)
     except OwnedTinyReceiptMissingError as error:
         api_key = ""
-        state_failure = (str(error), error.exit_code)
+        return _NamespaceOutcome(message=str(error), exit_code=error.exit_code)
     except OwnedTinyStateError as error:
         api_key = ""
-        state_failure = (str(error), error.exit_code)
-    if state_failure is not None:
-        raise NamespaceCommandError(state_failure[0], exit_code=state_failure[1]) from None
+        return _NamespaceOutcome(message=str(error), exit_code=error.exit_code)
+    except BaseException:
+        api_key = ""
+        return _NamespaceOutcome(message="owned tiny cleanup failed", exit_code=1)
 
 
 @dataclass(frozen=True, slots=True)
 class _CleanupControl:
     succeeded: bool
     cancelled: bool = False
+    internal_failure: bool = False
 
 
-async def _delete_verify_and_close(
+async def _delete_and_verify(
     provider: _CleanupProvider,
     *,
     namespace: str,
@@ -171,6 +239,7 @@ async def _delete_verify_and_close(
     succeeded = False
     cancelled = False
     operation_failed = False
+    internal_failure = False
     try:
         try:
             before_provider_action()
@@ -179,22 +248,24 @@ async def _delete_verify_and_close(
             if error.details.code is not ApiErrorCode.NOT_FOUND:
                 operation_failed = True
         if not operation_failed:
-            succeeded, verification_cancelled = await _verify_not_found(
+            verification = await _verify_not_found(
                 provider,
                 namespace=namespace,
                 before_provider_action=before_provider_action,
             )
-            cancelled = cancelled or verification_cancelled
-    except asyncio.CancelledError:
+            succeeded = verification.succeeded
+            cancelled = cancelled or verification.cancelled
+            internal_failure = internal_failure or verification.internal_failure
+    except (KeyboardInterrupt, asyncio.CancelledError):
         cancelled = True
-    except Exception:
+    except BaseException:
         operation_failed = True
+        internal_failure = True
 
-    close_failed, close_cancelled = await _drain_close(provider)
-    cancelled = cancelled or close_cancelled
     return _CleanupControl(
-        succeeded=succeeded and not operation_failed and not close_failed and not cancelled,
+        succeeded=(succeeded and not operation_failed and not cancelled and not internal_failure),
         cancelled=cancelled,
+        internal_failure=internal_failure,
     )
 
 
@@ -203,49 +274,78 @@ async def _verify_not_found(
     *,
     namespace: str,
     before_provider_action: Callable[[], None],
-) -> tuple[bool, bool]:
+) -> _CleanupControl:
     for attempt in range(_NOT_FOUND_ATTEMPTS):
         try:
             before_provider_action()
             await provider.namespace_metadata(namespace)
         except ProviderError as error:
             if error.details.code is ApiErrorCode.NOT_FOUND:
-                return True, False
-            return False, False
-        except asyncio.CancelledError:
-            return False, True
-        except Exception:
-            return False, False
+                return _CleanupControl(succeeded=True)
+            return _CleanupControl(succeeded=False)
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            return _CleanupControl(succeeded=False, cancelled=True)
+        except BaseException:
+            return _CleanupControl(succeeded=False, internal_failure=True)
         if attempt + 1 < _NOT_FOUND_ATTEMPTS:
             try:
                 await asyncio.sleep(_NOT_FOUND_POLL_INTERVAL)
-            except asyncio.CancelledError:
-                return False, True
-    return False, False
+            except (KeyboardInterrupt, asyncio.CancelledError):
+                return _CleanupControl(succeeded=False, cancelled=True)
+            except BaseException:
+                return _CleanupControl(succeeded=False, internal_failure=True)
+    return _CleanupControl(succeeded=False)
 
 
-async def _drain_close(provider: _CleanupProvider) -> tuple[bool, bool]:
+@dataclass(frozen=True, slots=True)
+class _CloseControl:
+    failed: bool
+    cancelled: bool = False
+    internal_failure: bool = False
+
+
+async def _capture_close(provider: _CleanupProvider) -> _CloseControl:
     try:
-        close_task = asyncio.create_task(provider.close())
-    except Exception:
-        return True, False
+        await provider.close()
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        return _CloseControl(failed=True, cancelled=True)
+    except BaseException:
+        return _CloseControl(failed=True, internal_failure=True)
+    return _CloseControl(failed=False)
+
+
+async def _drain_close(provider: _CleanupProvider) -> _CloseControl:
+    close_coroutine = _capture_close(provider)
+    try:
+        close_task = asyncio.create_task(close_coroutine)
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        close_coroutine.close()
+        return _CloseControl(failed=True, cancelled=True)
+    except BaseException:
+        close_coroutine.close()
+        return _CloseControl(failed=True, internal_failure=True)
     cancelled = False
+    internal_failure = False
     while not close_task.done():
         try:
             await asyncio.shield(close_task)
-        except asyncio.CancelledError:
+        except (KeyboardInterrupt, asyncio.CancelledError):
             cancelled = True
-        except Exception:
-            break
-    close_failed = False
+        except BaseException:
+            internal_failure = True
     try:
-        close_task.result()
-    except asyncio.CancelledError:
+        result = close_task.result()
+    except (KeyboardInterrupt, asyncio.CancelledError):
         cancelled = True
-        close_failed = True
-    except Exception:
-        close_failed = True
-    return close_failed, cancelled
+        result = _CloseControl(failed=True, cancelled=True)
+    except BaseException:
+        internal_failure = True
+        result = _CloseControl(failed=True, internal_failure=True)
+    return _CloseControl(
+        failed=result.failed or cancelled or internal_failure,
+        cancelled=result.cancelled or cancelled,
+        internal_failure=result.internal_failure or internal_failure,
+    )
 
 
 def _emit_cleanup_complete(emit: Callable[[str], None]) -> None:
@@ -254,3 +354,8 @@ def _emit_cleanup_complete(emit: Callable[[str], None]) -> None:
 
 def _raise_cancelled() -> None:
     raise asyncio.CancelledError() from None
+
+
+def _raise_namespace_outcome(outcome: _NamespaceOutcome) -> None:
+    assert outcome.message is not None
+    raise NamespaceCommandError(outcome.message, exit_code=outcome.exit_code) from None

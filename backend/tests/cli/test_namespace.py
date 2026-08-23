@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import os
 import traceback
 from pathlib import Path
 
@@ -77,7 +78,8 @@ class FakeCleanupProvider:
         self.close_calls = 0
         self.delete_error: BaseException | None = None
         self.metadata_outcomes: list[str] = ["not_found"]
-        self.close_error: Exception | None = None
+        self.metadata_error: BaseException | None = None
+        self.close_error: BaseException | None = None
 
     async def delete_namespace(self, namespace: str) -> ProviderDeleteResult:
         self.delete_calls.append(namespace)
@@ -87,6 +89,8 @@ class FakeCleanupProvider:
 
     async def namespace_metadata(self, namespace: str) -> ProviderNamespaceMetadata:
         self.metadata_calls.append(namespace)
+        if self.metadata_error is not None:
+            raise self.metadata_error
         outcome = self.metadata_outcomes.pop(0) if self.metadata_outcomes else "present"
         if outcome == "not_found":
             raise _provider_error(ApiErrorCode.NOT_FOUND)
@@ -181,6 +185,49 @@ def test_show_prints_only_exact_authenticated_assignments(isolated_state: Path) 
         f"PUFFERLAB_SEARCH_NAMESPACE={snapshot.receipt.namespace}",
     ]
     assert stderr.getvalue() == ""
+
+
+@pytest.mark.parametrize("control", [KeyboardInterrupt, SystemExit])
+@pytest.mark.parametrize("boundary", ["anchor", "state"])
+def test_show_process_control_at_directory_open_is_fixed_and_leak_free(
+    isolated_state: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    control: type[BaseException],
+    boundary: str,
+) -> None:
+    from pufferlab import owned_tiny
+
+    snapshot = _create_receipt()
+    target = isolated_state.parents[2] if boundary == "anchor" else isolated_state
+    target_inode = target.stat().st_ino
+    real_clear_nonblocking = owned_tiny._clear_nonblocking
+    marker = f"private-show-{boundary}-{control.__name__}-marker"
+    attacked = False
+
+    def interrupt_directory_open(fd: int) -> None:
+        nonlocal attacked
+        if not attacked and os.fstat(fd).st_ino == target_inode:
+            attacked = True
+            raise control(marker)
+        real_clear_nonblocking(fd)
+
+    monkeypatch.setattr(owned_tiny, "_clear_nonblocking", interrupt_directory_open)
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    descriptor_count = _open_descriptor_count()
+
+    exit_code = main(
+        ["namespace", "show-tiny"],
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    assert attacked
+    assert exit_code == (130 if control is KeyboardInterrupt else 1)
+    assert stdout.getvalue() == ""
+    assert marker not in stderr.getvalue()
+    assert snapshot.receipt.namespace not in stderr.getvalue()
+    assert _open_descriptor_count() == descriptor_count
 
 
 def test_cleanup_uses_receipt_region_exact_target_and_retains_owner_key(
@@ -420,6 +467,36 @@ def test_cleanup_rechecks_anchor_continuity_before_next_provider_action(
     assert receipt["state"] == OwnedTinyState.CLEANUP_REQUESTED.value
 
 
+def test_cleanup_rejects_account_home_anchor_swap_before_next_provider_action(
+    isolated_state: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _create_receipt()
+    anchor = isolated_state.parents[2]
+    relocated_anchor = anchor.parent / f"{anchor.name}-relocated"
+
+    class AnchorSwappingProvider(FakeCleanupProvider):
+        async def delete_namespace(self, namespace: str) -> ProviderDeleteResult:
+            result = await super().delete_namespace(namespace)
+            anchor.replace(relocated_anchor)
+            anchor.mkdir(mode=0o700)
+            anchor.chmod(0o700)
+            return result
+
+    provider = AnchorSwappingProvider()
+    _install_provider(monkeypatch, provider)
+
+    assert main(["namespace", "cleanup-tiny"], settings_factory=_settings) == 1
+    assert len(provider.delete_calls) == 1
+    assert provider.metadata_calls == []
+    assert provider.close_calls == 1
+    assert list(anchor.iterdir()) == []
+
+    anchor.rmdir()
+    relocated_anchor.replace(anchor)
+    assert _receipt_state() is OwnedTinyState.CLEANUP_REQUESTED
+
+
 def test_cancellation_closes_provider_and_retains_cleanup_requested(
     isolated_state: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -442,6 +519,163 @@ def test_cancellation_closes_provider_and_retains_cleanup_requested(
     assert provider.close_calls == 1
     assert _receipt_state() is OwnedTinyState.CLEANUP_REQUESTED
     assert stderr.getvalue() == "error: namespace command cancelled\n"
+
+
+@pytest.mark.parametrize("control", [KeyboardInterrupt, SystemExit])
+@pytest.mark.parametrize(
+    "phase",
+    ["factory", "handoff", "continuity", "delete", "metadata", "sleep", "close"],
+)
+def test_process_control_drains_cleanup_provider_once_and_returns_fixed_output(
+    isolated_state: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    control: type[BaseException],
+    phase: str,
+) -> None:
+    del isolated_state
+    _create_receipt()
+    provider = FakeCleanupProvider()
+    marker = f"private-{phase}-{control.__name__}-marker"
+
+    if phase == "factory":
+
+        def controlled_factory(*args: object, **kwargs: object) -> None:
+            del args, kwargs
+            raise control(marker)
+
+        monkeypatch.setattr("pufferlab.cli.namespace._PROVIDER_FACTORY", controlled_factory)
+    else:
+        factory = _install_provider(monkeypatch, provider)
+        if phase == "handoff":
+
+            async def controlled_handoff(*args: object, **kwargs: object) -> None:
+                del args, kwargs
+                raise control(marker)
+
+            monkeypatch.setattr("pufferlab.cli.namespace._delete_and_verify", controlled_handoff)
+        elif phase == "continuity":
+            from pufferlab import owned_tiny
+
+            authenticate_current = owned_tiny._OwnedTinyOperation.authenticate_current
+
+            def controlled_continuity(
+                operation: owned_tiny._OwnedTinyOperation,
+                snapshot: object,
+            ) -> None:
+                if factory.calls:
+                    raise control(marker)
+                authenticate_current(operation, snapshot)  # type: ignore[arg-type]
+
+            monkeypatch.setattr(
+                owned_tiny._OwnedTinyOperation,
+                "authenticate_current",
+                controlled_continuity,
+            )
+        elif phase == "delete":
+            provider.delete_error = control(marker)
+        elif phase == "metadata":
+            provider.metadata_error = control(marker)
+        elif phase == "sleep":
+            provider.metadata_outcomes = ["present"]
+
+            async def controlled_sleep(delay: float) -> None:
+                del delay
+                raise control(marker)
+
+            monkeypatch.setattr("pufferlab.cli.namespace.asyncio.sleep", controlled_sleep)
+        else:
+            provider.close_error = control(marker)
+
+    stderr = io.StringIO()
+    exit_code = main(
+        ["namespace", "cleanup-tiny"],
+        settings_factory=_settings,
+        stderr=stderr,
+    )
+
+    assert exit_code == (130 if control is KeyboardInterrupt else 1)
+    assert provider.close_calls == (0 if phase == "factory" else 1)
+    assert _receipt_state() is OwnedTinyState.CLEANUP_REQUESTED
+    assert marker not in stderr.getvalue()
+    assert _KEY not in stderr.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("operation_control", "close_control", "expected_exit"),
+    [
+        (KeyboardInterrupt, SystemExit, 130),
+        (SystemExit, KeyboardInterrupt, 1),
+    ],
+)
+def test_cleanup_operation_control_precedes_close_control(
+    isolated_state: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation_control: type[BaseException],
+    close_control: type[BaseException],
+    expected_exit: int,
+) -> None:
+    del isolated_state
+    _create_receipt()
+    marker = "private-cleanup-control-precedence-marker"
+    provider = FakeCleanupProvider()
+    provider.close_error = close_control(marker)
+    _install_provider(monkeypatch, provider)
+
+    async def controlled_handoff(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise operation_control(marker)
+
+    monkeypatch.setattr("pufferlab.cli.namespace._delete_and_verify", controlled_handoff)
+    stderr = io.StringIO()
+
+    assert (
+        main(
+            ["namespace", "cleanup-tiny"],
+            settings_factory=_settings,
+            stderr=stderr,
+        )
+        == expected_exit
+    )
+    assert provider.close_calls == 1
+    assert _receipt_state() is OwnedTinyState.CLEANUP_REQUESTED
+    assert marker not in stderr.getvalue()
+    assert _KEY not in stderr.getvalue()
+
+
+def test_cleanup_process_control_error_trace_retains_no_key_target_provider_or_marker(
+    isolated_state: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pufferlab.cli.namespace import NamespaceCommandError, cleanup_owned_tiny
+
+    del isolated_state
+    snapshot = _create_receipt()
+    marker = "private-cleanup-control-exception-marker"
+
+    class MarkedProvider(FakeCleanupProvider):
+        def __repr__(self) -> str:
+            return marker
+
+    provider = MarkedProvider()
+    provider.delete_error = SystemExit(marker)
+    _install_provider(monkeypatch, provider)
+
+    with pytest.raises(NamespaceCommandError) as caught:
+        asyncio.run(cleanup_owned_tiny(_settings(), emit=lambda message: None))
+
+    production_locals: list[str] = []
+    traceback_value = caught.value.__traceback__
+    while traceback_value is not None:
+        if traceback_value.tb_frame.f_code.co_filename.endswith("/pufferlab/cli/namespace.py"):
+            production_locals.append(repr(traceback_value.tb_frame.f_locals))
+        traceback_value = traceback_value.tb_next
+    rendered = "".join(production_locals)
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    assert marker not in rendered
+    assert _KEY not in rendered
+    assert snapshot.receipt.namespace not in rendered
+    assert provider.close_calls == 1
 
 
 def test_terminal_fixed_move_failure_retains_authenticated_terminal_receipt(
@@ -516,3 +750,10 @@ def test_namespace_error_trace_does_not_retain_provider_factory_marker(
     assert caught.value.__cause__ is None
     assert caught.value.__context__ is None
     assert marker not in rendered
+
+
+def _open_descriptor_count() -> int:
+    descriptor_directory = Path("/proc/self/fd")
+    if not descriptor_directory.is_dir():
+        descriptor_directory = Path("/dev/fd")
+    return len(tuple(descriptor_directory.iterdir()))

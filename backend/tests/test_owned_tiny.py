@@ -84,6 +84,120 @@ def test_production_locator_uses_account_record_not_environment(
     assert owned_tiny._production_anchor_path() == Path(f"/Users/account-{os.getuid()}")
 
 
+@pytest.mark.parametrize(
+    ("mode", "accepted"),
+    [(0o700, True), (0o750, True), (0o770, False), (0o707, False)],
+)
+def test_account_home_anchor_rejects_group_or_world_write_before_state_creation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: int,
+    accepted: bool,
+) -> None:
+    anchor = tmp_path.resolve()
+    state = anchor / ".pufferlab/state/owned-tiny-v1"
+    monkeypatch.setattr("pufferlab.owned_tiny._production_state_path", lambda: state)
+    monkeypatch.setattr("pufferlab.owned_tiny._production_anchor_path", lambda: anchor)
+    anchor.chmod(mode)
+    try:
+        if accepted:
+            snapshot = _create_receipt()
+            assert snapshot.receipt.state is OwnedTinyState.INTENT
+        else:
+            with pytest.raises(OwnedTinyStateError), owned_tiny_ingest_operation():
+                pass
+            assert not (anchor / ".pufferlab").exists()
+    finally:
+        anchor.chmod(0o700)
+
+
+@pytest.mark.parametrize("component_index", range(3))
+def test_existing_nonprivate_application_component_is_rejected_before_authority_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    component_index: int,
+) -> None:
+    anchor = tmp_path.resolve()
+    components = [anchor / ".pufferlab"]
+    components.append(components[-1] / "state")
+    components.append(components[-1] / "owned-tiny-v1")
+    for component in components:
+        component.mkdir(mode=0o700)
+        component.chmod(0o700)
+    components[component_index].chmod(0o777)
+    state = components[-1]
+    monkeypatch.setattr("pufferlab.owned_tiny._production_state_path", lambda: state)
+    monkeypatch.setattr("pufferlab.owned_tiny._production_anchor_path", lambda: anchor)
+
+    with pytest.raises(OwnedTinyStateError), owned_tiny_ingest_operation():
+        pass
+
+    assert not (state / "owner.key").exists()
+    assert not (state / "receipt.json").exists()
+
+
+def test_foreign_owned_application_component_is_rejected_before_authority_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pufferlab import owned_tiny
+
+    anchor = tmp_path.resolve()
+    state = anchor / ".pufferlab/state/owned-tiny-v1"
+    for component in (anchor / ".pufferlab", anchor / ".pufferlab/state", state):
+        component.mkdir(mode=0o700)
+        component.chmod(0o700)
+    foreign_inode = (anchor / ".pufferlab").stat().st_ino
+    real_fstat = owned_tiny.os.fstat
+
+    def report_foreign_owner(fd: int) -> os.stat_result:
+        info = real_fstat(fd)
+        if info.st_ino != foreign_inode:
+            return info
+        fields = list(info)
+        fields[4] = os.geteuid() + 1
+        return os.stat_result(fields)
+
+    monkeypatch.setattr(owned_tiny.os, "fstat", report_foreign_owner)
+    monkeypatch.setattr(owned_tiny, "_production_state_path", lambda: state)
+    monkeypatch.setattr(owned_tiny, "_production_anchor_path", lambda: anchor)
+
+    with pytest.raises(OwnedTinyStateError), owned_tiny_ingest_operation():
+        pass
+
+    assert not (state / "owner.key").exists()
+    assert not (state / "receipt.json").exists()
+
+
+def test_foreign_owned_account_home_anchor_is_rejected_before_application_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pufferlab import owned_tiny
+
+    anchor = tmp_path.resolve()
+    state = anchor / ".pufferlab/state/owned-tiny-v1"
+    anchor_inode = anchor.stat().st_ino
+    real_fstat = owned_tiny.os.fstat
+
+    def report_foreign_anchor(fd: int) -> os.stat_result:
+        info = real_fstat(fd)
+        if info.st_ino != anchor_inode:
+            return info
+        fields = list(info)
+        fields[4] = os.geteuid() + 1
+        return os.stat_result(fields)
+
+    monkeypatch.setattr(owned_tiny.os, "fstat", report_foreign_anchor)
+    monkeypatch.setattr(owned_tiny, "_production_state_path", lambda: state)
+    monkeypatch.setattr(owned_tiny, "_production_anchor_path", lambda: anchor)
+
+    with pytest.raises(OwnedTinyStateError), owned_tiny_ingest_operation():
+        pass
+
+    assert not (anchor / ".pufferlab").exists()
+
+
 def test_intent_is_authenticated_derived_and_durable_with_fixed_modes(
     isolated_state: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -974,8 +1088,10 @@ def test_fixed_children_reject_symlinks(
     monkeypatch: pytest.MonkeyPatch,
     child: str,
 ) -> None:
-    state = tmp_path.resolve() / child.replace(".", "-")
-    state.mkdir(mode=0o700)
+    state = tmp_path.resolve() / ".pufferlab/state/owned-tiny-v1"
+    for component in (state.parents[1], state.parent, state):
+        component.mkdir(mode=0o700)
+        component.chmod(0o700)
     target = tmp_path.resolve() / f"{child}.target"
     target.write_bytes(b"x" * 32)
     target.chmod(0o600)
@@ -991,13 +1107,13 @@ def test_state_path_component_symlink_fails_closed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    real = tmp_path.resolve() / "real"
+    real = tmp_path.resolve() / "real-pufferlab"
     real.mkdir(mode=0o700)
-    linked = tmp_path.resolve() / "linked"
+    linked = tmp_path.resolve() / ".pufferlab"
     linked.symlink_to(real, target_is_directory=True)
     monkeypatch.setattr(
         "pufferlab.owned_tiny._production_state_path",
-        lambda: linked / "owned",
+        lambda: linked / "state/owned-tiny-v1",
     )
     monkeypatch.setattr("pufferlab.owned_tiny._production_anchor_path", lambda: tmp_path.resolve())
 
@@ -1007,6 +1123,189 @@ def test_state_path_component_symlink_fails_closed(
             pass
         assert type(caught.value) is OwnedTinyStateError
     assert _open_descriptor_count() == descriptor_count
+
+
+@pytest.mark.parametrize("control", [KeyboardInterrupt, SystemExit])
+def test_state_open_process_control_closes_every_owned_descriptor_and_releases_anchor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    control: type[BaseException],
+) -> None:
+    from pufferlab import owned_tiny
+
+    anchor = tmp_path.resolve()
+    state = anchor / ".pufferlab/state/owned-tiny-v1"
+    for component in (state.parents[1], state.parent, state):
+        component.mkdir(mode=0o700)
+        component.chmod(0o700)
+    state_inode = state.stat().st_ino
+    real_clear_nonblocking = owned_tiny._clear_nonblocking
+    attacked = False
+
+    def interrupt_after_final_state_open(fd: int) -> None:
+        nonlocal attacked
+        if not attacked and os.fstat(fd).st_ino == state_inode:
+            attacked = True
+            raise control("private-state-open-control-marker")
+        real_clear_nonblocking(fd)
+
+    monkeypatch.setattr(owned_tiny, "_production_state_path", lambda: state)
+    monkeypatch.setattr(owned_tiny, "_production_anchor_path", lambda: anchor)
+    monkeypatch.setattr(owned_tiny, "_clear_nonblocking", interrupt_after_final_state_open)
+    descriptor_count = _open_descriptor_count()
+
+    with pytest.raises(control), owned_tiny_ingest_operation():
+        pass
+
+    assert attacked
+    assert _open_descriptor_count() == descriptor_count
+    monkeypatch.setattr(owned_tiny, "_clear_nonblocking", real_clear_nonblocking)
+    with owned_tiny_ingest_operation():
+        pass
+
+
+@pytest.mark.parametrize("control", [KeyboardInterrupt, SystemExit])
+def test_anchor_validation_process_control_closes_descriptor_and_allows_reopen(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    control: type[BaseException],
+) -> None:
+    from pufferlab import owned_tiny
+
+    anchor = tmp_path.resolve()
+    state = anchor / ".pufferlab/state/owned-tiny-v1"
+    anchor_inode = anchor.stat().st_ino
+    real_validate = owned_tiny._validate_anchor_directory
+    attacked = False
+
+    def interrupt_final_anchor_validation(
+        info: os.stat_result,
+        *,
+        expected_identity: tuple[int, int] | None = None,
+    ) -> None:
+        nonlocal attacked
+        if not attacked and info.st_ino == anchor_inode:
+            attacked = True
+            raise control("private-anchor-control-marker")
+        real_validate(info, expected_identity=expected_identity)
+
+    monkeypatch.setattr(owned_tiny, "_production_state_path", lambda: state)
+    monkeypatch.setattr(owned_tiny, "_production_anchor_path", lambda: anchor)
+    monkeypatch.setattr(owned_tiny, "_validate_anchor_directory", interrupt_final_anchor_validation)
+    descriptor_count = _open_descriptor_count()
+
+    with pytest.raises(control), owned_tiny_ingest_operation():
+        pass
+
+    assert attacked
+    assert _open_descriptor_count() == descriptor_count
+    monkeypatch.setattr(owned_tiny, "_validate_anchor_directory", real_validate)
+    with owned_tiny_ingest_operation():
+        pass
+
+
+@pytest.mark.parametrize("control", [KeyboardInterrupt, SystemExit])
+def test_fixed_lock_post_open_process_control_closes_all_descriptors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    control: type[BaseException],
+) -> None:
+    from pufferlab import owned_tiny
+
+    anchor = tmp_path.resolve()
+    state = anchor / ".pufferlab/state/owned-tiny-v1"
+    for component in (state.parents[1], state.parent, state):
+        component.mkdir(mode=0o700)
+        component.chmod(0o700)
+    real_validate = owned_tiny._validate_regular_file
+    attacked = False
+
+    def interrupt_lock_validation(fd: int) -> os.stat_result:
+        nonlocal attacked
+        info = os.fstat(fd)
+        if not attacked and stat.S_ISREG(info.st_mode) and info.st_size == 0:
+            attacked = True
+            raise control("private-lock-control-marker")
+        return real_validate(fd)
+
+    monkeypatch.setattr(owned_tiny, "_production_state_path", lambda: state)
+    monkeypatch.setattr(owned_tiny, "_production_anchor_path", lambda: anchor)
+    monkeypatch.setattr(owned_tiny, "_validate_regular_file", interrupt_lock_validation)
+    descriptor_count = _open_descriptor_count()
+
+    with pytest.raises(control), owned_tiny_ingest_operation():
+        pass
+
+    assert attacked
+    assert _open_descriptor_count() == descriptor_count
+    monkeypatch.setattr(owned_tiny, "_validate_regular_file", real_validate)
+    with owned_tiny_ingest_operation():
+        pass
+
+
+@pytest.mark.parametrize("control", [KeyboardInterrupt, SystemExit])
+def test_private_directory_staging_process_control_closes_staged_descriptor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    control: type[BaseException],
+) -> None:
+    from pufferlab import owned_tiny
+
+    parent_fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    real_validate = owned_tiny._validate_private_directory
+    attacked = False
+
+    def interrupt_staged_validation(info: os.stat_result) -> None:
+        nonlocal attacked
+        if not attacked:
+            attacked = True
+            raise control("private-directory-stage-control-marker")
+        real_validate(info)
+
+    monkeypatch.setattr(owned_tiny, "_validate_private_directory", interrupt_staged_validation)
+    descriptor_count = _open_descriptor_count()
+    try:
+        with pytest.raises(control):
+            owned_tiny._install_private_directory(
+                parent_fd,
+                ".pufferlab",
+                flags=os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK,
+            )
+        assert attacked
+        assert _open_descriptor_count() == descriptor_count
+        assert not (tmp_path / ".pufferlab").exists()
+    finally:
+        os.close(parent_fd)
+
+
+@pytest.mark.parametrize("control", [KeyboardInterrupt, SystemExit])
+def test_private_file_staging_process_control_closes_created_descriptor(
+    isolated_state: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    control: type[BaseException],
+) -> None:
+    from pufferlab import owned_tiny
+
+    _create_receipt()
+    directory_fd = os.open(isolated_state, os.O_RDONLY | os.O_DIRECTORY)
+    attacked = False
+
+    def interrupt_staged_write(fd: int, value: bytes) -> None:
+        nonlocal attacked
+        del fd, value
+        attacked = True
+        raise control("private-file-stage-control-marker")
+
+    monkeypatch.setattr(owned_tiny, "_write_all", interrupt_staged_write)
+    descriptor_count = _open_descriptor_count()
+    try:
+        with pytest.raises(control):
+            owned_tiny._prepare_temporary(directory_fd, ".receipt-control-stage.tmp", b"value")
+        assert attacked
+        assert _open_descriptor_count() == descriptor_count
+        assert not (isolated_state / ".receipt-control-stage.tmp").exists()
+    finally:
+        os.close(directory_fd)
 
 
 def test_nonblocking_process_lock_rejects_concurrent_operation(isolated_state: Path) -> None:

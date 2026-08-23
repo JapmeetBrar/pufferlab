@@ -486,6 +486,38 @@ async def test_initial_receipt_publish_collision_fails_before_model_or_provider(
 
 
 @pytest.mark.asyncio
+async def test_writable_relocated_state_cannot_mint_second_receipt_or_start_factories(
+    isolated_owned_state: Path,
+) -> None:
+    events: list[tuple[str, object]] = []
+    ingestor, providers, embedders = _ingestor(events, FakeWriter())
+    pufferlab_directory = isolated_owned_state.parents[1]
+    relocated = pufferlab_directory.parent / ".pufferlab-authenticated-relocated"
+
+    with owned_tiny_ingest_operation() as operation:
+        snapshot = operation.create_intent(
+            api_key="server-only-test-key",
+            region="aws-us-east-1",
+        )
+        pufferlab_directory.replace(relocated)
+        pufferlab_directory.mkdir(mode=0o777)
+        pufferlab_directory.chmod(0o777)
+
+        with pytest.raises(TinyIngestionCommandError):
+            await ingestor.run(_settings(), IngestTinyOptions(), emit=lambda message: None)
+
+    with pytest.raises(TinyIngestionCommandError):
+        await ingestor.run(_settings(), IngestTinyOptions(), emit=lambda message: None)
+
+    receipts = list(pufferlab_directory.parent.rglob("receipt.json"))
+    assert receipts == [relocated / "state/owned-tiny-v1/receipt.json"]
+    assert receipts[0].read_bytes() == snapshot.raw
+    assert providers.calls == []
+    assert embedders.calls == []
+    assert events == []
+
+
+@pytest.mark.asyncio
 async def test_generated_ingest_resumes_exact_receipt_and_uses_creating_region(
     isolated_owned_state: Path,
 ) -> None:
@@ -788,3 +820,148 @@ def test_generated_cancellation_closes_provider_and_retains_intent(
     assert receipt["state"] == "intent"
     assert provider_factory.providers[0].close_calls == 1
     assert stderr.getvalue() == "error: tiny fixture ingestion cancelled\n"
+
+
+@pytest.mark.parametrize("control", [KeyboardInterrupt, SystemExit])
+@pytest.mark.parametrize(
+    ("stage", "expected_state", "provider_constructed"),
+    [
+        ("embedder", "intent", False),
+        ("provider", "intent", False),
+        ("writer", "intent", True),
+        ("upsert", "intent", True),
+        ("readiness", "created", True),
+        ("close", "created", True),
+    ],
+)
+def test_generated_process_control_drains_provider_and_retains_resumable_receipt(
+    isolated_owned_state: Path,
+    control: type[BaseException],
+    stage: str,
+    expected_state: str,
+    provider_constructed: bool,
+) -> None:
+    marker = f"private-ingest-{stage}-{control.__name__}-marker"
+    providers: list[FakeProvider] = []
+
+    class ControlledProvider(FakeProvider):
+        async def close(self) -> None:
+            self.close_calls += 1
+            if stage == "close":
+                raise control(marker)
+
+    class ControlledWriter(FakeWriter):
+        async def upsert_batch(
+            self,
+            namespace: str,
+            documents: Sequence[EmbeddedDocument],
+            *,
+            write_spec: NamespaceWriteSpec,
+        ) -> None:
+            if stage == "upsert":
+                raise control(marker)
+            await super().upsert_batch(namespace, documents, write_spec=write_spec)
+
+        async def inspect_readiness(
+            self,
+            namespace: str,
+            *,
+            expected_document_ids: frozenset[UUID],
+        ) -> NamespaceReadiness:
+            if stage == "readiness":
+                raise control(marker)
+            return await super().inspect_readiness(
+                namespace,
+                expected_document_ids=expected_document_ids,
+            )
+
+    def provider_factory(*, api_key: str, region: str) -> ControlledProvider:
+        del api_key, region
+        if stage == "provider":
+            raise control(marker)
+        provider = ControlledProvider()
+        providers.append(provider)
+        return provider
+
+    def embedder_factory(**kwargs: object) -> FakeEmbedder:
+        if stage == "embedder":
+            raise control(marker)
+        return FakeEmbedder(int(kwargs["dimensions"]))
+
+    def writer_factory(provider: FakeProvider) -> ControlledWriter:
+        del provider
+        if stage == "writer":
+            raise control(marker)
+        return ControlledWriter()
+
+    ingestor = TinyFixtureIngestor(
+        provider_factory=provider_factory,
+        embedder_factory=embedder_factory,
+        writer_factory=writer_factory,
+        optional_runtime_available=lambda: True,
+    )
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+
+    exit_code = main(
+        ["dataset", "ingest-tiny"],
+        settings_factory=_settings,
+        ingest_runner=ingestor.run,
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    receipt = json.loads((isolated_owned_state / "receipt.json").read_text(encoding="utf-8"))
+    assert exit_code == (130 if control is KeyboardInterrupt else 1)
+    assert receipt["state"] == expected_state
+    assert len(providers) == int(provider_constructed)
+    assert sum(provider.close_calls for provider in providers) == int(provider_constructed)
+    assert marker not in stdout.getvalue() + stderr.getvalue()
+    assert "server-only-test-key" not in stdout.getvalue() + stderr.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_generated_process_control_trace_retains_no_key_target_provider_or_writer(
+    isolated_owned_state: Path,
+) -> None:
+    marker = "private-ingest-process-control-graph-marker"
+
+    class MarkedProvider(FakeProvider):
+        def __repr__(self) -> str:
+            return marker
+
+    class MarkedWriter(FakeWriter):
+        def __repr__(self) -> str:
+            return marker
+
+    provider = MarkedProvider()
+
+    def writer_factory(created_provider: FakeProvider) -> MarkedWriter:
+        assert created_provider is provider
+        raise SystemExit(marker)
+
+    ingestor = TinyFixtureIngestor(
+        provider_factory=lambda **kwargs: provider,
+        embedder_factory=FakeEmbedderFactory([]),
+        writer_factory=writer_factory,
+        optional_runtime_available=lambda: True,
+    )
+
+    with pytest.raises(TinyIngestionCommandError) as caught:
+        await ingestor.run(_settings(), IngestTinyOptions(), emit=lambda message: None)
+
+    receipt = json.loads((isolated_owned_state / "receipt.json").read_text(encoding="utf-8"))
+    production_locals: list[str] = []
+    traceback_value = caught.value.__traceback__
+    while traceback_value is not None:
+        if traceback_value.tb_frame.f_code.co_filename.endswith("/pufferlab/cli/ingest.py"):
+            production_locals.append(repr(traceback_value.tb_frame.f_locals))
+        traceback_value = traceback_value.tb_next
+    rendered = "".join(production_locals)
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    assert marker not in rendered
+    assert "server-only-test-key" not in rendered
+    assert receipt["namespace"] not in rendered
+    assert provider.close_calls == 1
+    assert receipt["state"] == "intent"

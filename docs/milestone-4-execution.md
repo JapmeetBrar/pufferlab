@@ -223,11 +223,18 @@ private helpers. That mode-0700 directory has fixed `owner.key`, `receipt.json`,
 `operation.lock` children; no production path component is caller-selectable. There is at most one
 active generated-tiny receipt globally for this local OS user.
 
-Every directory component and file is checked against symlinks; receipt/key files use exclusive
-no-follow mode 0600. Missing fixed directories, the owner key, and the initial receipt are fully
-prepared under random private staging names, file-synced where applicable, and published only by
-native atomic no-replace rename; a fixed occupant is never chmodded, overwritten, or removed after
-a stale userspace check. Creation and every state transition use an authenticated atomic
+The account-record home is opened no-follow as the stable coordination anchor, must be owned by the
+current effective uid, and must not be group- or world-writable. The complete state walk is then
+performed only relative to that already-held descriptor: the frozen `.pufferlab`, `state`, and
+`owned-tiny-v1` components must each be current-euid directories with exact mode 0700. Every
+continuity check reopens the home and repeats that same anchored relative walk, so a writable,
+foreign-owned, relocated, or substituted application parent fails before authority files, model
+construction, or provider work. Every directory component and file is checked against symlinks;
+receipt/key files use exclusive no-follow mode 0600. Missing fixed directories, the owner key, and
+the initial receipt are fully prepared under random private staging names, file-synced where
+applicable, and published only by native atomic no-replace rename; a fixed occupant is never
+chmodded, overwritten, or removed after a stale userspace check. Creation and every state
+transition use an authenticated atomic
 replacement, file plus directory `fsync`, and unchanged owner-key/file identity checks before the
 prior receipt can be replaced or removed. A fixed no-follow mode-0600 sibling lock is acquired with a
 non-blocking exclusive POSIX `fcntl` lock and held across every ingest/resume/cleanup provider
@@ -277,6 +284,14 @@ intent -> created -> ready -> cleanup_requested -> not_found_verified
   failure before the terminal fixed-locator move retains the receipt and exits nonzero. A local
   wipe/fsync failure after exact held-descriptor validation is commit-like: it exits nonzero but
   never promotes an arbitrary quarantine back to authority; fixed absence remains remote-safe.
+- Filesystem, model, provider, writer, delete, metadata, polling, and close boundaries own their
+  descriptors/tasks explicitly across `KeyboardInterrupt` and `SystemExit`. Once a provider is
+  constructed its close is drained exactly once before a value-free result crosses the sensitive
+  frame: interrupt/cancellation maps to exit 130, while `SystemExit` and other process-control
+  failures map to the fixed internal exit 1. Generated ingestion retains `intent` before any
+  confirmed write and `created` after one; cleanup retains `cleanup_requested` unless terminal
+  removal has already crossed its remote-safe fixed-locator commit point. Keys, namespaces,
+  providers, writers, and caught control objects are absent from the raised error graph.
 
 The fixed state path, every fixed directory component, `owner.key`, `operation.lock`, and
 `receipt.json` are the local authority boundary and are protected against replacement at every

@@ -338,9 +338,17 @@ class _ReadOnlySnapshot:
 
 
 def _inspect_receipt_read_only() -> _Inspection | _ReadOnlySnapshot:
+    anchor: _CoordinationAnchor | None = None
     directory: _StateDirectory | None = None
     try:
-        directory = _open_state_directory(_production_state_path(), create=False)
+        anchor_path = _production_anchor_path()
+        anchor = _open_coordination_anchor(anchor_path)
+        directory = _open_state_directory(
+            _production_state_path(),
+            anchor=anchor,
+            anchor_path=anchor_path,
+            create=False,
+        )
         if directory is None:
             return _Inspection.ABSENT
         lock_present = _validate_existing_lock(directory.fd)
@@ -357,8 +365,10 @@ def _inspect_receipt_read_only() -> _Inspection | _ReadOnlySnapshot:
     except Exception:
         return _Inspection.INVALID
     finally:
-        if directory is not None:
-            _close_quietly(directory.fd)
+        _close_many_quietly(
+            directory.fd if directory is not None else -1,
+            anchor.fd if anchor is not None else -1,
+        )
 
 
 @dataclass(frozen=True, slots=True, repr=False)
@@ -565,10 +575,9 @@ class _OwnedTinyOperation:
         if self._closed:
             return True
         self._closed = True
-        lock_ok = _close_quietly(self._lock_fd)
-        directory_ok = _close_quietly(self._directory.fd)
-        anchor_ok = _close_quietly(self._anchor.fd)
-        return lock_ok and directory_ok and anchor_ok
+        # Every independently owned descriptor gets its close attempt. The outer context converts
+        # a clean-body close failure to one fixed value-free error and preserves a body exception.
+        return _close_many_quietly(self._lock_fd, self._directory.fd, self._anchor.fd)
 
 
 def _begin_operation(
@@ -580,12 +589,19 @@ def _begin_operation(
     anchor = _open_coordination_anchor(anchor_path)
     try:
         fcntl.flock(anchor.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError as error:
-        busy = error.errno in {errno.EACCES, errno.EAGAIN}
+    except BaseException as error:
         _close_quietly(anchor.fd)
-        raise _StateFailure(_FailureKind.BUSY if busy else _FailureKind.INVALID) from None
+        if isinstance(error, OSError):
+            busy = error.errno in {errno.EACCES, errno.EAGAIN}
+            raise _StateFailure(_FailureKind.BUSY if busy else _FailureKind.INVALID) from None
+        raise
     try:
-        directory = _open_state_directory(path, create=create)
+        directory = _open_state_directory(
+            path,
+            anchor=anchor,
+            anchor_path=anchor_path,
+            create=create,
+        )
     except BaseException:
         # The anchor flock is still owned locally until the operation object exists.
         # Release it on every state-tree open failure, including process-control exits.
@@ -623,67 +639,95 @@ def _begin_operation(
         )
         operation._verify_continuity()
         return operation
-    except _StateFailure:
-        if lock_fd >= 0:
-            _close_quietly(lock_fd)
-        _close_quietly(directory.fd)
-        _close_quietly(anchor.fd)
+    except BaseException:
+        _close_many_quietly(lock_fd, directory.fd, anchor.fd)
         raise
 
 
-def _open_state_directory(path: Path, *, create: bool) -> _StateDirectory | None:
-    if not path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts[1:]):
+def _open_state_directory(
+    path: Path,
+    *,
+    anchor: _CoordinationAnchor,
+    anchor_path: Path,
+    create: bool,
+) -> _StateDirectory | None:
+    expected = anchor_path.joinpath(*_STATE_COMPONENTS)
+    if (
+        not path.is_absolute()
+        or not anchor_path.is_absolute()
+        or path != expected
+        or any(part in {"", ".", ".."} for part in path.parts[1:])
+    ):
         raise _StateFailure()
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK
     current = -1
-    chain_identities: list[tuple[int, int]] = []
+    child = -1
+    chain_identities: list[tuple[int, int]] = [anchor.identity]
     try:
-        current = os.open("/", flags)
-        chain_identities.append(_directory_identity(os.fstat(current)))
-        parts = path.parts[1:]
-        for index, component in enumerate(parts):
-            child = -1
+        anchor_info = os.fstat(anchor.fd)
+        _validate_anchor_directory(anchor_info, expected_identity=anchor.identity)
+        parent_fd = anchor.fd
+        for component in _STATE_COMPONENTS:
             try:
-                child = os.open(component, flags, dir_fd=current)
+                child = os.open(component, flags, dir_fd=parent_fd)
             except FileNotFoundError:
                 if not create:
-                    closing = current
-                    current = -1
-                    if not _close_quietly(closing):
-                        raise _StateFailure() from None
+                    if current >= 0:
+                        closing = current
+                        current = -1
+                        if not _close_quietly(closing):
+                            raise _StateFailure() from None
                     return None
-                child = _install_private_directory(current, component, flags=flags)
-            except OSError:
-                raise _StateFailure() from None
-            if child < 0:
-                raise _StateFailure()
-            parent = current
-            current = -1
-            if not _close_quietly(parent):
-                _close_quietly(child)
-                raise _StateFailure()
-            current = child
-            try:
-                info = os.fstat(current)
-            except OSError:
-                raise _StateFailure() from None
-            if not stat.S_ISDIR(info.st_mode):
-                raise _StateFailure()
+                child = _install_private_directory(parent_fd, component, flags=flags)
+            info = os.fstat(child)
+            _validate_private_directory(info)
             chain_identities.append(_directory_identity(info))
-            if index == len(parts) - 1 and (
-                info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o700
-            ):
-                raise _StateFailure()
+            if current >= 0:
+                closing = current
+                current = -1
+                if not _close_quietly(closing):
+                    _close_quietly(child)
+                    child = -1
+                    raise _StateFailure()
+            current = child
+            child = -1
+            parent_fd = current
         _clear_nonblocking(current)
-        return _StateDirectory(
+        result = _StateDirectory(
             fd=current,
-            identity=_directory_identity(info),
+            identity=chain_identities[-1],
             chain_identities=tuple(chain_identities),
         )
-    except _StateFailure:
-        if current >= 0:
-            _close_quietly(current)
+        current = -1
+        return result
+    except BaseException as error:
+        _close_many_quietly(child, current)
+        if isinstance(error, (OSError, _StateFailure)):
+            raise _StateFailure() from None
         raise
+
+
+def _validate_anchor_directory(
+    info: os.stat_result,
+    *,
+    expected_identity: tuple[int, int] | None = None,
+) -> None:
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or info.st_uid != os.geteuid()
+        or stat.S_IMODE(info.st_mode) & 0o022
+        or (expected_identity is not None and _directory_identity(info) != expected_identity)
+    ):
+        raise _StateFailure()
+
+
+def _validate_private_directory(info: os.stat_result) -> None:
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or info.st_uid != os.geteuid()
+        or stat.S_IMODE(info.st_mode) != 0o700
+    ):
+        raise _StateFailure()
 
 
 def _install_private_directory(parent_fd: int, component: str, *, flags: int) -> int:
@@ -698,38 +742,29 @@ def _install_private_directory(parent_fd: int, component: str, *, flags: int) ->
         os.mkdir(staging, mode=0o700, dir_fd=parent_fd)
         staged_fd = os.open(staging, flags, dir_fd=parent_fd)
         staged = os.fstat(staged_fd)
-        if (
-            not stat.S_ISDIR(staged.st_mode)
-            or staged.st_uid != os.geteuid()
-            or stat.S_IMODE(staged.st_mode) != 0o700
-        ):
-            raise _StateFailure()
+        _validate_private_directory(staged)
         staged_identity = _directory_identity(staged)
         _rename_noreplace(parent_fd, staging, component)
         installed_fd = os.open(component, flags, dir_fd=parent_fd)
         installed = os.fstat(installed_fd)
-        if (
-            not stat.S_ISDIR(installed.st_mode)
-            or installed.st_uid != os.geteuid()
-            or stat.S_IMODE(installed.st_mode) != 0o700
-            or _directory_identity(installed) != staged_identity
-        ):
+        _validate_private_directory(installed)
+        if _directory_identity(installed) != staged_identity:
             raise _StateFailure()
         os.fsync(parent_fd)
-        staged_closed = _close_quietly(staged_fd)
+        closing = staged_fd
         staged_fd = -1
+        staged_closed = _close_quietly(closing)
         if not staged_closed:
             raise _StateFailure()
         return installed_fd
-    except (OSError, _StateFailure):
-        if installed_fd >= 0:
-            _close_quietly(installed_fd)
-        if staged_fd >= 0:
-            _close_quietly(staged_fd)
+    except BaseException as error:
+        _close_many_quietly(installed_fd, staged_fd)
         # Never touch the published fixed component here. A random staging directory left by
         # ambiguity is inert and is never scanned as authority.
         del staged_identity
-        raise _StateFailure() from None
+        if isinstance(error, (OSError, _StateFailure)):
+            raise _StateFailure() from None
+        raise
 
 
 def _open_coordination_anchor(path: Path) -> _CoordinationAnchor:
@@ -737,6 +772,7 @@ def _open_coordination_anchor(path: Path) -> _CoordinationAnchor:
         raise _StateFailure()
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK
     current = -1
+    child = -1
     try:
         current = os.open("/", flags)
         for component in path.parts[1:]:
@@ -745,17 +781,21 @@ def _open_coordination_anchor(path: Path) -> _CoordinationAnchor:
             current = -1
             if not _close_quietly(parent):
                 _close_quietly(child)
+                child = -1
                 raise _StateFailure()
             current = child
+            child = -1
         info = os.fstat(current)
-        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
-            raise _StateFailure()
+        _validate_anchor_directory(info)
         _clear_nonblocking(current)
-        return _CoordinationAnchor(fd=current, identity=_directory_identity(info))
-    except (OSError, _StateFailure):
-        if current >= 0:
-            _close_quietly(current)
-        raise _StateFailure() from None
+        result = _CoordinationAnchor(fd=current, identity=_directory_identity(info))
+        current = -1
+        return result
+    except BaseException as error:
+        _close_many_quietly(child, current)
+        if isinstance(error, (OSError, _StateFailure)):
+            raise _StateFailure() from None
+        raise
 
 
 def _verify_operation_continuity(
@@ -774,23 +814,24 @@ def _verify_operation_continuity(
     except (OSError, _StateFailure):
         raise _StateFailure() from None
     if (
-        not stat.S_ISDIR(held_anchor.st_mode)
-        or held_anchor.st_uid != os.geteuid()
-        or _directory_identity(held_anchor) != anchor.identity
-        or not stat.S_ISDIR(held_directory.st_mode)
-        or held_directory.st_uid != os.geteuid()
-        or stat.S_IMODE(held_directory.st_mode) != 0o700
-        or _directory_identity(held_directory) != directory.identity
+        _directory_identity(held_directory) != directory.identity
         or _identity(held_lock) != lock_identity
     ):
         raise _StateFailure()
+    _validate_anchor_directory(held_anchor, expected_identity=anchor.identity)
+    _validate_private_directory(held_directory)
 
     current_anchor: _CoordinationAnchor | None = None
     current_directory: _StateDirectory | None = None
     current_lock = -1
     try:
         current_anchor = _open_coordination_anchor(anchor_path)
-        current_directory = _open_state_directory(state_path, create=False)
+        current_directory = _open_state_directory(
+            state_path,
+            anchor=current_anchor,
+            anchor_path=anchor_path,
+            create=False,
+        )
         if current_directory is None:
             raise _StateFailure()
         current_lock = _open_fixed_file(
@@ -807,12 +848,11 @@ def _verify_operation_continuity(
         ):
             raise _StateFailure()
     finally:
-        if current_lock >= 0:
-            _close_quietly(current_lock)
-        if current_directory is not None:
-            _close_quietly(current_directory.fd)
-        if current_anchor is not None:
-            _close_quietly(current_anchor.fd)
+        _close_many_quietly(
+            current_lock,
+            current_directory.fd if current_directory is not None else -1,
+            current_anchor.fd if current_anchor is not None else -1,
+        )
 
 
 def _open_fixed_file(directory_fd: int, name: str, *, create: bool, writable: bool) -> int:
@@ -838,13 +878,13 @@ def _open_fixed_file(directory_fd: int, name: str, *, create: bool, writable: bo
         _validate_regular_file(fd)
         _clear_nonblocking(fd)
         return fd
-    except OSError:
+    except BaseException as error:
         if fd >= 0:
-            _close_quietly(fd)
-        raise _StateFailure() from None
-    except _StateFailure:
-        if fd >= 0:
-            _close_quietly(fd)
+            closing = fd
+            fd = -1
+            _close_quietly(closing)
+        if isinstance(error, (OSError, _StateFailure)):
+            raise _StateFailure() from None
         raise
 
 
@@ -1222,22 +1262,27 @@ def _prepare_temporary(directory_fd: int, name: str, raw: bytes) -> _FileIdentit
         _write_all(fd, raw)
         os.fsync(fd)
         identity = _identity(_validate_regular_file(fd))
-        closed = _close_quietly(fd)
+        closing = fd
         fd = -1
+        closed = _close_quietly(closing)
         if not closed:
             raise _StateFailure()
         return identity
-    except (OSError, _StateFailure):
+    except BaseException as error:
         if fd >= 0:
-            _close_quietly(fd)
+            closing = fd
+            fd = -1
+            _close_quietly(closing)
         if created_identity is not None:
-            with suppress(_StateFailure):
+            with suppress(BaseException):
                 _remove_known_random_file(
                     directory_fd,
                     name,
                     identity=created_identity,
                 )
-        raise _StateFailure() from None
+        if isinstance(error, (OSError, _StateFailure)):
+            raise _StateFailure() from None
+        raise
 
 
 def _restore_exchange(
@@ -1450,13 +1495,13 @@ def _create_temporary(directory_fd: int, name: str) -> int:
         _validate_regular_file(fd)
         _clear_nonblocking(fd)
         return fd
-    except OSError:
+    except BaseException as error:
         if fd >= 0:
-            _close_quietly(fd)
-        raise _StateFailure() from None
-    except _StateFailure:
-        if fd >= 0:
-            _close_quietly(fd)
+            closing = fd
+            fd = -1
+            _close_quietly(closing)
+        if isinstance(error, (OSError, _StateFailure)):
+            raise _StateFailure() from None
         raise
 
 
@@ -1669,6 +1714,18 @@ def _close_quietly(fd: int) -> bool:
     except OSError:
         return False
     return True
+
+
+def _close_many_quietly(*fds: int) -> bool:
+    closed_cleanly = True
+    for fd in fds:
+        if fd < 0:
+            continue
+        try:
+            closed_cleanly = _close_quietly(fd) and closed_cleanly
+        except BaseException:
+            closed_cleanly = False
+    return closed_cleanly
 
 
 def _raise_public_failure(kind: _FailureKind) -> NoReturn:
