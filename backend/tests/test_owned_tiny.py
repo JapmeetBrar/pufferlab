@@ -3,10 +3,12 @@ from __future__ import annotations
 import json
 import os
 import stat
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from pufferlab.cli.doctor import _default_owned_tiny_target_resolver
 from pufferlab.config import Settings
 from pufferlab.contracts.capabilities import CapabilityRequirementCode
 from pufferlab.owned_tiny import (
@@ -26,8 +28,9 @@ _REGION = "gcp-us-west1"
 
 @pytest.fixture
 def isolated_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    state = tmp_path.resolve() / "owned-tiny-state"
+    state = tmp_path.resolve() / ".pufferlab" / "state" / "owned-tiny-v1"
     monkeypatch.setattr("pufferlab.owned_tiny._production_state_path", lambda: state)
+    monkeypatch.setattr("pufferlab.owned_tiny._production_anchor_path", lambda: tmp_path.resolve())
     return state
 
 
@@ -77,6 +80,7 @@ def test_production_locator_uses_account_record_not_environment(
     assert owned_tiny._production_state_path() == (
         Path(f"/Users/account-{os.getuid()}") / ".pufferlab/state/owned-tiny-v1"
     )
+    assert owned_tiny._production_anchor_path() == Path(f"/Users/account-{os.getuid()}")
 
 
 def test_intent_is_authenticated_derived_and_durable_with_fixed_modes(
@@ -164,6 +168,52 @@ def test_authenticated_cas_rejects_same_byte_replacement_without_clobbering(
     assert (isolated_state / "receipt.json").read_bytes() == raw
 
 
+@pytest.mark.parametrize("terminal", [False, True], ids=["transition", "terminal-removal"])
+def test_atomic_exchange_restores_last_moment_receipt_substitute(
+    isolated_state: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    terminal: bool,
+) -> None:
+    from pufferlab import owned_tiny
+
+    starting_state = OwnedTinyState.NOT_FOUND_VERIFIED if terminal else OwnedTinyState.INTENT
+    _create_receipt(starting_state)
+    expected_path = isolated_state / "receipt.json"
+    expected_raw = expected_path.read_bytes()
+    expected_inode = expected_path.stat().st_ino
+    preserved_expected = isolated_state / "expected-before-swap"
+    real_exchange = owned_tiny._exchange_paths
+    attacked = False
+
+    def exchange_after_substitution(directory_fd: int, first: str, second: str) -> None:
+        nonlocal attacked
+        if not attacked:
+            attacked = True
+            expected_path.replace(preserved_expected)
+            substitute = isolated_state / "manual-substitute"
+            substitute.write_bytes(expected_raw)
+            substitute.chmod(0o600)
+            substitute.replace(expected_path)
+        real_exchange(directory_fd, first, second)
+
+    monkeypatch.setattr(owned_tiny, "_exchange_paths", exchange_after_substitution)
+    with owned_tiny_ingest_operation() as operation:
+        current = operation.load(required=True)
+        assert current is not None
+        if terminal:
+            with pytest.raises(OwnedTinyStateError, match="could not be removed"):
+                operation.remove_terminal(current)
+        else:
+            with pytest.raises(OwnedTinyStateError, match="transition"):
+                operation.transition(current, OwnedTinyState.CREATED)
+
+    assert attacked
+    assert expected_path.read_bytes() == expected_raw
+    assert expected_path.stat().st_ino != expected_inode
+    assert preserved_expected.read_bytes() == expected_raw
+    assert preserved_expected.stat().st_ino == expected_inode
+
+
 def test_atomic_cas_rechecks_owner_identity_after_temporary_file_sync(
     isolated_state: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -205,6 +255,7 @@ def test_fixed_children_reject_symlinks(
     target.chmod(0o600)
     (state / child).symlink_to(target)
     monkeypatch.setattr("pufferlab.owned_tiny._production_state_path", lambda: state)
+    monkeypatch.setattr("pufferlab.owned_tiny._production_anchor_path", lambda: tmp_path.resolve())
 
     with pytest.raises(OwnedTinyStateError), owned_tiny_ingest_operation() as operation:
         operation.load(required=False)
@@ -222,6 +273,7 @@ def test_state_path_component_symlink_fails_closed(
         "pufferlab.owned_tiny._production_state_path",
         lambda: linked / "owned",
     )
+    monkeypatch.setattr("pufferlab.owned_tiny._production_anchor_path", lambda: tmp_path.resolve())
 
     with pytest.raises(OwnedTinyStateError), owned_tiny_ingest_operation():
         pass
@@ -235,6 +287,81 @@ def test_nonblocking_process_lock_rejects_concurrent_operation(isolated_state: P
         owned_tiny_ingest_operation(),
     ):
         pass
+
+
+def test_replaced_named_lock_cannot_split_coordination(isolated_state: Path) -> None:
+    with owned_tiny_ingest_operation() as first_operation:
+        snapshot = first_operation.create_intent(api_key=_KEY, region=_REGION)
+        replacement = isolated_state / "replacement-lock"
+        replacement.write_bytes(b"")
+        replacement.chmod(0o600)
+        replacement.replace(isolated_state / "operation.lock")
+
+        with pytest.raises(OwnedTinyBusyError), owned_tiny_ingest_operation():
+            pass
+        with pytest.raises(OwnedTinyStateError, match="changed"):
+            first_operation.authenticate_current(snapshot)
+
+
+def test_relocated_state_directory_cannot_split_coordination(isolated_state: Path) -> None:
+    relocated = isolated_state.parent / "relocated-owned-state"
+    with owned_tiny_ingest_operation() as first_operation:
+        snapshot = first_operation.create_intent(api_key=_KEY, region=_REGION)
+        isolated_state.replace(relocated)
+
+        with pytest.raises(OwnedTinyBusyError), owned_tiny_ingest_operation():
+            pass
+        with pytest.raises(OwnedTinyStateError, match="changed"):
+            first_operation.authenticate_current(snapshot)
+        assert not isolated_state.exists()
+        assert (relocated / "receipt.json").read_bytes() == snapshot.raw
+
+
+def test_replaced_intermediate_chain_fails_even_when_final_state_inode_returns(
+    isolated_state: Path,
+) -> None:
+    pufferlab_directory = isolated_state.parents[1]
+    relocated_pufferlab = pufferlab_directory.parent / ".pufferlab-relocated"
+    with owned_tiny_ingest_operation() as operation:
+        snapshot = operation.create_intent(api_key=_KEY, region=_REGION)
+        pufferlab_directory.replace(relocated_pufferlab)
+        isolated_state.parent.mkdir(parents=True, mode=0o700)
+        relocated_state = relocated_pufferlab / "state" / "owned-tiny-v1"
+        relocated_state.replace(isolated_state)
+
+        with pytest.raises(OwnedTinyStateError, match="changed"):
+            operation.authenticate_current(snapshot)
+        assert (isolated_state / "receipt.json").read_bytes() == snapshot.raw
+
+
+@pytest.mark.parametrize("child", ["owner.key", "receipt.json", "operation.lock"])
+def test_writerless_fifo_fixed_children_fail_promptly_across_local_readers(
+    isolated_state: Path,
+    child: str,
+) -> None:
+    snapshot = _create_receipt(OwnedTinyState.READY)
+    child_path = isolated_state / child
+    child_path.unlink()
+    os.mkfifo(child_path, mode=0o600)
+    child_path.chmod(0o600)
+    settings = _settings(namespace=snapshot.receipt.namespace)
+
+    descriptor_count = _open_descriptor_count()
+    started = time.monotonic()
+    requirements = owned_tiny_requirements(settings)
+    doctor_target = _default_owned_tiny_target_resolver(settings)
+    from pufferlab.cli.main import main
+
+    exit_code = main(["namespace", "show-tiny"])
+    elapsed = time.monotonic() - started
+
+    assert requirements == (CapabilityRequirementCode.OWNED_TINY_RECEIPT_INVALID,)
+    assert doctor_target is None
+    assert exit_code == 2
+    assert elapsed < 1.0
+    assert _open_descriptor_count() == descriptor_count
+    assert stat.S_ISFIFO(child_path.stat().st_mode)
+    assert stat_mode(child_path) == 0o600
 
 
 def test_read_only_resolver_reports_corruption_and_never_repairs(
@@ -317,11 +444,11 @@ def test_atomic_transition_failure_retains_prior_authenticated_receipt(
     snapshot = _create_receipt()
     original = (isolated_state / "receipt.json").read_bytes()
 
-    def fail_replace(*args: object, **kwargs: object) -> None:
+    def fail_exchange(*args: object, **kwargs: object) -> None:
         del args, kwargs
-        raise OSError("synthetic replace failure")
+        raise owned_tiny._StateFailure()
 
-    monkeypatch.setattr(owned_tiny.os, "replace", fail_replace)
+    monkeypatch.setattr(owned_tiny, "_exchange_paths", fail_exchange)
     with owned_tiny_ingest_operation() as operation:
         current = operation.load(required=True)
         assert current is not None
@@ -334,3 +461,10 @@ def test_atomic_transition_failure_retains_prior_authenticated_receipt(
 
 def stat_mode(path: Path) -> int:
     return path.stat().st_mode & 0o777
+
+
+def _open_descriptor_count() -> int:
+    descriptor_directory = Path("/proc/self/fd")
+    if not descriptor_directory.is_dir():
+        descriptor_directory = Path("/dev/fd")
+    return len(tuple(descriptor_directory.iterdir()))

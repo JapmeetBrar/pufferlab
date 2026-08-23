@@ -24,6 +24,7 @@ from pufferlab.datasets.ingestion import (
     NamespaceReadiness,
 )
 from pufferlab.datasets.schema import NamespaceWriteSpec
+from pufferlab.owned_tiny import OwnedTinyState, owned_tiny_ingest_operation
 
 ROOT = Path(__file__).resolve().parents[3]
 FIXTURE_DIR = ROOT / "fixtures" / "tiny-corpus"
@@ -137,8 +138,9 @@ def _settings(*, api_key: str | None = "server-only-test-key") -> Settings:
 
 @pytest.fixture
 def isolated_owned_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    state = tmp_path.resolve() / "owned-tiny-state"
+    state = tmp_path.resolve() / ".pufferlab" / "state" / "owned-tiny-v1"
     monkeypatch.setattr("pufferlab.owned_tiny._production_state_path", lambda: state)
+    monkeypatch.setattr("pufferlab.owned_tiny._production_anchor_path", lambda: tmp_path.resolve())
     return state
 
 
@@ -471,6 +473,97 @@ async def test_generated_ingest_resumes_exact_receipt_and_uses_creating_region(
         ("server-only-test-key", "aws-us-east-1"),
         ("server-only-test-key", "aws-us-east-1"),
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("attack", ["replace-lock", "relocate-state"])
+async def test_anchor_rejects_split_operation_before_model_or_provider(
+    isolated_owned_state: Path,
+    attack: str,
+) -> None:
+    ingestor, providers, embedders = _ingestor([], FakeWriter())
+
+    with owned_tiny_ingest_operation() as first_operation:
+        first_operation.create_intent(
+            api_key="server-only-test-key",
+            region="aws-us-east-1",
+        )
+        if attack == "replace-lock":
+            replacement = isolated_owned_state / "replacement-lock"
+            replacement.write_bytes(b"")
+            replacement.chmod(0o600)
+            replacement.replace(isolated_owned_state / "operation.lock")
+        else:
+            isolated_owned_state.replace(isolated_owned_state.parent / "relocated-state")
+
+        with pytest.raises(TinyIngestionCommandError, match="already running"):
+            await ingestor.run(_settings(), IngestTinyOptions(), emit=lambda message: None)
+
+    assert providers.calls == []
+    assert embedders.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("attack", ["replace-lock", "relocate-state"])
+async def test_generated_ingest_rechecks_continuity_before_next_writer_action(
+    isolated_owned_state: Path,
+    attack: str,
+) -> None:
+    with owned_tiny_ingest_operation() as operation:
+        snapshot = operation.create_intent(
+            api_key="server-only-test-key",
+            region="aws-us-east-1",
+        )
+        snapshot = operation.transition(snapshot, OwnedTinyState.CREATED)
+        operation.transition(snapshot, OwnedTinyState.READY)
+
+    class AttackingWriter(FakeWriter):
+        def __init__(self) -> None:
+            super().__init__()
+            self.readiness_calls = 0
+
+        async def upsert_batch(
+            self,
+            namespace: str,
+            documents: Sequence[EmbeddedDocument],
+            *,
+            write_spec: NamespaceWriteSpec,
+        ) -> None:
+            await super().upsert_batch(namespace, documents, write_spec=write_spec)
+            if attack == "replace-lock":
+                replacement = isolated_owned_state / "replacement-lock"
+                replacement.write_bytes(b"")
+                replacement.chmod(0o600)
+                replacement.replace(isolated_owned_state / "operation.lock")
+            else:
+                isolated_owned_state.replace(isolated_owned_state.parent / "relocated-state")
+
+        async def inspect_readiness(
+            self,
+            namespace: str,
+            *,
+            expected_document_ids: frozenset[UUID],
+        ) -> NamespaceReadiness:
+            self.readiness_calls += 1
+            return await super().inspect_readiness(
+                namespace,
+                expected_document_ids=expected_document_ids,
+            )
+
+    writer = AttackingWriter()
+    ingestor, providers, _ = _ingestor([], writer)
+
+    with pytest.raises(TinyIngestionCommandError, match="before readiness"):
+        await ingestor.run(
+            _settings(),
+            IngestTinyOptions(readiness_attempts=1, readiness_poll_interval=0),
+            emit=lambda message: None,
+        )
+
+    assert len(writer.namespaces) == 1
+    assert writer.readiness_calls == 0
+    assert len(providers.calls) == 1
+    assert providers.providers[0].close_calls == 1
 
 
 @pytest.mark.asyncio

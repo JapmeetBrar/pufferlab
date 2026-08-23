@@ -126,9 +126,11 @@ async def cleanup_owned_tiny(
             if factory_failed or provider is None:
                 raise NamespaceCommandError("owned tiny cleanup provider could not start")
 
+            cleanup_snapshot = snapshot
             control = await _delete_verify_and_close(
                 provider,
                 namespace=snapshot.receipt.namespace,
+                before_provider_action=lambda: operation.authenticate_current(cleanup_snapshot),
             )
             provider = None
             if control.cancelled:
@@ -164,12 +166,14 @@ async def _delete_verify_and_close(
     provider: _CleanupProvider,
     *,
     namespace: str,
+    before_provider_action: Callable[[], None],
 ) -> _CleanupControl:
     succeeded = False
     cancelled = False
     operation_failed = False
     try:
         try:
+            before_provider_action()
             await provider.delete_namespace(namespace)
         except ProviderError as error:
             if error.details.code is not ApiErrorCode.NOT_FOUND:
@@ -178,6 +182,7 @@ async def _delete_verify_and_close(
             succeeded, verification_cancelled = await _verify_not_found(
                 provider,
                 namespace=namespace,
+                before_provider_action=before_provider_action,
             )
             cancelled = cancelled or verification_cancelled
     except asyncio.CancelledError:
@@ -197,9 +202,11 @@ async def _verify_not_found(
     provider: _CleanupProvider,
     *,
     namespace: str,
+    before_provider_action: Callable[[], None],
 ) -> tuple[bool, bool]:
     for attempt in range(_NOT_FOUND_ATTEMPTS):
         try:
+            before_provider_action()
             await provider.namespace_metadata(namespace)
         except ProviderError as error:
             if error.details.code is ApiErrorCode.NOT_FOUND:

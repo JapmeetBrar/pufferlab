@@ -8,6 +8,7 @@ helper.
 
 from __future__ import annotations
 
+import ctypes
 import errno
 import fcntl
 import hashlib
@@ -17,7 +18,8 @@ import os
 import pwd
 import secrets
 import stat
-from collections.abc import Iterator, Mapping
+import sys
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, replace
 from enum import StrEnum
@@ -38,6 +40,10 @@ _OWNER_KEY_BYTES = 32
 _NONCE_BYTES = 32
 _MAX_RECEIPT_BYTES = 4096
 _NAMESPACE_PREFIX = "pufferlab-tiny-"
+_LINUX_RENAME_NOREPLACE = 1
+_LINUX_RENAME_EXCHANGE = 2
+_DARWIN_RENAME_SWAP = 0x00000002
+_DARWIN_RENAME_EXCL = 0x00000004
 _RECEIPT_FIELDS = frozenset(
     {
         "format_version",
@@ -151,14 +157,26 @@ class _ReceiptSnapshot:
     identity: _FileIdentity
 
 
+@dataclass(frozen=True, slots=True, repr=False)
+class _RawFileSnapshot:
+    raw: bytes
+    identity: _FileIdentity
+
+
 @dataclass(slots=True, repr=False)
 class _StateDirectory:
     fd: int
+    identity: tuple[int, int]
+    chain_identities: tuple[tuple[int, int], ...]
 
 
-def _production_state_path() -> Path:
-    """Resolve the frozen state location from the POSIX account database, never the environment."""
+@dataclass(slots=True, repr=False)
+class _CoordinationAnchor:
+    fd: int
+    identity: tuple[int, int]
 
+
+def _production_account_home() -> Path:
     if (
         os.name != "posix"
         or os.getuid() != os.geteuid()
@@ -177,7 +195,20 @@ def _production_state_path() -> Path:
     home = Path(account_home)
     if not home.is_absolute() or any(part in {"", ".", ".."} for part in home.parts[1:]):
         raise _StateFailure()
+    return home
+
+
+def _production_state_path() -> Path:
+    """Resolve the frozen state location from the POSIX account database, never the environment."""
+
+    home = _production_account_home()
     return home.joinpath(*_STATE_COMPONENTS)
+
+
+def _production_anchor_path() -> Path:
+    """Resolve the stable coordination anchor from the same OS account identity."""
+
+    return _production_account_home()
 
 
 def owned_tiny_requirements(settings: Settings) -> tuple[CapabilityRequirementCode, ...]:
@@ -270,7 +301,11 @@ def _owned_tiny_operation(*, create: bool) -> Iterator[_OwnedTinyOperation]:
     operation: _OwnedTinyOperation | None = None
     kind: _FailureKind | None = None
     try:
-        operation = _begin_operation(_production_state_path(), create=create)
+        operation = _begin_operation(
+            _production_state_path(),
+            anchor_path=_production_anchor_path(),
+            create=create,
+        )
     except _StateFailure as error:
         kind = error.kind
     if operation is None:
@@ -335,13 +370,21 @@ class _OwnerKey:
 class _OwnedTinyOperation:
     def __init__(
         self,
+        anchor: _CoordinationAnchor,
         directory: _StateDirectory,
         *,
+        anchor_path: Path,
+        state_path: Path,
         lock_fd: int,
+        lock_identity: _FileIdentity,
         owner: _OwnerKey,
     ) -> None:
+        self._anchor = anchor
         self._directory = directory
+        self._anchor_path = anchor_path
+        self._state_path = state_path
         self._lock_fd = lock_fd
+        self._lock_identity = lock_identity
         self._owner = owner
         self._closed = False
 
@@ -349,6 +392,8 @@ class _OwnedTinyOperation:
         invalid = False
         snapshot: _ReceiptSnapshot | None = None
         try:
+            self._verify_continuity()
+            _verify_owner_identity(self._directory.fd, self._owner)
             snapshot = _read_receipt(self._directory.fd, self._owner.key)
         except _StateFailure:
             invalid = True
@@ -397,7 +442,13 @@ class _OwnedTinyOperation:
         persistence_failed = False
         snapshot = None
         try:
-            _atomic_create_receipt(self._directory.fd, raw)
+            self._verify_continuity()
+            _verify_owner_identity(self._directory.fd, self._owner)
+            _atomic_create_receipt(
+                self._directory.fd,
+                raw,
+                continuity=self._verify_continuity,
+            )
             snapshot = _read_receipt(self._directory.fd, self._owner.key)
         except _StateFailure:
             persistence_failed = True
@@ -421,6 +472,7 @@ class _OwnedTinyOperation:
 
         invalid = False
         try:
+            self._verify_continuity()
             _verify_owner_identity(self._directory.fd, self._owner)
             _verify_prior_receipt(
                 self._directory.fd,
@@ -454,12 +506,14 @@ class _OwnedTinyOperation:
         persistence_failed = False
         updated = None
         try:
+            self._verify_continuity()
             _verify_owner_identity(self._directory.fd, self._owner)
             _atomic_replace_receipt(
                 self._directory.fd,
                 prior=snapshot,
                 replacement=replacement_raw,
                 owner=self._owner,
+                continuity=self._verify_continuity,
             )
             updated = _read_receipt(self._directory.fd, self._owner.key)
         except _StateFailure:
@@ -478,16 +532,28 @@ class _OwnedTinyOperation:
             raise OwnedTinyStateError("owned tiny terminal receipt removal was rejected")
         removal_failed = False
         try:
+            self._verify_continuity()
             _verify_owner_identity(self._directory.fd, self._owner)
             _remove_receipt_cas(
                 self._directory.fd,
                 prior=snapshot,
                 owner=self._owner,
+                continuity=self._verify_continuity,
             )
         except _StateFailure:
             removal_failed = True
         if removal_failed:
             raise OwnedTinyStateError("owned tiny terminal receipt could not be removed") from None
+
+    def _verify_continuity(self) -> None:
+        _verify_operation_continuity(
+            anchor=self._anchor,
+            anchor_path=self._anchor_path,
+            directory=self._directory,
+            state_path=self._state_path,
+            lock_fd=self._lock_fd,
+            lock_identity=self._lock_identity,
+        )
 
     def close(self) -> bool:
         if self._closed:
@@ -495,12 +561,26 @@ class _OwnedTinyOperation:
         self._closed = True
         lock_ok = _close_quietly(self._lock_fd)
         directory_ok = _close_quietly(self._directory.fd)
-        return lock_ok and directory_ok
+        anchor_ok = _close_quietly(self._anchor.fd)
+        return lock_ok and directory_ok and anchor_ok
 
 
-def _begin_operation(path: Path, *, create: bool) -> _OwnedTinyOperation:
+def _begin_operation(
+    path: Path,
+    *,
+    anchor_path: Path,
+    create: bool,
+) -> _OwnedTinyOperation:
+    anchor = _open_coordination_anchor(anchor_path)
+    try:
+        fcntl.flock(anchor.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as error:
+        busy = error.errno in {errno.EACCES, errno.EAGAIN}
+        _close_quietly(anchor.fd)
+        raise _StateFailure(_FailureKind.BUSY if busy else _FailureKind.INVALID) from None
     directory = _open_state_directory(path, create=create)
     if directory is None:
+        _close_quietly(anchor.fd)
         raise _StateFailure(_FailureKind.MISSING)
     lock_fd = -1
     try:
@@ -513,29 +593,41 @@ def _begin_operation(path: Path, *, create: bool) -> _OwnedTinyOperation:
             fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as error:
             busy = error.errno in {errno.EACCES, errno.EAGAIN}
-            _close_quietly(lock_fd)
-            _close_quietly(directory.fd)
             raise _StateFailure(_FailureKind.BUSY if busy else _FailureKind.INVALID) from None
+        lock_identity = _identity(_validate_regular_file(lock_fd))
         owner = _read_owner_key(directory.fd, required=False)
         if owner is None:
             if not create:
                 raise _StateFailure(_FailureKind.MISSING)
             owner = _create_owner_key(directory.fd)
-        return _OwnedTinyOperation(directory, lock_fd=lock_fd, owner=owner)
+        operation = _OwnedTinyOperation(
+            anchor,
+            directory,
+            anchor_path=anchor_path,
+            state_path=path,
+            lock_fd=lock_fd,
+            lock_identity=lock_identity,
+            owner=owner,
+        )
+        operation._verify_continuity()
+        return operation
     except _StateFailure:
         if lock_fd >= 0:
             _close_quietly(lock_fd)
         _close_quietly(directory.fd)
+        _close_quietly(anchor.fd)
         raise
 
 
 def _open_state_directory(path: Path, *, create: bool) -> _StateDirectory | None:
     if not path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts[1:]):
         raise _StateFailure()
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK
     current = -1
+    chain_identities: list[tuple[int, int]] = []
     try:
         current = os.open("/", flags)
+        chain_identities.append(_directory_identity(os.fstat(current)))
         parts = path.parts[1:]
         for index, component in enumerate(parts):
             child = -1
@@ -567,19 +659,106 @@ def _open_state_directory(path: Path, *, create: bool) -> _StateDirectory | None
                 raise _StateFailure() from None
             if not stat.S_ISDIR(info.st_mode):
                 raise _StateFailure()
+            chain_identities.append(_directory_identity(info))
             if index == len(parts) - 1 and (
                 info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o700
             ):
                 raise _StateFailure()
-        return _StateDirectory(fd=current)
+        _clear_nonblocking(current)
+        return _StateDirectory(
+            fd=current,
+            identity=_directory_identity(info),
+            chain_identities=tuple(chain_identities),
+        )
     except _StateFailure:
         if current >= 0:
             _close_quietly(current)
         raise
 
 
+def _open_coordination_anchor(path: Path) -> _CoordinationAnchor:
+    if not path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts[1:]):
+        raise _StateFailure()
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK
+    current = -1
+    try:
+        current = os.open("/", flags)
+        for component in path.parts[1:]:
+            child = os.open(component, flags, dir_fd=current)
+            if not _close_quietly(current):
+                _close_quietly(child)
+                raise _StateFailure()
+            current = child
+        info = os.fstat(current)
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
+            raise _StateFailure()
+        _clear_nonblocking(current)
+        return _CoordinationAnchor(fd=current, identity=_directory_identity(info))
+    except (OSError, _StateFailure):
+        if current >= 0:
+            _close_quietly(current)
+        raise _StateFailure() from None
+
+
+def _verify_operation_continuity(
+    *,
+    anchor: _CoordinationAnchor,
+    anchor_path: Path,
+    directory: _StateDirectory,
+    state_path: Path,
+    lock_fd: int,
+    lock_identity: _FileIdentity,
+) -> None:
+    try:
+        held_anchor = os.fstat(anchor.fd)
+        held_directory = os.fstat(directory.fd)
+        held_lock = _validate_regular_file(lock_fd)
+    except OSError:
+        raise _StateFailure() from None
+    if (
+        not stat.S_ISDIR(held_anchor.st_mode)
+        or held_anchor.st_uid != os.geteuid()
+        or _directory_identity(held_anchor) != anchor.identity
+        or not stat.S_ISDIR(held_directory.st_mode)
+        or held_directory.st_uid != os.geteuid()
+        or stat.S_IMODE(held_directory.st_mode) != 0o700
+        or _directory_identity(held_directory) != directory.identity
+        or _identity(held_lock) != lock_identity
+    ):
+        raise _StateFailure()
+
+    current_anchor: _CoordinationAnchor | None = None
+    current_directory: _StateDirectory | None = None
+    current_lock = -1
+    try:
+        current_anchor = _open_coordination_anchor(anchor_path)
+        current_directory = _open_state_directory(state_path, create=False)
+        if current_directory is None:
+            raise _StateFailure()
+        current_lock = _open_fixed_file(
+            current_directory.fd,
+            _LOCK_NAME,
+            create=False,
+            writable=True,
+        )
+        if (
+            current_anchor.identity != anchor.identity
+            or current_directory.identity != directory.identity
+            or current_directory.chain_identities != directory.chain_identities
+            or _identity(_validate_regular_file(current_lock)) != lock_identity
+        ):
+            raise _StateFailure()
+    finally:
+        if current_lock >= 0:
+            _close_quietly(current_lock)
+        if current_directory is not None:
+            _close_quietly(current_directory.fd)
+        if current_anchor is not None:
+            _close_quietly(current_anchor.fd)
+
+
 def _open_fixed_file(directory_fd: int, name: str, *, create: bool, writable: bool) -> int:
-    flags = (os.O_RDWR if writable else os.O_RDONLY) | os.O_NOFOLLOW
+    flags = (os.O_RDWR if writable else os.O_RDONLY) | os.O_NOFOLLOW | os.O_NONBLOCK
     created = False
     fd = -1
     try:
@@ -599,6 +778,7 @@ def _open_fixed_file(directory_fd: int, name: str, *, create: bool, writable: bo
         if created:
             os.fchmod(fd, 0o600)
         _validate_regular_file(fd)
+        _clear_nonblocking(fd)
         return fd
     except OSError:
         if fd >= 0:
@@ -639,11 +819,13 @@ def _create_owner_key(directory_fd: int) -> _OwnerKey:
     try:
         fd = os.open(
             _OWNER_KEY_NAME,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_NONBLOCK,
             0o600,
             dir_fd=directory_fd,
         )
         os.fchmod(fd, 0o600)
+        _validate_regular_file(fd)
+        _clear_nonblocking(fd)
         _write_all(fd, key)
         os.fsync(fd)
         if not _close_quietly(fd):
@@ -665,7 +847,11 @@ def _create_owner_key(directory_fd: int) -> _OwnerKey:
 
 def _read_owner_key(directory_fd: int, *, required: bool) -> _OwnerKey | None:
     try:
-        fd = os.open(_OWNER_KEY_NAME, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
+        fd = os.open(
+            _OWNER_KEY_NAME,
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+            dir_fd=directory_fd,
+        )
     except FileNotFoundError:
         if required:
             raise _StateFailure() from None
@@ -674,6 +860,7 @@ def _read_owner_key(directory_fd: int, *, required: bool) -> _OwnerKey | None:
         raise _StateFailure() from None
     try:
         before = _validate_regular_file(fd)
+        _clear_nonblocking(fd)
         raw = _read_bounded(fd, _OWNER_KEY_BYTES + 1)
         after = _validate_regular_file(fd)
     finally:
@@ -694,31 +881,61 @@ def _verify_owner_identity(directory_fd: int, owner: _OwnerKey) -> None:
 
 
 def _read_receipt(directory_fd: int, owner_key: bytes | None) -> _ReceiptSnapshot | None:
+    return _read_named_receipt(directory_fd, _RECEIPT_NAME, owner_key)
+
+
+def _read_named_receipt(
+    directory_fd: int,
+    name: str,
+    owner_key: bytes | None,
+) -> _ReceiptSnapshot | None:
+    snapshot = _read_named_regular_file(directory_fd, name, maximum=_MAX_RECEIPT_BYTES)
+    if snapshot is None:
+        return None
+    if owner_key is None or not snapshot.raw:
+        raise _StateFailure()
+    receipt = _decode_receipt(snapshot.raw, owner_key)
+    return _ReceiptSnapshot(
+        receipt=receipt,
+        raw=snapshot.raw,
+        identity=snapshot.identity,
+    )
+
+
+def _read_named_regular_file(
+    directory_fd: int,
+    name: str,
+    *,
+    maximum: int,
+) -> _RawFileSnapshot | None:
     try:
-        fd = os.open(_RECEIPT_NAME, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
+        fd = os.open(
+            name,
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+            dir_fd=directory_fd,
+        )
     except FileNotFoundError:
         return None
     except OSError:
         raise _StateFailure() from None
     try:
         before = _validate_regular_file(fd)
-        raw = _read_bounded(fd, _MAX_RECEIPT_BYTES + 1)
+        _clear_nonblocking(fd)
+        raw = _read_bounded(fd, maximum + 1)
         after = _validate_regular_file(fd)
     finally:
         closed = _close_quietly(fd)
-    if (
-        not closed
-        or owner_key is None
-        or not raw
-        or len(raw) > _MAX_RECEIPT_BYTES
-        or _identity(before) != _identity(after)
-    ):
+    if not closed or len(raw) > maximum or _identity(before) != _identity(after):
         raise _StateFailure()
-    receipt = _decode_receipt(raw, owner_key)
-    return _ReceiptSnapshot(receipt=receipt, raw=raw, identity=_identity(after))
+    return _RawFileSnapshot(raw=raw, identity=_identity(after))
 
 
-def _atomic_create_receipt(directory_fd: int, raw: bytes) -> None:
+def _atomic_create_receipt(
+    directory_fd: int,
+    raw: bytes,
+    *,
+    continuity: Callable[[], None] | None = None,
+) -> None:
     temporary = _temporary_name()
     fd = -1
     try:
@@ -728,6 +945,8 @@ def _atomic_create_receipt(directory_fd: int, raw: bytes) -> None:
         if not _close_quietly(fd):
             raise _StateFailure()
         fd = -1
+        if continuity is not None:
+            continuity()
         os.link(
             temporary,
             _RECEIPT_NAME,
@@ -755,35 +974,58 @@ def _atomic_replace_receipt(
     prior: _ReceiptSnapshot,
     replacement: bytes,
     owner: _OwnerKey,
+    continuity: Callable[[], None],
 ) -> None:
     temporary = _temporary_name()
-    fd = -1
+    replacement_identity = _prepare_temporary(directory_fd, temporary, replacement)
     try:
-        fd = _create_temporary(directory_fd, temporary)
-        _write_all(fd, replacement)
-        os.fsync(fd)
-        if not _close_quietly(fd):
-            raise _StateFailure()
-        fd = -1
+        continuity()
         _verify_owner_identity(directory_fd, owner)
-        _verify_prior_receipt(directory_fd, prior=prior, owner_key=owner.key)
-        os.replace(
+        _exchange_paths(directory_fd, temporary, _RECEIPT_NAME)
+    except _StateFailure:
+        _remove_known_regular_file(
+            directory_fd,
             temporary,
-            _RECEIPT_NAME,
-            src_dir_fd=directory_fd,
-            dst_dir_fd=directory_fd,
+            identity=replacement_identity,
+            raw=replacement,
         )
+        raise
+
+    displaced_matches = _named_receipt_matches(
+        directory_fd,
+        temporary,
+        expected=prior,
+        owner_key=owner.key,
+    )
+    replacement_matches = _named_regular_file_matches(
+        directory_fd,
+        _RECEIPT_NAME,
+        identity=replacement_identity,
+        raw=replacement,
+    )
+    if not displaced_matches or not replacement_matches:
+        _restore_exchange(
+            directory_fd,
+            temporary,
+            replacement_identity=replacement_identity,
+            replacement=replacement,
+        )
+        raise _StateFailure()
+
+    try:
+        os.unlink(temporary, dir_fd=directory_fd)
+    except OSError:
+        _restore_exchange(
+            directory_fd,
+            temporary,
+            replacement_identity=replacement_identity,
+            replacement=replacement,
+        )
+        raise _StateFailure() from None
+    try:
         os.fsync(directory_fd)
     except OSError:
-        if fd >= 0:
-            _close_quietly(fd)
-        _unlink_quietly(directory_fd, temporary)
         raise _StateFailure() from None
-    except _StateFailure:
-        if fd >= 0:
-            _close_quietly(fd)
-        _unlink_quietly(directory_fd, temporary)
-        raise
 
 
 def _remove_receipt_cas(
@@ -791,23 +1033,237 @@ def _remove_receipt_cas(
     *,
     prior: _ReceiptSnapshot,
     owner: _OwnerKey,
+    continuity: Callable[[], None],
 ) -> None:
-    _verify_owner_identity(directory_fd, owner)
-    _verify_prior_receipt(directory_fd, prior=prior, owner_key=owner.key)
+    # Keep the named receipt authenticated through the exchange. A process crash before the
+    # identity decision therefore leaves a resumable terminal receipt, never an opaque marker.
+    terminal_copy = prior.raw
+    temporary = _temporary_name()
+    terminal_copy_identity = _prepare_temporary(directory_fd, temporary, terminal_copy)
+    try:
+        continuity()
+        _verify_owner_identity(directory_fd, owner)
+        _exchange_paths(directory_fd, temporary, _RECEIPT_NAME)
+    except _StateFailure:
+        _remove_known_regular_file(
+            directory_fd,
+            temporary,
+            identity=terminal_copy_identity,
+            raw=terminal_copy,
+        )
+        raise
+
+    displaced_matches = _named_receipt_matches(
+        directory_fd,
+        temporary,
+        expected=prior,
+        owner_key=owner.key,
+    )
+    terminal_copy_matches = _named_regular_file_matches(
+        directory_fd,
+        _RECEIPT_NAME,
+        identity=terminal_copy_identity,
+        raw=terminal_copy,
+    )
+    if not displaced_matches or not terminal_copy_matches:
+        _restore_exchange(
+            directory_fd,
+            temporary,
+            replacement_identity=terminal_copy_identity,
+            replacement=terminal_copy,
+        )
+        raise _StateFailure()
+
     try:
         os.unlink(_RECEIPT_NAME, dir_fd=directory_fd)
+    except OSError:
+        _restore_exchange(
+            directory_fd,
+            temporary,
+            replacement_identity=terminal_copy_identity,
+            replacement=terminal_copy,
+        )
+        raise _StateFailure() from None
+
+    if not _named_receipt_matches(
+        directory_fd,
+        temporary,
+        expected=prior,
+        owner_key=owner.key,
+    ):
+        raise _StateFailure()
+    try:
+        os.unlink(temporary, dir_fd=directory_fd)
         os.fsync(directory_fd)
     except OSError:
-        # If unlink succeeded but the directory sync failed, best-effort restoration preserves the
-        # authenticated terminal receipt for an explicit retry.
-        try:
-            present = _read_receipt(directory_fd, owner.key)
-        except _StateFailure:
-            present = None
-        if present is None:
+        restored = False
+        with suppress(_StateFailure):
+            _rename_noreplace(directory_fd, temporary, _RECEIPT_NAME)
+            os.fsync(directory_fd)
+            restored = True
+        if not restored:
             with suppress(_StateFailure):
-                _atomic_create_receipt(directory_fd, prior.raw)
+                _atomic_create_receipt(
+                    directory_fd,
+                    prior.raw,
+                    continuity=continuity,
+                )
         raise _StateFailure() from None
+
+
+def _prepare_temporary(directory_fd: int, name: str, raw: bytes) -> _FileIdentity:
+    fd = -1
+    try:
+        fd = _create_temporary(directory_fd, name)
+        _write_all(fd, raw)
+        os.fsync(fd)
+        identity = _identity(_validate_regular_file(fd))
+        if not _close_quietly(fd):
+            raise _StateFailure()
+        return identity
+    except (OSError, _StateFailure):
+        if fd >= 0:
+            _close_quietly(fd)
+        _unlink_quietly(directory_fd, name)
+        raise _StateFailure() from None
+
+
+def _restore_exchange(
+    directory_fd: int,
+    temporary: str,
+    *,
+    replacement_identity: _FileIdentity,
+    replacement: bytes,
+) -> None:
+    _exchange_paths(directory_fd, temporary, _RECEIPT_NAME)
+    if not _named_regular_file_matches(
+        directory_fd,
+        temporary,
+        identity=replacement_identity,
+        raw=replacement,
+    ):
+        raise _StateFailure()
+    try:
+        os.unlink(temporary, dir_fd=directory_fd)
+        os.fsync(directory_fd)
+    except OSError:
+        raise _StateFailure() from None
+
+
+def _remove_known_regular_file(
+    directory_fd: int,
+    name: str,
+    *,
+    identity: _FileIdentity,
+    raw: bytes,
+) -> None:
+    if not _named_regular_file_matches(
+        directory_fd,
+        name,
+        identity=identity,
+        raw=raw,
+    ):
+        raise _StateFailure()
+    try:
+        os.unlink(name, dir_fd=directory_fd)
+    except OSError:
+        raise _StateFailure() from None
+
+
+def _named_receipt_matches(
+    directory_fd: int,
+    name: str,
+    *,
+    expected: _ReceiptSnapshot,
+    owner_key: bytes,
+) -> bool:
+    try:
+        current = _read_named_receipt(directory_fd, name, owner_key)
+    except _StateFailure:
+        return False
+    return bool(
+        current is not None
+        and _same_file_object(current.identity, expected.identity)
+        and hmac.compare_digest(current.raw, expected.raw)
+        and current.receipt == expected.receipt
+    )
+
+
+def _named_regular_file_matches(
+    directory_fd: int,
+    name: str,
+    *,
+    identity: _FileIdentity,
+    raw: bytes,
+) -> bool:
+    try:
+        current = _read_named_regular_file(directory_fd, name, maximum=max(len(raw), 1))
+    except _StateFailure:
+        return False
+    return bool(
+        current is not None
+        and _same_file_object(current.identity, identity)
+        and hmac.compare_digest(current.raw, raw)
+    )
+
+
+def _exchange_paths(directory_fd: int, first: str, second: str) -> None:
+    _platform_rename(
+        directory_fd,
+        first,
+        second,
+        linux_flags=_LINUX_RENAME_EXCHANGE,
+        darwin_flags=_DARWIN_RENAME_SWAP,
+    )
+
+
+def _rename_noreplace(directory_fd: int, source: str, destination: str) -> None:
+    _platform_rename(
+        directory_fd,
+        source,
+        destination,
+        linux_flags=_LINUX_RENAME_NOREPLACE,
+        darwin_flags=_DARWIN_RENAME_EXCL,
+    )
+
+
+def _platform_rename(
+    directory_fd: int,
+    source: str,
+    destination: str,
+    *,
+    linux_flags: int,
+    darwin_flags: int,
+) -> None:
+    try:
+        library = ctypes.CDLL(None, use_errno=True)
+        if sys.platform.startswith("linux"):
+            function = library.renameat2
+            flags = linux_flags
+        elif sys.platform == "darwin":
+            function = library.renameatx_np
+            flags = darwin_flags
+        else:
+            raise _StateFailure()
+        function.argtypes = (
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        )
+        function.restype = ctypes.c_int
+        result = function(
+            directory_fd,
+            os.fsencode(source),
+            directory_fd,
+            os.fsencode(destination),
+            flags,
+        )
+    except (AttributeError, OSError, _StateFailure):
+        raise _StateFailure() from None
+    if result != 0:
+        raise _StateFailure()
 
 
 def _verify_prior_receipt(
@@ -831,12 +1287,13 @@ def _create_temporary(directory_fd: int, name: str) -> int:
     try:
         fd = os.open(
             name,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_NONBLOCK,
             0o600,
             dir_fd=directory_fd,
         )
         os.fchmod(fd, 0o600)
         _validate_regular_file(fd)
+        _clear_nonblocking(fd)
         return fd
     except OSError:
         if fd >= 0:
@@ -997,6 +1454,23 @@ def _identity(info: os.stat_result) -> _FileIdentity:
         mtime_ns=info.st_mtime_ns,
         ctime_ns=info.st_ctime_ns,
     )
+
+
+def _same_file_object(first: _FileIdentity, second: _FileIdentity) -> bool:
+    return first.device == second.device and first.inode == second.inode
+
+
+def _directory_identity(info: os.stat_result) -> tuple[int, int]:
+    return info.st_dev, info.st_ino
+
+
+def _clear_nonblocking(fd: int) -> None:
+    try:
+        flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+        if flags & os.O_NONBLOCK:
+            fcntl.fcntl(fd, fcntl.F_SETFL, flags & ~os.O_NONBLOCK)
+    except OSError:
+        raise _StateFailure() from None
 
 
 def _read_bounded(fd: int, maximum: int) -> bytes:

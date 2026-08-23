@@ -25,8 +25,9 @@ _REGION = "gcp-us-central1"
 
 @pytest.fixture
 def isolated_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    state = tmp_path.resolve() / "owned-tiny-state"
+    state = tmp_path.resolve() / ".pufferlab" / "state" / "owned-tiny-v1"
     monkeypatch.setattr("pufferlab.owned_tiny._production_state_path", lambda: state)
+    monkeypatch.setattr("pufferlab.owned_tiny._production_anchor_path", lambda: tmp_path.resolve())
     return state
 
 

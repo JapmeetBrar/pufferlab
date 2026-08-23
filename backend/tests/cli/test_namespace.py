@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 import traceback
 from pathlib import Path
 
@@ -26,8 +27,9 @@ _REGION = "aws-us-east-1"
 
 @pytest.fixture
 def isolated_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    state = tmp_path.resolve() / "owned-tiny-state"
+    state = tmp_path.resolve() / ".pufferlab" / "state" / "owned-tiny-v1"
     monkeypatch.setattr("pufferlab.owned_tiny._production_state_path", lambda: state)
+    monkeypatch.setattr("pufferlab.owned_tiny._production_anchor_path", lambda: tmp_path.resolve())
     monkeypatch.setattr("pufferlab.cli.namespace._NOT_FOUND_ATTEMPTS", 3)
     monkeypatch.setattr("pufferlab.cli.namespace._NOT_FOUND_POLL_INTERVAL", 0)
     return state
@@ -382,6 +384,40 @@ def test_delete_not_found_still_performs_independent_not_found_verification(
     assert provider.delete_calls == [snapshot.receipt.namespace]
     assert provider.metadata_calls == [snapshot.receipt.namespace]
     assert not (isolated_state / "receipt.json").exists()
+
+
+@pytest.mark.parametrize("attack", ["replace-lock", "relocate-state"])
+def test_cleanup_rechecks_anchor_continuity_before_next_provider_action(
+    isolated_state: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    attack: str,
+) -> None:
+    _create_receipt()
+
+    class AttackingProvider(FakeCleanupProvider):
+        async def delete_namespace(self, namespace: str) -> ProviderDeleteResult:
+            result = await super().delete_namespace(namespace)
+            if attack == "replace-lock":
+                replacement = isolated_state / "replacement-lock"
+                replacement.write_bytes(b"")
+                replacement.chmod(0o600)
+                replacement.replace(isolated_state / "operation.lock")
+            else:
+                isolated_state.replace(isolated_state.parent / "relocated-state")
+            return result
+
+    provider = AttackingProvider()
+    _install_provider(monkeypatch, provider)
+
+    assert main(["namespace", "cleanup-tiny"], settings_factory=_settings) == 1
+    assert len(provider.delete_calls) == 1
+    assert provider.metadata_calls == []
+    assert provider.close_calls == 1
+    receipt_root = (
+        isolated_state if attack == "replace-lock" else isolated_state.parent / "relocated-state"
+    )
+    receipt = json.loads((receipt_root / "receipt.json").read_text(encoding="utf-8"))
+    assert receipt["state"] == OwnedTinyState.CLEANUP_REQUESTED.value
 
 
 def test_cancellation_closes_provider_and_retains_cleanup_requested(

@@ -9,16 +9,19 @@ import secrets
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import NoReturn, Protocol
+from uuid import UUID
 
 from pufferlab.config import Settings
 from pufferlab.datasets.embeddings import SentenceTransformerDocumentEmbedder
 from pufferlab.datasets.ingestion import (
+    EmbeddedDocument,
     Embedder,
     IngestionCheckpoint,
     IngestionError,
     IngestionProgress,
     IngestionReport,
     IngestionService,
+    NamespaceReadiness,
     NamespaceWriter,
 )
 from pufferlab.datasets.loader import DatasetLoadError, load_fixture_corpus
@@ -113,6 +116,79 @@ class _EmbedderFactory(Protocol):
 
 class _WriterFactory(Protocol):
     def __call__(self, provider: _IngestionProvider) -> NamespaceWriter: ...
+
+
+class _ContinuityCheckedIngestionProvider:
+    def __init__(
+        self,
+        delegate: _IngestionProvider,
+        check: Callable[[], None],
+    ) -> None:
+        self._delegate = delegate
+        self._check = check
+
+    async def write_documents(
+        self,
+        *,
+        namespace: str,
+        documents: Sequence[WriteDocument],
+        schema: ProviderSchema,
+        distance_metric: DistanceMetric,
+    ) -> ProviderWriteResult:
+        self._check()
+        return await self._delegate.write_documents(
+            namespace=namespace,
+            documents=documents,
+            schema=schema,
+            distance_metric=distance_metric,
+        )
+
+    async def namespace_metadata(self, namespace: str) -> ProviderNamespaceMetadata:
+        self._check()
+        return await self._delegate.namespace_metadata(namespace)
+
+    async def namespace_document_ids(
+        self,
+        namespace: str,
+        *,
+        max_documents: int,
+    ) -> ProviderDocumentIdInventory:
+        self._check()
+        return await self._delegate.namespace_document_ids(
+            namespace,
+            max_documents=max_documents,
+        )
+
+    async def close(self) -> None:
+        await self._delegate.close()
+
+
+class _ContinuityCheckedWriter:
+    def __init__(self, delegate: NamespaceWriter, check: Callable[[], None]) -> None:
+        self._delegate = delegate
+        self._check = check
+
+    async def upsert_batch(
+        self,
+        namespace: str,
+        documents: Sequence[EmbeddedDocument],
+        *,
+        write_spec: NamespaceWriteSpec,
+    ) -> None:
+        self._check()
+        await self._delegate.upsert_batch(namespace, documents, write_spec=write_spec)
+
+    async def inspect_readiness(
+        self,
+        namespace: str,
+        *,
+        expected_document_ids: frozenset[UUID],
+    ) -> NamespaceReadiness:
+        self._check()
+        return await self._delegate.inspect_readiness(
+            namespace,
+            expected_document_ids=expected_document_ids,
+        )
 
 
 class TinyFixtureIngestor:
@@ -259,7 +335,11 @@ class TinyFixtureIngestor:
                 api_key=api_key,
                 region=region,
             )
+            if before_provider is not None:
+                provider = _ContinuityCheckedIngestionProvider(provider, before_provider)
             writer = self._writer_factory(provider)
+            if before_provider is not None:
+                writer = _ContinuityCheckedWriter(writer, before_provider)
             service = IngestionService(
                 embedder,
                 writer,
