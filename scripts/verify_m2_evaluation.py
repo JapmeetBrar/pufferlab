@@ -266,6 +266,8 @@ def _recompute_summaries(
             ndcg_values.append(ndcg)
             recall_values.append(recall)
             mrr_values.append(mrr)
+            if payload.total_client_wall_latency_ms is None:
+                raise EvaluationVerificationError("live evaluation latency must be measured")
             latency_values.append(payload.total_client_wall_latency_ms)
 
         summaries.append(

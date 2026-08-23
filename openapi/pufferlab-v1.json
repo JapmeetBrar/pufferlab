@@ -504,6 +504,7 @@
             "items": {
               "$ref": "#/components/schemas/RetrievalConfigSummary"
             },
+            "maxItems": 100,
             "title": "Configs",
             "type": "array"
           },

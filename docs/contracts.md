@@ -15,6 +15,8 @@ This document fixes vocabulary, request/response boundaries, identity, score sem
 - `null` means known absence; omitted fields are not requested/not computed.
 - Configs, dataset versions, query sets, and completed runs are immutable revisions.
 - Every top-level response includes `contract_version: 1`.
+- Every catalog, run, regression, query-detail, and export projection carries
+  `data_origin: "live" | "synthetic_demo"`. Browser input never selects this value.
 - Secrets, raw query vectors, and stored document vectors never cross the API boundary.
 
 Shared JSON value alias:
@@ -142,6 +144,7 @@ class DatasetVersion(BaseModel):
     id: UUID
     slug: str
     version: str
+    data_origin: Literal["live", "synthetic_demo"] = "live"
     namespace: str
     index_profile: IndexProfile
     document_count: int
@@ -149,6 +152,14 @@ class DatasetVersion(BaseModel):
     status: Literal["pending", "ingesting", "indexing", "ready", "failed"]
     created_at: datetime
 ```
+
+`live` revisions require a non-empty provider namespace. The single `synthetic_demo` revision uses
+an empty namespace and may only cross read/export surfaces. It must fail before credentials or any
+provider-related factory is constructed on create, recovery, or replay. The default `live` value is
+backward compatible with stored Milestone 2 JSON; M3 catalog projections always expose the origin
+explicitly.
+
+Versioned dataset list/detail responses wrap the immutable revision and repeat its matching origin.
 
 Identity invariant:
 
@@ -304,12 +315,25 @@ class SearchCompareResponse(BaseModel):
     observability_notice: str
 ```
 
+The M3 catalog response is dataset-scoped and origin-labeled:
+
+```python
+class RetrievalConfigCatalogResponse(BaseModel):
+    contract_version: Literal[1] = 1
+    dataset_version_id: UUID
+    data_origin: Literal["live", "synthetic_demo"]
+    configs: list[RetrievalConfigSummary]  # exactly four
+```
+
+Its order is frozen as BM25 baseline, ANN, server RRF, and local reranker, with four distinct
+immutable IDs. P0 has no config mutation endpoint.
+
 If debug provenance requires a second raw multi-query, its duration is `provenance_probe`, never folded into the production-shaped `turbopuffer` timing.
 
-`GET /api/v1/configs` returns the deterministic seeded summaries used by the compare request.
-The Milestone 1 compare implementation executes BM25 and ANN independently, reports only observed
-1-based ranks, typed scores, and separate client-wall-clock embedding/provider timings, and never
-returns query vectors or claims unexposed provider internals.
+`GET /api/v1/configs?dataset_version_id=...` returns the persisted summaries bound to that immutable
+dataset revision. The compare implementation executes the requested persisted configs, reports only
+observed 1-based ranks, typed scores, and separate client-wall-clock embedding/provider timings, and
+never returns query vectors or claims unexposed provider internals.
 
 ## 7. Judged query sets
 
@@ -343,6 +367,9 @@ class QuerySetSummary(BaseModel):
     content_hash: str
 ```
 
+M3 query-set catalog items pair each immutable `QuerySet` with `data_origin`; the versioned list is
+scoped by one required `dataset_version_id`. P0 catalog query sets contain exactly 50 queries.
+
 Metric functions ignore documents with grade 0 as relevant, preserve positive grades for NDCG gain, and return `null` plus a warning when a query has no positive qrels.
 
 ## 8. Eval run contracts
@@ -354,11 +381,16 @@ class CreateEvalRunRequest(BaseModel):
     contract_version: Literal[1] = 1
     query_set_id: UUID
     baseline_config_id: UUID
-    candidate_config_ids: list[UUID]
+    candidate_config_ids: list[UUID]  # exactly three
     random_seed: int = 20260822
-    max_concurrency: int = 4
-    warmup_query_count: int = 5
+    max_concurrency: int = Field(default=4, ge=1, le=16)
+    warmup_query_count: int = Field(default=5, ge=0, le=50)
 ```
+
+The baseline and three candidate IDs must be distinct. The application resolves them against one
+persisted, canonical 50-query suite and the ordered BM25/ANN/RRF/reranker catalog; neither origin,
+namespace, query text, nor config bodies are accepted from the browser. The response is a versioned
+`CreateEvalRunResponse` containing the durable `queued` revision and is served with HTTP 202.
 
 ### Status and summary
 
@@ -387,8 +419,9 @@ class RunEnvironment(BaseModel):
     turbopuffer_region: str
     python_version: str
     platform: str
-    max_concurrency: int
-    timing_source: Literal["perf_counter"] = "perf_counter"
+    max_concurrency: int  # 1..16
+    warmup_query_count: int = 0  # 0..50; unmeasured and excluded from outcomes
+    timing_source: Literal["perf_counter", "synthetic_unavailable"] = "perf_counter"
     query_embedding_cache_enabled: bool
 
 class EvalRun(BaseModel):
@@ -409,6 +442,41 @@ class EvalRun(BaseModel):
     error: ApiErrorDetail | None
 ```
 
+`MetricAggregate.value` is null if and only if `sample_count == 0`. Completed projections contain
+exactly four summaries in config-contract order and exactly these six metrics in order:
+`ndcg@10`, `recall@50`, `mrr@10`, `latency_p50_ms`, `latency_p95_ms`, and `error_rate`. Failures and
+no-positive-qrel attempts do not enter quality means. Error rate covers all 50 attempts.
+
+`perf_counter` means observed PufferLab client-wall time, not provider service time or a benchmark.
+Warmups, configured concurrency, embedding-cache policy, region, platform, and revision are retained
+for reproducibility. Synthetic successes use `synthetic_unavailable`, a null total latency, no stage
+timings, no candidate-count claim, and no trace. Their p50/p95 summaries are null with zero samples;
+zero must never stand in for unavailable timing.
+
+The existing M2 durable success codec remains decodable: omitted outcome `timing_source` means
+`perf_counter`, preserving its canonical JSON. The additive synthetic shape is:
+
+```python
+class EvalSuccessPayload(BaseModel):
+    contract_version: Literal[1] = 1
+    kind: Literal["success"] = "success"
+    ranked_document_ids: list[UUID]  # 0..50, unique, original order
+    metrics: PerQueryMetrics
+    timing_source: Literal["perf_counter", "synthetic_unavailable"] = "perf_counter"
+    total_client_wall_latency_ms: float | None
+    stage_timings: list[StageTiming]
+    candidate_counts: dict[str, int]
+    warnings: list[EvalOutcomeWarning]
+    trace_id: UUID | None
+```
+
+Run-list, detail, create, and cancel responses wrap an `EvalRunView` with explicit `data_origin`,
+`completed_attempts` (0..200), `total_attempts=200`,
+`original_stage_evidence_available=false`, and `live_replay_allowed`. A completed view requires exact
+50-query/four-config durable coverage. A failed view carries one direct redacted `ApiErrorDetail`;
+other statuses do not. Cancel returns the current durable revision and is idempotent for terminal
+runs. Run lists are bounded to 100 and ordered by `created_at` descending, then UUID ascending.
+
 ### Regression
 
 ```python
@@ -423,20 +491,60 @@ class RegressionRow(BaseModel):
     query_text: str
     baseline_config_id: UUID
     candidate_config_id: UUID
-    baseline_ndcg_at_10: float | None
-    candidate_ndcg_at_10: float | None
-    ndcg_delta: float | None
-    recall_delta: float | None
-    mrr_delta: float | None
+    baseline_ndcg_at_10: float
+    candidate_ndcg_at_10: float
+    ndcg_delta: float
+    recall_delta: float
+    mrr_delta: float
     baseline_latency_ms: float | None
     candidate_latency_ms: float | None
     relevant_rank_changes: list[RelevantRankChange]
     playground_url: str
+
+class RegressionCoverage(BaseModel):
+    total_queries: Literal[50] = 50
+    paired_queries: int
+    excluded: list[ExcludedPairCount]  # exactly six, frozen order
+
+class RegressionResponse(BaseModel):
+    contract_version: Literal[1] = 1
+    run_id: UUID
+    data_origin: Literal["live", "synthetic_demo"]
+    baseline_config_id: UUID
+    candidate_config_id: UUID
+    order: Literal["regressions", "gains"]
+    limit: int  # 1..50
+    rows: list[RegressionRow]  # paired rows only
+    coverage: RegressionCoverage
 ```
 
-Sort regressions by non-null `ndcg_delta` ascending, then `mrr_delta`, then `query_id`. Gains use the inverse ordering. A missing/failed query is not silently assigned zero; it is an error outcome and appears in coverage/error metrics.
+Excluded statuses appear exactly once and in this order: `baseline_missing`, `candidate_missing`,
+`baseline_failed`, `candidate_failed`, `both_failed`, `no_positive_qrels`. Paired plus excluded counts
+must total 50. Sort regressions by `ndcg_delta`, `mrr_delta`, then UUID ascending. For compatibility
+with the Milestone 2 engine, gains use the full inverse—including UUID descending on an exact metric
+tie. Missing, failed, and no-positive-qrel pairs never receive zero-valued quality rows.
 
-## 9. Forensic probe contract (P1, reserved now)
+### Query detail, export, and lifecycle envelopes
+
+`EvalRunQueryDetailResponse` is versioned and run-scoped. It returns the exact judged query, the
+baseline plus three candidate IDs, four persisted config summaries in contract order, zero to four
+available durable outcomes in that order, three relevant-rank-change groups through rank 50,
+dataset attribution, explicit `data_origin`, `original_stage_evidence_available=false`, and replay
+availability. It performs no provider work.
+
+`EvalRunExportResponse` wraps the backward-compatible `EvalRunExport` and adds `data_origin`.
+Exports are deterministic by `(config_id, query_id)` and safe for partial, cancelled, interrupted,
+or failed runs. A completed export requires the identical set of 50 query IDs for each of four run
+configs (200 unique outcomes). The synthetic export is completed, contains 200 successes, and
+retains unavailable timing without coercion.
+
+The six durable statuses are `queued`, `running`, `completed`, `failed`, `cancelled`, and
+`interrupted`. Recovery first records stale `running -> interrupted`, then claims valid queued runs
+oldest first. The exceptional `queued -> failed` transition is allowed only when exact persisted
+dataset/query-set/config bindings cannot be reconstructed; it records a safe direct error and makes
+no provider call. Partial running work is not automatically resumed.
+
+## 9. Query forensics and explicit replay
 
 ```python
 class ForensicCode(str, Enum):
@@ -448,22 +556,72 @@ class ForensicCode(str, Enum):
     RERANKED_DOWN = "reranked_down"
     NOT_OBSERVABLE = "not_observable"
 
+class EvidenceOrigin(str, Enum):
+    STORED_RUN = "stored_run"
+    LIVE_REPLAY_PRIMARY = "live_replay_primary"
+    LIVE_REPLAY_COUNTERFACTUAL_PROBE = "live_replay_counterfactual_probe"
+    CLIENT_COMPUTED = "client_computed"
+
 class EvidenceItem(BaseModel):
-    label: str
-    value: JsonValue
-    source: Literal[
-        "query_response", "compute_attribute", "local_filter_evaluation",
-        "counterfactual_query", "client_computation", "reranker"
-    ]
+    label: str  # 1..64, machine-readable
+    value: ForensicEvidenceValue
+    origin: EvidenceOrigin
+    observed_at: AwareDatetime
+    trace_id: UUID | None
 
 class ForensicObservation(BaseModel):
     code: ForensicCode
-    statement: str
-    evidence: list[EvidenceItem]
+    statement: str  # 1..512
+    origin: EvidenceOrigin
+    observed_at: AwareDatetime
+    trace_id: UUID | None
+    evidence: list[EvidenceItem]  # at most 16, unique labels
     certainty: Literal["observed", "counterfactual", "insufficient"]
 ```
 
-Forbidden statements include “turbopuffer searched cluster X,” “the cache was cold,” or “the filter ran before ANN” unless a future API directly supplies that fact.
+`ForensicEvidenceValue` is a discriminated allowlist only: bounded rank, typed score,
+candidate-count, presence, filter-result, RRF-contribution, or warning. Unknown keys/kinds, recursive
+JSON, non-finite numbers, boolean-to-number coercion, oversized strings/lists, and arbitrary provider
+bodies are rejected. RRF contributions require bounded rank/weight/constant inputs and exact
+`weight / (rank_constant + rank)` arithmetic.
+
+Stored M2 outcomes did not retain stage membership or stage scores. They may therefore emit only
+`NOT_OBSERVABLE` with `certainty=insufficient`; ranks, metrics, and timing remain honestly available
+in the query-detail outcome itself. Primary replay, counterfactual probe, and client-computed items
+each retain their own timestamp and exact source trace. Probe-derived evidence cannot claim
+`certainty=observed` or causal responsibility for a primary ordering. A non-derived observation
+cannot merge origins or traces; a client-computed observation preserves the origin of every bounded
+input and becomes counterfactual whenever any input came from the separate probe.
+
+```python
+class EvalRunQueryReplayRequest(BaseModel):
+    contract_version: Literal[1] = 1
+    config_ids: list[UUID]  # exactly two distinct persisted IDs
+    include_counterfactual_probe: bool = False
+
+class EvalRunQueryReplayResponse(BaseModel):
+    contract_version: Literal[1] = 1
+    run_id: UUID
+    query_id: UUID
+    data_origin: Literal["live"] = "live"
+    config_ids: list[UUID]
+    primary_origin: Literal["live_replay_primary"]
+    primary_observed_at: AwareDatetime
+    primary: SearchCompareResponse
+    counterfactual_probes: list[ReplayCounterfactualProbe]
+    observations: list[ForensicObservation]
+    original_stage_evidence_available: Literal[False] = False
+    observability_notice: str
+```
+
+Replay accepts no origin, namespace, query text, qrels, expected document IDs, or config body from
+the client. The server derives them from the run and dataset binding. The primary response contains
+only production-shaped evidence; BM25/ANN raw candidate memberships and `provenance_probe` timing
+remain in separately labeled bounded probes. Probe failure preserves the primary result.
+
+Forbidden statements include “turbopuffer searched cluster X,” “the cache was cold,” “the filter
+ran before ANN,” and counterfactual-probe inputs caused the primary order. Those claims remain
+`NOT_OBSERVABLE` unless a future API directly supplies the fact.
 
 ## 10. HTTP surface
 
@@ -473,19 +631,26 @@ P0 endpoints:
 GET    /api/v1/health
 GET    /api/v1/datasets
 GET    /api/v1/datasets/{dataset_version_id}
-GET    /api/v1/configs
-POST   /api/v1/configs
+GET    /api/v1/query-sets?dataset_version_id=...
+GET    /api/v1/configs?dataset_version_id=...
 POST   /api/v1/search/compare
-GET    /api/v1/query-sets
-POST   /api/v1/eval-runs
-GET    /api/v1/eval-runs
+POST   /api/v1/eval-runs                                      -> 202
+GET    /api/v1/eval-runs?limit=...
 GET    /api/v1/eval-runs/{run_id}
+POST   /api/v1/eval-runs/{run_id}/cancel
 GET    /api/v1/eval-runs/{run_id}/regressions
 GET    /api/v1/eval-runs/{run_id}/queries/{query_id}
 GET    /api/v1/eval-runs/{run_id}/export
+POST   /api/v1/eval-runs/{run_id}/queries/{query_id}/replay
 ```
 
 Polling `GET /eval-runs/{run_id}` is the P0 progress mechanism. No WebSocket/SSE contract is reserved.
+There is no P0 `POST /configs`.
+
+Every non-2xx response is the direct, redacted `ApiErrorDetail` body—not FastAPI's nested
+`{"detail": ...}` shape. Duplicate active suites return `409 run_conflict`; validation and forbidden
+synthetic cost paths fail before provider construction. Reads and deep-link restoration never
+perform provider work. Live replay is the only explicit query-detail action that may do so.
 
 ## 11. Errors and warnings
 
@@ -509,10 +674,18 @@ Provider exceptions are mapped at the adapter boundary. API responses never expo
 
 ## 12. Persistence and job invariants
 
-- `queued → running → completed|failed|cancelled`; on startup, stale `running` rows become `interrupted`.
+- Normal work follows `queued → running → completed|failed|cancelled`; on startup, stale `running`
+  rows become `interrupted`.
+- Startup then validates and claims queued rows oldest first within the global active-run bound. A
+  queued row whose exact immutable binding cannot be reconstructed becomes `failed` with a direct
+  safe error and zero provider calls.
 - Query outcomes are upserted by `(run_id, config_id, query_id)` for idempotent persistence.
 - A completed run is immutable.
 - Cancelling stops scheduling new queries and preserves completed outcomes.
+- `completed_queries` means fully durable query groups on 0..50, while outcome attempts are 0..200.
+- Persist outcomes before publishing progress; final summaries derive only from durable outcomes.
+- Synthetic demo revisions are read/export-only and never enter create, recovery, replay, or any
+  provider-capable composition path.
 - Deleting a local run never deletes a turbopuffer namespace.
 - Only a PufferLab-created branch with a recorded ownership token may be deleted automatically.
 
