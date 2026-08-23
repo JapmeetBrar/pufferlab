@@ -330,10 +330,12 @@ immutable IDs. P0 has no config mutation endpoint.
 
 If debug provenance requires a second raw multi-query, its duration is `provenance_probe`, never folded into the production-shaped `turbopuffer` timing.
 
-`GET /api/v1/configs?dataset_version_id=...` returns the persisted summaries bound to that immutable
-dataset revision. The compare implementation executes the requested persisted configs, reports only
-observed 1-based ranks, typed scores, and separate client-wall-clock embedding/provider timings, and
-never returns query vectors or claims unexposed provider internals.
+`GET /api/v1/configs` remains the existing tiny-fixture Playground catalog and must not change shape
+or meaning during M3. `GET /api/v1/datasets/{dataset_version_id}/configs` is the new persisted,
+origin-labeled four-config catalog bound to an immutable dataset revision. M3-B implements the new
+route without redirecting or reusing the Playground route. Compare reports only observed 1-based
+ranks, typed scores, and separate client-wall-clock embedding/provider timings, and never returns
+query vectors or claims unexposed provider internals.
 
 ## 7. Judged query sets
 
@@ -470,12 +472,15 @@ class EvalSuccessPayload(BaseModel):
     trace_id: UUID | None
 ```
 
-Run-list, detail, create, and cancel responses wrap an `EvalRunView` with explicit `data_origin`,
-`completed_attempts` (0..200), `total_attempts=200`,
-`original_stage_evidence_available=false`, and `live_replay_allowed`. A completed view requires exact
-50-query/four-config durable coverage. A failed view carries one direct redacted `ApiErrorDetail`;
-other statuses do not. Cancel returns the current durable revision and is idempotent for terminal
-runs. Run lists are bounded to 100 and ordered by `created_at` descending, then UUID ascending.
+Run-list, detail, create, and cancel responses wrap an `EvalRunView` with explicit
+`dataset_version_id`, `data_origin`, four ordered `RetrievalConfigSummary` labels matching the
+baseline/candidate IDs, `completed_attempts` (0..200), `total_attempts=200`,
+`original_stage_evidence_available=false`, and `live_replay_policy_permitted`. That last field means
+only that origin policy permits an explicit replay; it never asserts current provider namespace
+availability. A completed view requires exact 50-query/four-config durable coverage. A failed view
+carries one direct redacted `ApiErrorDetail`; other statuses do not. Cancel returns the current
+durable revision and is idempotent for terminal runs. Run lists are bounded to 100 and ordered by
+`created_at` descending, then UUID ascending.
 
 ### Regression
 
@@ -523,6 +528,11 @@ Excluded statuses appear exactly once and in this order: `baseline_missing`, `ca
 must total 50. Sort regressions by `ndcg_delta`, `mrr_delta`, then UUID ascending. For compatibility
 with the Milestone 2 engine, gains use the full inverse—including UUID descending on an exact metric
 tie. Missing, failed, and no-positive-qrel pairs never receive zero-valued quality rows.
+Synthetic regression rows require null baseline/candidate latency; paired live rows require both
+measured client-wall values. Each `playground_url` is a relative `/playground` link containing
+exactly one UUID-valued `run`, `query`, `left`, and `right`, plus at most one UUID `document`. M3-B
+constructs and tests these IDs against the response run/row identities; query text and all other
+parameters are forbidden from the URL.
 
 ### Query detail, export, and lifecycle envelopes
 
@@ -536,7 +546,9 @@ availability. It performs no provider work.
 Exports are deterministic by `(config_id, query_id)` and safe for partial, cancelled, interrupted,
 or failed runs. A completed export requires the identical set of 50 query IDs for each of four run
 configs (200 unique outcomes). The synthetic export is completed, contains 200 successes, and
-retains unavailable timing without coercion.
+retains unavailable timing without coercion. Export origin is end-to-end: environment timing,
+every successful outcome, and completed p50/p95 summaries must agree. Synthetic summaries are
+null/zero-sample; completed live summaries contain 50 measured latency samples.
 
 The six durable statuses are `queued`, `running`, `completed`, `failed`, `cancelled`, and
 `interrupted`. Recovery first records stale `running -> interrupted`, then claims valid queued runs
@@ -593,6 +605,14 @@ each retain their own timestamp and exact source trace. Probe-derived evidence c
 cannot merge origins or traces; a client-computed observation preserves the origin of every bounded
 input and becomes counterfactual whenever any input came from the separate probe.
 
+`stored_run` forensic evidence is limited to the typed original-stage-unavailable warning; stored
+final ranks, metrics, and timings remain in the durable outcome rather than being re-cast as stage
+proof. Every primary forensic trace/time must match an actual primary config result and the primary
+replay timestamp. Every counterfactual trace/time must match one returned probe. Probe membership
+ranks must be unique per stage and fit a positive returned candidate count; counterfactual
+rank/count evidence is checked against that same probe. Client-computed evidence must name one
+returned source trace and inherits counterfactual certainty when that source is a probe.
+
 ```python
 class EvalRunQueryReplayRequest(BaseModel):
     contract_version: Literal[1] = 1
@@ -632,7 +652,8 @@ GET    /api/v1/health
 GET    /api/v1/datasets
 GET    /api/v1/datasets/{dataset_version_id}
 GET    /api/v1/query-sets?dataset_version_id=...
-GET    /api/v1/configs?dataset_version_id=...
+GET    /api/v1/configs                                      # existing Playground catalog
+GET    /api/v1/datasets/{dataset_version_id}/configs         # persisted eval catalog
 POST   /api/v1/search/compare
 POST   /api/v1/eval-runs                                      -> 202
 GET    /api/v1/eval-runs?limit=...

@@ -15,6 +15,7 @@ from pufferlab.contracts.evals import (
     EvalRunExport,
     EvalRunExportResponse,
     EvalRunListResponse,
+    EvalRunQueryDetailResponse,
     EvalRunStatus,
     EvalRunView,
     EvalSuccessPayload,
@@ -32,10 +33,35 @@ from pufferlab.contracts.evals import (
     RunEnvironment,
     TimingSource,
 )
+from pufferlab.contracts.retrieval import RetrievalConfigSummary, RetrievalMode
 from pydantic import ValidationError
 
 _NOW = datetime(2026, 8, 23, 12, tzinfo=UTC)
 _CONFIG_IDS = [UUID(int=index) for index in range(1, 5)]
+_DATASET_ID = UUID(int=50)
+
+
+def _configs() -> list[RetrievalConfigSummary]:
+    return [
+        RetrievalConfigSummary(
+            id=config_id,
+            revision=1,
+            name=name,
+            mode=mode,
+            config_hash=f"hash-{config_id}",
+        )
+        for config_id, name, mode in zip(
+            _CONFIG_IDS,
+            ("BM25", "ANN", "Server RRF", "Local reranker"),
+            (
+                RetrievalMode.BM25,
+                RetrievalMode.VECTOR,
+                RetrievalMode.HYBRID_RRF,
+                RetrievalMode.HYBRID_RERANK,
+            ),
+            strict=True,
+        )
+    ]
 
 
 def test_eval_run_serializes_contract_version() -> None:
@@ -171,9 +197,11 @@ def _view(status: EvalRunStatus, *, synthetic: bool = False) -> EvalRunView:
     completed = status is EvalRunStatus.COMPLETED
     return EvalRunView(
         run=_run(status, synthetic=synthetic),
+        dataset_version_id=_DATASET_ID,
         data_origin=DataOrigin.SYNTHETIC_DEMO if synthetic else DataOrigin.LIVE,
+        configs=_configs(),
         completed_attempts=200 if completed else 0,
-        live_replay_allowed=not synthetic,
+        live_replay_policy_permitted=not synthetic,
     )
 
 
@@ -271,10 +299,23 @@ def test_run_views_cover_all_six_durable_statuses(status: EvalRunStatus) -> None
     view = _view(status)
 
     assert view.run.status is status
+    assert view.dataset_version_id == _DATASET_ID
+    assert [config.id for config in view.configs] == _CONFIG_IDS
     assert view.original_stage_evidence_available is False
+    payload = view.model_dump(mode="json")
+    assert payload["live_replay_policy_permitted"] is True
+    assert "live_replay_allowed" not in payload
     if status is EvalRunStatus.QUEUED:
         assert CreateEvalRunResponse(result=view).result.run.status is EvalRunStatus.QUEUED
     assert CancelEvalRunResponse(result=view).result.run.status is status
+
+    with pytest.raises(ValidationError, match="contract order"):
+        EvalRunView.model_validate(
+            {
+                **view.model_dump(),
+                "configs": list(reversed(view.model_dump()["configs"])),
+            }
+        )
 
 
 def test_failed_run_view_requires_a_direct_redacted_error() -> None:
@@ -283,9 +324,11 @@ def test_failed_run_view_requires_a_direct_redacted_error() -> None:
     with pytest.raises(ValidationError, match="direct redacted error"):
         EvalRunView(
             run=failed,
+            dataset_version_id=_DATASET_ID,
             data_origin=DataOrigin.LIVE,
+            configs=_configs(),
             completed_attempts=0,
-            live_replay_allowed=True,
+            live_replay_policy_permitted=True,
         )
 
 
@@ -299,10 +342,31 @@ def test_completed_run_view_requires_six_ordered_metric_summaries() -> None:
     with pytest.raises(ValidationError, match="six metrics in contract order"):
         EvalRunView(
             run=completed,
+            dataset_version_id=_DATASET_ID,
             data_origin=DataOrigin.LIVE,
+            configs=_configs(),
             completed_attempts=200,
-            live_replay_allowed=True,
+            live_replay_policy_permitted=True,
         )
+
+
+def test_synthetic_run_view_is_policy_ineligible_without_claiming_namespace_state() -> None:
+    view = _view(EvalRunStatus.COMPLETED, synthetic=True)
+
+    payload = view.model_dump(mode="json")
+    assert payload["data_origin"] == "synthetic_demo"
+    assert payload["live_replay_policy_permitted"] is False
+    assert "namespace_available" not in payload
+    with pytest.raises(ValidationError, match="read/export-only"):
+        EvalRunView.model_validate({**payload, "live_replay_policy_permitted": True})
+
+
+def test_query_detail_schema_uses_policy_permission_not_namespace_availability() -> None:
+    properties = EvalRunQueryDetailResponse.model_json_schema()["properties"]
+
+    assert "live_replay_policy_permitted" in properties
+    assert "live_replay_allowed" not in properties
+    assert "namespace_available" not in properties
 
 
 def test_run_list_is_versioned_newest_first_and_propagates_origin() -> None:
@@ -312,9 +376,11 @@ def test_run_list_is_versioned_newest_first_and_propagates_origin() -> None:
             EvalRunStatus.QUEUED,
             run_id=UUID(int=99),
         ).model_copy(update={"created_at": datetime(2026, 8, 22, tzinfo=UTC)}),
+        dataset_version_id=_DATASET_ID,
         data_origin=DataOrigin.LIVE,
+        configs=_configs(),
         completed_attempts=0,
-        live_replay_allowed=True,
+        live_replay_policy_permitted=True,
     )
 
     response = EvalRunListResponse(runs=[newest, older])
@@ -366,8 +432,15 @@ def test_regression_response_has_paired_rows_and_exact_excluded_coverage() -> No
         ndcg_delta=-0.6,
         recall_delta=-0.5,
         mrr_delta=-0.4,
+        baseline_latency_ms=10.0,
+        candidate_latency_ms=20.0,
         relevant_rank_changes=[],
-        playground_url=("/playground?run=00000000-0000-0000-0000-000000000100&query=one"),
+        playground_url=(
+            "/playground?run=00000000-0000-0000-0000-000000000064"
+            "&query=00000000-0000-0000-0000-000000000190"
+            "&left=00000000-0000-0000-0000-000000000001"
+            "&right=00000000-0000-0000-0000-000000000002"
+        ),
     )
 
     response = RegressionResponse(
@@ -387,6 +460,33 @@ def test_regression_response_has_paired_rows_and_exact_excluded_coverage() -> No
     assert response.coverage.paired_queries == 50
     with pytest.raises(ValidationError, match="cover all 50"):
         RegressionCoverage(paired_queries=49, excluded=excluded)
+    with pytest.raises(ValidationError, match="synthetic regressions cannot claim"):
+        RegressionResponse.model_validate(
+            {**response.model_dump(), "data_origin": DataOrigin.SYNTHETIC_DEMO}
+        )
+    with pytest.raises(ValidationError, match="live paired regressions require"):
+        RegressionResponse.model_validate(
+            {
+                **response.model_dump(),
+                "rows": [
+                    {
+                        **response.model_dump()["rows"][0],
+                        "baseline_latency_ms": None,
+                        "candidate_latency_ms": None,
+                    }
+                ],
+            }
+        )
+    with pytest.raises(ValidationError, match="run/query/left/right"):
+        RegressionRow.model_validate(
+            {
+                **row.model_dump(),
+                "playground_url": (
+                    "/playground?run=00000000-0000-0000-0000-000000000064"
+                    "&query_text=licensed-query-text"
+                ),
+            }
+        )
 
 
 def test_gain_order_preserves_m2_full_inverse_uuid_tie_breaker() -> None:
@@ -413,8 +513,13 @@ def test_gain_order_preserves_m2_full_inverse_uuid_tie_breaker() -> None:
             ndcg_delta=0.1,
             recall_delta=0.1,
             mrr_delta=0.1,
+            baseline_latency_ms=10.0,
+            candidate_latency_ms=11.0,
             relevant_rank_changes=[],
-            playground_url="/playground?run=one",
+            playground_url=(
+                "/playground?run=00000000-0000-0000-0000-000000000064"
+                f"&query={query_id}&left={_CONFIG_IDS[0]}&right={_CONFIG_IDS[1]}"
+            ),
         )
 
     response = RegressionResponse(
@@ -475,4 +580,67 @@ def test_synthetic_export_requires_200_successes_with_null_timing() -> None:
         EvalRunExportResponse(
             data_origin=DataOrigin.SYNTHETIC_DEMO,
             export=export.model_copy(update={"outcomes": records[:-1]}),
+        )
+
+
+def test_export_origin_binds_environment_outcomes_and_latency_summaries() -> None:
+    synthetic_run = _run(EvalRunStatus.COMPLETED, synthetic=True)
+    synthetic_records = []
+    for config_id in sorted(_CONFIG_IDS, key=str):
+        for query_number in range(1, 51):
+            synthetic_records.append(
+                EvalOutcomeRecord(
+                    run_id=synthetic_run.id,
+                    config_id=config_id,
+                    query_id=UUID(int=3_000 + query_number),
+                    created_at=_NOW,
+                    outcome=EvalSuccessPayload(
+                        ranked_document_ids=[],
+                        metrics=PerQueryMetrics(
+                            ndcg_at_10=0.0,
+                            recall_at_50=0.0,
+                            mrr_at_10=0.0,
+                        ),
+                        timing_source=TimingSource.SYNTHETIC_UNAVAILABLE,
+                        total_client_wall_latency_ms=None,
+                        stage_timings=[],
+                        candidate_counts={},
+                        warnings=[],
+                        trace_id=None,
+                    ),
+                )
+            )
+
+    wrong_summary_run = synthetic_run.model_copy(deep=True)
+    for summary in wrong_summary_run.summaries:
+        summary.metrics[3] = MetricAggregate(
+            name=MetricName.LATENCY_P50_MS,
+            value=12.0,
+            sample_count=50,
+        )
+        summary.metrics[4] = MetricAggregate(
+            name=MetricName.LATENCY_P95_MS,
+            value=20.0,
+            sample_count=50,
+        )
+    with pytest.raises(ValidationError, match="null with zero samples"):
+        EvalRunExportResponse(
+            data_origin=DataOrigin.SYNTHETIC_DEMO,
+            export=EvalRunExport(run=wrong_summary_run, outcomes=synthetic_records),
+        )
+
+    live_run = _run(EvalRunStatus.COMPLETED)
+    with pytest.raises(ValidationError, match="match the export timing origin"):
+        EvalRunExportResponse(
+            data_origin=DataOrigin.LIVE,
+            export=EvalRunExport(run=live_run, outcomes=synthetic_records),
+        )
+
+    wrong_environment = synthetic_run.model_copy(
+        update={"environment": _environment(synthetic=False)}
+    )
+    with pytest.raises(ValidationError, match="origin and run timing source"):
+        EvalRunExportResponse(
+            data_origin=DataOrigin.SYNTHETIC_DEMO,
+            export=EvalRunExport(run=wrong_environment, outcomes=synthetic_records),
         )

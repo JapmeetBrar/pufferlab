@@ -171,6 +171,15 @@ class EvidenceItem(ContractModel):
             and self.trace_id is None
         ):
             raise ValueError("live and derived evidence require the exact source trace ID")
+        if self.origin is EvidenceOrigin.STORED_RUN:
+            if self.trace_id is not None:
+                raise ValueError("stored-run unavailability evidence cannot claim a source trace")
+            if not isinstance(self.value, WarningEvidenceValue) or (
+                self.value.code is not ForensicWarningCode.ORIGINAL_STAGE_EVIDENCE_UNAVAILABLE
+            ):
+                raise ValueError(
+                    "stored-run forensic evidence is limited to unavailability warnings"
+                )
         return self
 
 
@@ -307,6 +316,22 @@ class ReplayCounterfactualProbe(ContractModel):
         document_ids = [candidate.document_id for candidate in self.candidates]
         if len(document_ids) != len(set(document_ids)):
             raise ValueError("a counterfactual probe cannot duplicate candidate documents")
+        ranks_by_stage: dict[RetrievalStage, list[int]] = {
+            RetrievalStage.BM25_CANDIDATES: [],
+            RetrievalStage.VECTOR_CANDIDATES: [],
+        }
+        counts = {
+            RetrievalStage.BM25_CANDIDATES: self.bm25_candidate_count,
+            RetrievalStage.VECTOR_CANDIDATES: self.vector_candidate_count,
+        }
+        for candidate in self.candidates:
+            for membership in candidate.stage_membership:
+                count = counts[membership.stage]
+                if count == 0 or membership.rank > count:
+                    raise ValueError("probe membership rank must fit its positive candidate count")
+                ranks_by_stage[membership.stage].append(membership.rank)
+        if any(len(ranks) != len(set(ranks)) for ranks in ranks_by_stage.values()):
+            raise ValueError("probe ranks must be unique within each candidate stage")
         return self
 
 
@@ -332,6 +357,9 @@ class EvalRunQueryReplayResponse(ContractModel):
             raise ValueError("primary replay query identity must match the requested run query")
         if [result.config.id for result in self.primary.results] != self.config_ids:
             raise ValueError("primary replay results must retain requested config order")
+        primary_traces = {result.trace_id for result in self.primary.results}
+        if len(primary_traces) != len(self.primary.results):
+            raise ValueError("primary config results require distinct source traces")
         if any(
             timing.stage is TimingStage.PROVENANCE_PROBE
             for result in self.primary.results
@@ -350,4 +378,103 @@ class EvalRunQueryReplayResponse(ContractModel):
             config_id not in self.config_ids for config_id in probe_ids
         ):
             raise ValueError("counterfactual probes must uniquely match requested configs")
+        probes_by_trace = {probe.trace_id: probe for probe in self.counterfactual_probes}
+        if len(probes_by_trace) != len(self.counterfactual_probes):
+            raise ValueError("counterfactual probes require distinct source traces")
+        if primary_traces & probes_by_trace.keys():
+            raise ValueError("primary and counterfactual sources cannot share a trace")
+        for observation in self.observations:
+            self._validate_source_binding(
+                observation.origin,
+                observation.trace_id,
+                observation.observed_at,
+                observation.certainty,
+                observation.evidence,
+                primary_traces,
+                probes_by_trace,
+            )
         return self
+
+    def _validate_source_binding(
+        self,
+        origin: EvidenceOrigin,
+        trace_id: UUID | None,
+        observed_at: AwareDatetime,
+        certainty: EvidenceCertainty,
+        evidence: list[EvidenceItem],
+        primary_traces: set[UUID],
+        probes_by_trace: dict[UUID, ReplayCounterfactualProbe],
+    ) -> None:
+        self._validate_one_source(
+            origin,
+            trace_id,
+            observed_at,
+            certainty,
+            None,
+            primary_traces,
+            probes_by_trace,
+        )
+        for item in evidence:
+            self._validate_one_source(
+                item.origin,
+                item.trace_id,
+                item.observed_at,
+                certainty,
+                item.value,
+                primary_traces,
+                probes_by_trace,
+            )
+
+    def _validate_one_source(
+        self,
+        origin: EvidenceOrigin,
+        trace_id: UUID | None,
+        observed_at: AwareDatetime,
+        certainty: EvidenceCertainty,
+        value: ForensicEvidenceValue | None,
+        primary_traces: set[UUID],
+        probes_by_trace: dict[UUID, ReplayCounterfactualProbe],
+    ) -> None:
+        if origin is EvidenceOrigin.STORED_RUN:
+            return
+        if trace_id is None:
+            raise ValueError("live and derived forensic sources require a trace")
+        if origin is EvidenceOrigin.LIVE_REPLAY_PRIMARY:
+            if trace_id not in primary_traces or observed_at != self.primary_observed_at:
+                raise ValueError(
+                    "primary forensic evidence must bind to a primary result trace/time"
+                )
+            return
+        if origin is EvidenceOrigin.LIVE_REPLAY_COUNTERFACTUAL_PROBE:
+            probe = probes_by_trace.get(trace_id)
+            if probe is None or observed_at != probe.observed_at:
+                raise ValueError("counterfactual evidence must bind to a probe trace/time")
+            if value is not None:
+                self._validate_probe_evidence_value(value, probe)
+            return
+        if trace_id not in primary_traces and trace_id not in probes_by_trace:
+            raise ValueError("client-computed evidence must bind to a returned source trace")
+        if trace_id in probes_by_trace and certainty is EvidenceCertainty.OBSERVED:
+            raise ValueError("probe-derived client computation cannot claim observed certainty")
+
+    @staticmethod
+    def _validate_probe_evidence_value(
+        value: ForensicEvidenceValue,
+        probe: ReplayCounterfactualProbe,
+    ) -> None:
+        counts = {
+            RetrievalStage.BM25_CANDIDATES: probe.bm25_candidate_count,
+            RetrievalStage.VECTOR_CANDIDATES: probe.vector_candidate_count,
+        }
+        if isinstance(value, CandidateCountEvidenceValue) and (
+            value.stage not in counts or value.count != counts[value.stage]
+        ):
+            raise ValueError("counterfactual count evidence must equal its probe count")
+        if isinstance(value, (ScoreEvidenceValue, PresenceEvidenceValue)) and (
+            value.stage not in counts
+        ):
+            raise ValueError("counterfactual stage evidence is limited to probe candidate stages")
+        if isinstance(value, (RankEvidenceValue, RrfContributionEvidenceValue)):
+            count = counts.get(value.stage)
+            if count is None or count == 0 or value.rank > count:
+                raise ValueError("counterfactual rank evidence must fit its positive probe count")

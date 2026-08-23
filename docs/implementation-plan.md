@@ -321,6 +321,8 @@ Maximum useful initial parallelism after T0 is four workstreams: platform, turbo
 **Acceptance criteria:**
 
 - Browser compares two configs against the live tiny namespace.
+- The existing unscoped `/api/v1/configs` remains the tiny-fixture Playground catalog; later eval
+  work adds a separate dataset-scoped catalog rather than changing this route.
 - Query parameters can be copied as a stable URL.
 - Results show rank, score kind/direction, relevance grade if known, and wall-clock measurement label.
 - API key appears nowhere in browser network payloads or built assets.
@@ -354,6 +356,11 @@ Maximum useful initial parallelism after T0 is four workstreams: platform, turbo
 - Summary displays metric value and sample count.
 - Regressions sort by NDCG delta and show supporting deltas/rank changes.
 - Deep link restores query, judgments, baseline, candidate, and run context.
+- Run responses carry their dataset revision and four ordered config labels. Dataset-backed config
+  discovery uses `/api/v1/datasets/{dataset_version_id}/configs` without changing the existing
+  Playground catalog.
+- Regression deep links contain UUID-only `run`, `query`, `left`, and `right` parameters (optional
+  `document`) and never include licensed query text.
 - Cancellation stops new scheduling and leaves run inspectable.
 
 **Tests:** job test with deterministic fake runner, API lifecycle tests, regression-table UI test, Playwright deep-link flow.
@@ -380,6 +387,8 @@ Maximum useful initial parallelism after T0 is four workstreams: platform, turbo
 **Acceptance criteria:**
 
 - Every displayed explanation maps to a stored evidence item.
+- Primary/probe evidence trace and timestamp bind to an actually returned source; probe ranks fit
+  returned positive candidate counts, and stored outcomes never fabricate stage evidence.
 - Internal plan/cache claims are absent.
 - RRF contribution math is inspectable.
 - Reranker shows only score/rank change, not generated rationale.

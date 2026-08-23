@@ -85,7 +85,8 @@ All top-level responses are versioned and use generated frontend types.
 GET  /api/v1/datasets
 GET  /api/v1/datasets/{dataset_version_id}
 GET  /api/v1/query-sets?dataset_version_id=...
-GET  /api/v1/configs?dataset_version_id=...
+GET  /api/v1/configs                                      -> existing Playground catalog
+GET  /api/v1/datasets/{dataset_version_id}/configs         -> persisted eval catalog
 
 POST /api/v1/eval-runs                         -> 202 queued run
 GET  /api/v1/eval-runs?limit=...               -> newest first, bounded
@@ -110,6 +111,11 @@ POST /api/v1/eval-runs/{run_id}/queries/{query_id}/replay
 - Query detail returns the exact judged query, ordered persisted config summaries, one typed durable
   outcome per available config, relevant-document rank changes, attribution, and evidence
   availability. It performs no provider call.
+- Run projections repeat the dataset revision and four ordered config summaries so dashboard labels
+  require no handwritten join. `live_replay_policy_permitted` expresses origin policy only; current
+  namespace availability is resolved when the explicit action runs.
+- M3 preserves the unscoped `/configs` tiny-fixture Playground contract. Dataset-backed evaluation
+  catalogs use `/datasets/{dataset_version_id}/configs`; M3-B tests both routes independently.
 - Replay accepts config IDs only. The server loads the run/query, preserves exact graded qrels,
   resolves the dataset and config hashes, and never accepts query text, expected IDs, or namespace
   from the browser. The response is explicitly non-original evidence. Its production-shaped result

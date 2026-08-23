@@ -3,6 +3,7 @@
 from datetime import datetime
 from enum import StrEnum
 from typing import Annotated, Literal
+from urllib.parse import parse_qsl, urlsplit
 from uuid import UUID
 
 from pydantic import Field, model_validator
@@ -152,6 +153,31 @@ class EvalRun(ContractModel):
     error: ApiErrorDetail | None
 
 
+def _validate_completed_summaries(run: EvalRun, *, synthetic: bool) -> None:
+    config_ids = [run.baseline_config_id, *run.candidate_config_ids]
+    if [summary.config_id for summary in run.summaries] != config_ids:
+        raise ValueError("completed summaries must retain config contract order")
+    for summary in run.summaries:
+        if tuple(metric.name for metric in summary.metrics) != _SUMMARY_METRIC_ORDER:
+            raise ValueError("completed summaries require six metrics in contract order")
+        if summary.completed_queries + summary.failed_queries != _CANONICAL_QUERY_COUNT:
+            raise ValueError("completed summaries must cover all 50 query attempts")
+        if synthetic and (
+            summary.completed_queries != _CANONICAL_QUERY_COUNT or summary.failed_queries != 0
+        ):
+            raise ValueError("synthetic summaries require 50 successful query attempts")
+        error_rate = summary.metrics[-1]
+        if error_rate.sample_count != _CANONICAL_QUERY_COUNT:
+            raise ValueError("completed error-rate summaries require 50 samples")
+        for name in (MetricName.LATENCY_P50_MS, MetricName.LATENCY_P95_MS):
+            latency = next(metric for metric in summary.metrics if metric.name is name)
+            if synthetic:
+                if latency.value is not None or latency.sample_count != 0:
+                    raise ValueError("synthetic latency summaries must be null with zero samples")
+            elif latency.value is None or latency.sample_count != _CANONICAL_QUERY_COUNT:
+                raise ValueError("live completed latency summaries require 50 measured samples")
+
+
 class RelevantRankChange(ContractModel):
     document_id: UUID
     relevance_grade: int = Field(ge=0)
@@ -209,6 +235,31 @@ class RegressionRow(ContractModel):
         pattern=r"^/playground(?:\?|$)",
     )
 
+    @model_validator(mode="after")
+    def validate_playground_deep_link(self) -> "RegressionRow":
+        parsed = urlsplit(self.playground_url)
+        if parsed.scheme or parsed.netloc or parsed.fragment or parsed.path != "/playground":
+            raise ValueError("playground links must be relative /playground URLs without fragments")
+        pairs = parse_qsl(parsed.query, keep_blank_values=True)
+        allowed = {"run", "query", "left", "right", "document"}
+        keys = [key for key, _value in pairs]
+        required = {"run", "query", "left", "right"}
+        if set(keys) - allowed or any(keys.count(key) != 1 for key in required):
+            raise ValueError("playground links require one run/query/left/right ID only")
+        if keys.count("document") > 1 or len(keys) != len(set(keys)):
+            raise ValueError("playground link parameters cannot be duplicated")
+        try:
+            ids = {key: UUID(value) for key, value in pairs if key in allowed}
+        except ValueError as exc:
+            raise ValueError("playground link parameters must be UUIDs") from exc
+        if (
+            ids["query"] != self.query_id
+            or ids["left"] != self.baseline_config_id
+            or ids["right"] != self.candidate_config_id
+        ):
+            raise ValueError("playground link query/left/right IDs must match the regression row")
+        return self
+
 
 class ExcludedPairCount(ContractModel):
     status: RegressionPairStatus
@@ -250,6 +301,11 @@ class RegressionResponse(ContractModel):
             for row in self.rows
         ):
             raise ValueError("every row must match the requested baseline/candidate pair")
+        if any(
+            UUID(dict(parse_qsl(urlsplit(row.playground_url).query))["run"]) != self.run_id
+            for row in self.rows
+        ):
+            raise ValueError("every playground link must match the regression run ID")
         query_ids = [row.query_id for row in self.rows]
         if len(query_ids) != len(set(query_ids)):
             raise ValueError("regression rows must contain unique query IDs")
@@ -260,6 +316,15 @@ class RegressionResponse(ContractModel):
         )
         if self.rows != ordered:
             raise ValueError("regression rows must use deterministic quality ordering")
+        latency_pairs = [(row.baseline_latency_ms, row.candidate_latency_ms) for row in self.rows]
+        if self.data_origin is DataOrigin.SYNTHETIC_DEMO and any(
+            baseline is not None or candidate is not None for baseline, candidate in latency_pairs
+        ):
+            raise ValueError("synthetic regressions cannot claim measured latency")
+        if self.data_origin is DataOrigin.LIVE and any(
+            baseline is None or candidate is None for baseline, candidate in latency_pairs
+        ):
+            raise ValueError("live paired regressions require measured latency")
         return self
 
 
@@ -389,7 +454,9 @@ class EvalRunView(ContractModel):
     """Provider-free projection metadata around one durable run revision."""
 
     run: EvalRun
+    dataset_version_id: UUID
     data_origin: DataOrigin
+    configs: list[RetrievalConfigSummary] = Field(min_length=4, max_length=4)
     completed_attempts: int = Field(ge=0, le=_CANONICAL_OUTCOME_COUNT)
     total_attempts: int = Field(
         default=_CANONICAL_OUTCOME_COUNT,
@@ -397,11 +464,12 @@ class EvalRunView(ContractModel):
         le=_CANONICAL_OUTCOME_COUNT,
     )
     original_stage_evidence_available: Literal[False] = False
-    live_replay_allowed: bool
+    live_replay_policy_permitted: bool
 
     @model_validator(mode="after")
     def validate_canonical_projection(self) -> "EvalRunView":
         config_ids = [self.run.baseline_config_id, *self.run.candidate_config_ids]
+        synthetic = self.data_origin is DataOrigin.SYNTHETIC_DEMO
         if (
             self.run.total_queries != _CANONICAL_QUERY_COUNT
             or self.run.query_set.query_count != _CANONICAL_QUERY_COUNT
@@ -409,6 +477,8 @@ class EvalRunView(ContractModel):
             raise ValueError("P0 run views require the canonical 50-query set")
         if len(config_ids) != _CANONICAL_CONFIG_COUNT or len(set(config_ids)) != len(config_ids):
             raise ValueError("P0 run views require four distinct ordered configs")
+        if [config.id for config in self.configs] != config_ids:
+            raise ValueError("run-view configs must match baseline/candidate contract order")
         if self.completed_attempts < self.run.completed_queries * _CANONICAL_CONFIG_COUNT:
             raise ValueError("attempt progress cannot trail fully durable query-group progress")
         if self.run.status is EvalRunStatus.COMPLETED and (
@@ -422,32 +492,13 @@ class EvalRunView(ContractModel):
         elif self.run.error is not None:
             raise ValueError("only failed run views may carry a run-level error")
         if self.run.status is EvalRunStatus.COMPLETED:
-            if [summary.config_id for summary in self.run.summaries] != config_ids:
-                raise ValueError("completed summaries must retain config contract order")
-            for summary in self.run.summaries:
-                if tuple(metric.name for metric in summary.metrics) != _SUMMARY_METRIC_ORDER:
-                    raise ValueError("completed summaries require six metrics in contract order")
-                if summary.completed_queries + summary.failed_queries != _CANONICAL_QUERY_COUNT:
-                    raise ValueError("completed summaries must cover all 50 query attempts")
-                error_rate = summary.metrics[-1]
-                if error_rate.sample_count != _CANONICAL_QUERY_COUNT:
-                    raise ValueError("completed error-rate summaries require 50 samples")
-        synthetic = self.data_origin is DataOrigin.SYNTHETIC_DEMO
+            _validate_completed_summaries(self.run, synthetic=synthetic)
         if synthetic != (self.run.environment.timing_source is TimingSource.SYNTHETIC_UNAVAILABLE):
             raise ValueError("run origin and timing source must agree")
-        if self.live_replay_allowed is synthetic:
+        if self.live_replay_policy_permitted is synthetic:
             raise ValueError("synthetic demo runs are read/export-only")
-        if synthetic:
-            if self.run.status is not EvalRunStatus.COMPLETED:
-                raise ValueError("the synthetic demo projection is one immutable completed run")
-            for summary in self.run.summaries:
-                metrics = {metric.name: metric for metric in summary.metrics}
-                for name in (MetricName.LATENCY_P50_MS, MetricName.LATENCY_P95_MS):
-                    metric = metrics.get(name)
-                    if metric is None or metric.value is not None or metric.sample_count != 0:
-                        raise ValueError(
-                            "synthetic latency summaries must be null with zero samples"
-                        )
+        if synthetic and self.run.status is not EvalRunStatus.COMPLETED:
+            raise ValueError("the synthetic demo projection is one immutable completed run")
         return self
 
 
@@ -522,7 +573,7 @@ class EvalRunQueryDetailResponse(ContractModel):
     rank_changes: list[CandidateRelevantRankChanges] = Field(min_length=3, max_length=3)
     attribution: DatasetAttribution
     original_stage_evidence_available: Literal[False] = False
-    live_replay_allowed: bool
+    live_replay_policy_permitted: bool
 
     @model_validator(mode="after")
     def validate_run_query_scope(self) -> "EvalRunQueryDetailResponse":
@@ -544,7 +595,7 @@ class EvalRunQueryDetailResponse(ContractModel):
         if [item.candidate_config_id for item in self.rank_changes] != self.candidate_config_ids:
             raise ValueError("rank-change groups must retain candidate contract order")
         synthetic = self.data_origin is DataOrigin.SYNTHETIC_DEMO
-        if self.live_replay_allowed is synthetic:
+        if self.live_replay_policy_permitted is synthetic:
             raise ValueError("synthetic query detail is read/export-only")
         expected_timing = (
             TimingSource.SYNTHETIC_UNAVAILABLE if synthetic else TimingSource.PERF_COUNTER
@@ -606,16 +657,19 @@ class EvalRunExportResponse(ContractModel):
         )
         if run.environment.timing_source is not expected_timing:
             raise ValueError("export origin and run timing source must agree")
+        if any(
+            record.outcome.kind == "success" and record.outcome.timing_source is not expected_timing
+            for record in self.export.outcomes
+        ):
+            raise ValueError("every successful export outcome must match the export timing origin")
+        if run.status is EvalRunStatus.COMPLETED:
+            _validate_completed_summaries(run, synthetic=synthetic)
         if synthetic:
             if (
                 run.status is not EvalRunStatus.COMPLETED
                 or len(self.export.outcomes) != _CANONICAL_OUTCOME_COUNT
             ):
                 raise ValueError("synthetic exports require one complete 50-by-four run")
-            if any(
-                record.outcome.kind != "success"
-                or record.outcome.timing_source is not TimingSource.SYNTHETIC_UNAVAILABLE
-                for record in self.export.outcomes
-            ):
+            if any(record.outcome.kind != "success" for record in self.export.outcomes):
                 raise ValueError("synthetic exports require unavailable-timing success outcomes")
         return self
