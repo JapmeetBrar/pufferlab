@@ -3,10 +3,15 @@
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Protocol
+from uuid import UUID
 
 from pufferlab.contracts.filters import FilterNode
 from pufferlab.contracts.retrieval import RetrievalConfigSummary
-from pufferlab.contracts.search import SearchCompareRequest, SearchCompareResponse
+from pufferlab.contracts.search import (
+    ConfigSearchResult,
+    SearchCompareRequest,
+    SearchCompareResponse,
+)
 from pufferlab.providers.types import (
     ConsistencyLevel,
     DistanceMetric,
@@ -33,6 +38,28 @@ class QueryEmbedder(Protocol):
     dimensions: int
 
     async def embed_query(self, query_text: str) -> QueryEmbedding: ...
+
+
+@dataclass(frozen=True, slots=True)
+class SearchExecuteRequest:
+    """Internal single-config execution input; evaluation keeps provenance disabled by default."""
+
+    namespace: str
+    query_text: str
+    config_id: UUID
+    query_id: UUID | None = None
+    filter_override: FilterNode | None = None
+    expected_document_ids: tuple[UUID, ...] = ()
+    debug_provenance: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class SearchExecuteResult:
+    """One config result retaining the caller's query and configuration identities."""
+
+    config_id: UUID
+    query_id: UUID | None
+    result: ConfigSearchResult
 
 
 class RetrievalProvider(Protocol):
@@ -102,5 +129,7 @@ class SearchBackend(Protocol):
     def list_configs(self) -> tuple[RetrievalConfigSummary, ...]: ...
 
     async def compare(self, request: SearchCompareRequest) -> SearchCompareResponse: ...
+
+    async def search_one(self, request: SearchExecuteRequest) -> SearchExecuteResult: ...
 
     async def close(self) -> None: ...

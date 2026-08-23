@@ -12,7 +12,7 @@ from pufferlab.providers.rerankers import Reranker
 from pufferlab.providers.types import ProviderQueryResult
 from pufferlab.retrieval.errors import SearchError
 from pufferlab.retrieval.runtime import RuntimeSearchBackend
-from pufferlab.retrieval.types import QueryEmbedding
+from pufferlab.retrieval.types import QueryEmbedding, SearchExecuteRequest
 
 ROOT = Path(__file__).resolve().parents[3]
 FIXTURE_DIR = ROOT / "fixtures" / "tiny-corpus"
@@ -166,6 +166,41 @@ async def test_runtime_discovers_configs_without_server_credentials() -> None:
         )
     assert caught.value.__cause__ is None
     assert caught.value.__context__ is None
+
+
+@pytest.mark.asyncio
+async def test_runtime_executes_one_config_and_rejects_a_different_namespace() -> None:
+    corpus = load_fixture_corpus(FIXTURE_DIR)
+    provider_factory = FakeProviderFactory()
+    runtime = RuntimeSearchBackend(
+        settings=_settings(),
+        manifest=corpus.manifest,
+        provider_factory=provider_factory,
+        embedder_factory=FakeEmbedderFactory(),
+    )
+    bm25, _, _, _ = runtime.list_configs()
+
+    result = await runtime.search_one(
+        SearchExecuteRequest(
+            namespace="pufferlab-runtime-test",
+            query_text="query",
+            config_id=bm25.id,
+        )
+    )
+
+    assert result.config_id == bm25.id
+    assert result.result.config == bm25
+    assert provider_factory.provider.bm25_calls[0]["top_k"] == 10
+    with pytest.raises(SearchError, match="namespace"):
+        await runtime.search_one(
+            SearchExecuteRequest(
+                namespace="pufferlab-another-namespace",
+                query_text="query",
+                config_id=bm25.id,
+            )
+        )
+    assert len(provider_factory.provider.bm25_calls) == 1
+    await runtime.close()
 
 
 @pytest.mark.asyncio

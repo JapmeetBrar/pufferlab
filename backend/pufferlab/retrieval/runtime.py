@@ -21,10 +21,15 @@ from pufferlab.providers.rerankers import (
 from pufferlab.providers.turbopuffer import TurbopufferProvider
 from pufferlab.retrieval.config import SearchConfigCatalog, build_search_catalog
 from pufferlab.retrieval.embeddings import SentenceTransformerQueryEmbedder
-from pufferlab.retrieval.errors import SearchError, search_unavailable
+from pufferlab.retrieval.errors import SearchError, invalid_search, search_unavailable
 from pufferlab.retrieval.filter_validation import FixtureFilterValidator
 from pufferlab.retrieval.service import SearchCompareService
-from pufferlab.retrieval.types import QueryEmbedder, RetrievalProvider
+from pufferlab.retrieval.types import (
+    QueryEmbedder,
+    RetrievalProvider,
+    SearchExecuteRequest,
+    SearchExecuteResult,
+)
 
 
 class _ProviderFactory(Protocol):
@@ -53,6 +58,7 @@ class RuntimeSearchBackend:
         *,
         settings: Settings,
         manifest: DatasetManifest,
+        catalog: SearchConfigCatalog | None = None,
         provider_factory: _ProviderFactory | None = None,
         embedder_factory: _EmbedderFactory | None = None,
         reranker_factory: _RerankerFactory | None = None,
@@ -61,7 +67,7 @@ class RuntimeSearchBackend:
         self._manifest = manifest
         self._write_spec = compile_namespace_write_spec(manifest)
         self._filter_validator = FixtureFilterValidator(self._write_spec)
-        self._catalog: SearchConfigCatalog = build_search_catalog(manifest)
+        self._catalog: SearchConfigCatalog = catalog or build_search_catalog(manifest)
         self._provider_factory: _ProviderFactory = provider_factory or TurbopufferProvider
         self._embedder_factory: _EmbedderFactory = (
             embedder_factory or SentenceTransformerQueryEmbedder
@@ -84,6 +90,17 @@ class RuntimeSearchBackend:
             self._filter_validator.validate(request.filter_override)
         service = await self._get_service()
         return await service.compare(request)
+
+    async def search_one(self, request: SearchExecuteRequest) -> SearchExecuteResult:
+        if request.filter_override is not None:
+            self._filter_validator.validate(request.filter_override)
+        configured_namespace = self._settings.pufferlab_search_namespace
+        if configured_namespace is None or not configured_namespace.strip():
+            raise search_unavailable()
+        if request.namespace != configured_namespace:
+            raise invalid_search("execution namespace does not match the configured namespace")
+        service = await self._get_service()
+        return await service.search_one(request)
 
     async def close(self) -> None:
         if self._closed:
