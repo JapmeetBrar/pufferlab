@@ -28,6 +28,11 @@ class Settings(BaseSettings):
             origin.strip() for origin in self.pufferlab_cors_origins.split(",") if origin.strip()
         ]
 
+    @property
+    def database_path(self) -> Path:
+        """Keep the local control-plane database inside the configured data directory."""
+        return self.pufferlab_data_dir / "pufferlab.sqlite3"
+
 
 @lru_cache
 def get_settings() -> Settings:
