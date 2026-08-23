@@ -13,8 +13,11 @@ confirmed deletion of exactly the internally generated namespace.
   evidence beneath ignored `data/` paths. Do not stage any of them.
 - [`m2_live_namespace_session.py`](../scripts/m2_live_namespace_session.py) owns one immutable
   `pufferlab-unix-live-<24 lowercase hex>` identity in mode-`0600`
-  `data/m2-live-session.json`. Cleanup accepts no namespace argument, revalidates the record, and
-  removes it only after the provider confirms `NOT_FOUND` and closes cleanly.
+  `data/m2-live-session.json`. Its suffix and record tag are HMAC-derived from an internally
+  generated, fixed-path mode-`0600` `data/m2-live-owner.key`; start durably `fsync`s each file and
+  its directory before returning. Production start/cleanup accept no path, token, key, or namespace
+  injection. Cleanup authenticates the capability and removes the session record only after the
+  provider confirms `NOT_FOUND`, closes cleanly, and the directory unlink is durable.
 - The Unix ingestion command never deletes. Keep the coordinator shell and its cleanup traps alive
   from before the first remote write until explicit cleanup succeeds.
 - Run the checked-in safety harness through an independent pre-live review before using the
@@ -48,8 +51,8 @@ PY
 ```
 
 Require `credential_configured=True`, `region=gcp-us-west1`, and a data directory under the current
-ignored checkout. If `data/m2-live-session.json` already exists, do not replace or remove it; recover
-the retained capability with:
+ignored checkout. If `data/m2-live-session.json` already exists, do not replace it, its owner key,
+or either file's permissions; recover the retained capability with:
 
 ```bash
 uv run --extra live-search python scripts/m2_live_namespace_session.py cleanup
@@ -138,7 +141,9 @@ readonly LIVE_NAMESPACE
 ```
 
 The short interval between local record creation and trap registration cannot create a remote
-resource. If the machine loses power later, the exclusive ignored record remains for recovery.
+resource. File and directory `fsync` complete before `start` returns, so a later power loss retains
+the authenticated ignored record and owner key for recovery. Never copy a record between checkouts:
+the fixed local owner key deliberately makes a foreign otherwise-valid namespace fail closed.
 
 ## 5. Ingest the exact pack and persist the seed
 
@@ -174,10 +179,13 @@ uv run python scripts/verify_m2_evaluation.py "$RUN_ID"
 ```
 
 Require CLI exit zero, terminal `completed`, 50/50 queries, four summaries, 200 typed successful
-outcomes, and zero error rate for every configuration. The independent verifier reads the ignored
-SQLite database directly without migrations, recomputes all summaries from the stored outcomes and
-query IDs, validates the canonical export boundary, and prints no query/document text, vectors, or
-exception details.
+outcomes, and zero error rate for every configuration. The independent verifier accepts only the
+run UUID; it authenticates the fixed live session, reloads the exact checked source/processed locks
+and content-addressed pack, derives the full READY dataset, curated query/qrel set, and
+manifest-bound four-config catalog, and requires contract equality with SQLite. It recomputes every
+query metric from ranked IDs plus exact qrels before independently aggregating quality and latency,
+compares the result with stored per-query metrics and summaries, validates the canonical export,
+and prints no query/document text, vectors, or exception details.
 
 ## 7. Prove the artifact and secret boundaries
 
@@ -207,12 +215,15 @@ SESSION_FINGERPRINT="$(
 readonly SESSION_FINGERPRINT
 cleanup_live
 test ! -e data/m2-live-session.json
+test -f data/m2-live-owner.key
 printf 'namespace_fingerprint=%s cleanup=not_found_verified\n' "$SESSION_FINGERPRINT"
 ```
 
-`cleanup_live` disarms every trap before deleting exactly the retained namespace. A cleanup failure
-must leave the session record in place and fail the run; repair connectivity and rerun the cleanup
-command. Never substitute a different name or delete the record manually.
+`cleanup_live` disarms every trap before deleting exactly the authenticated retained namespace. A
+cleanup failure must leave the session record in place and fail the run; repair connectivity and
+rerun the cleanup command. The ignored owner key remains for future locally owned sessions. Never
+substitute another name, hand-author a record, copy one from another checkout, or delete either
+ownership file manually during an active session.
 
 ## 9. Final evidence and review
 

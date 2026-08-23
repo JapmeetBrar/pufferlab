@@ -1,17 +1,20 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
+import os
+import re
 import shutil
 import sqlite3
 import stat
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID, uuid5
 
 import pytest
 from pufferlab.config import Settings
-from pufferlab.contracts.common import JsonValue
 from pufferlab.contracts.datasets import (
     DatasetStatus,
     DatasetVersion,
@@ -44,20 +47,36 @@ from pufferlab.persistence import Database, PufferLabRepository, QueryOutcome, Q
 from pufferlab.persistence.canonical import canonical_json
 from pufferlab.providers.errors import ProviderError, ProviderErrorDetails
 from pufferlab.providers.rerankers import DEFAULT_RERANKER_MODEL, DEFAULT_RERANKER_REVISION
-from pufferlab.providers.types import (
-    ProviderDeleteResult,
-    ProviderNamespaceMetadata,
-)
+from pufferlab.providers.types import ProviderDeleteResult, ProviderNamespaceMetadata
 
 from scripts import m2_live_namespace_session, verify_m2_evaluation
 
 _TEST_NAMESPACE = UUID("147c12c2-7938-4711-8d40-d4659dc92767")
 _FIXED_TIME = datetime(2026, 8, 22, 19, 0, tzinfo=UTC)
-_SAFE_SESSION_NAMESPACE = "pufferlab-unix-live-" + "a" * 24
+_SAFE_NAMESPACE = "pufferlab-unix-live-" + "a" * 24
 
 
 def _id(name: str) -> UUID:
     return uuid5(_TEST_NAMESPACE, name)
+
+
+def _paths(tmp_path: Path, name: str = "owned") -> m2_live_namespace_session._SessionPaths:
+    directory = tmp_path / name
+    return m2_live_namespace_session._SessionPaths(
+        session=directory / "m2-live-session.json",
+        owner_key=directory / "m2-live-owner.key",
+    )
+
+
+def _deterministic_random(*values: bytes) -> Callable[[int], bytes]:
+    remaining = iter(values)
+
+    def generate(size: int) -> bytes:
+        value = next(remaining)
+        assert len(value) == size
+        return value
+
+    return generate
 
 
 def _provider_error(code: ApiErrorCode, operation: str) -> ProviderError:
@@ -127,82 +146,164 @@ def _session_factory(provider: _CleanupProvider) -> object:
     return factory
 
 
+def _create_owned_session(
+    paths: m2_live_namespace_session._SessionPaths,
+    *,
+    key_byte: bytes = b"k",
+    nonce_byte: bytes = b"n",
+) -> m2_live_namespace_session.M2LiveNamespaceSession:
+    return m2_live_namespace_session._create_session_at(
+        paths,
+        random_bytes=_deterministic_random(key_byte * 32, nonce_byte * 32),
+    )
+
+
 @pytest.mark.asyncio
-async def test_m2_session_owns_exact_target_and_unlinks_only_after_confirmation(
+async def test_session_owns_authenticated_fixed_target_and_cleans_after_confirmation(
     tmp_path: Path,
 ) -> None:
-    path = tmp_path / "m2-live-session.json"
-    session = m2_live_namespace_session.create_session(
-        path,
-        token_factory=lambda size: "a" * (size * 2),
-    )
-    assert session.namespace == _SAFE_SESSION_NAMESPACE
-    assert m2_live_namespace_session.load_session(path) == session
-    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    paths = _paths(tmp_path)
+    session = _create_owned_session(paths)
+    assert re.fullmatch(r"pufferlab-unix-live-[0-9a-f]{24}", session.namespace)
+    assert m2_live_namespace_session._load_owned_session_at(paths).session == session
+    assert stat.S_IMODE(paths.session.stat().st_mode) == 0o600
+    assert stat.S_IMODE(paths.owner_key.stat().st_mode) == 0o600
     with pytest.raises(FileExistsError):
-        m2_live_namespace_session.create_session(path)
+        _create_owned_session(paths, nonce_byte=b"o")
 
     provider = _CleanupProvider()
-    cleaned = await m2_live_namespace_session.cleanup_session(
-        path,
+    cleaned = await m2_live_namespace_session._cleanup_session_at(
+        paths,
         settings=_settings(tmp_path, api_key="test-secret"),
         provider_factory=_session_factory(provider),  # type: ignore[arg-type]
         poll_interval=0,
     )
 
     assert cleaned == session
-    assert provider.deleted == [_SAFE_SESSION_NAMESPACE]
-    assert provider.metadata_calls == [_SAFE_SESSION_NAMESPACE, _SAFE_SESSION_NAMESPACE]
+    assert provider.deleted == [session.namespace]
+    assert provider.metadata_calls == [session.namespace, session.namespace]
     assert provider.closed
-    assert not path.exists()
+    assert not paths.session.exists()
+    assert paths.owner_key.exists()
 
 
-@pytest.mark.parametrize(
-    "payload",
-    [
-        {"format_version": 1, "namespace": "production"},
-        {"format_version": 1, "namespace": _SAFE_SESSION_NAMESPACE, "cleanup": "production"},
-        {"format_version": True, "namespace": _SAFE_SESSION_NAMESPACE},
-        {"format_version": 1, "namespace": "pufferlab-unix-live-" + "A" * 24},
-    ],
-)
-def test_m2_session_refuses_tampered_targets_and_shapes(
+@pytest.mark.asyncio
+async def test_foreign_valid_prefix_record_cannot_authorize_cleanup(tmp_path: Path) -> None:
+    owned_paths = _paths(tmp_path, "owned")
+    foreign_paths = _paths(tmp_path, "foreign")
+    owned = _create_owned_session(owned_paths, key_byte=b"a", nonce_byte=b"b")
+    foreign = _create_owned_session(foreign_paths, key_byte=b"c", nonce_byte=b"d")
+    assert owned.namespace != foreign.namespace
+    shutil.copy2(foreign_paths.session, owned_paths.session)
+    provider = _CleanupProvider()
+
+    with pytest.raises(RuntimeError, match="not locally owned"):
+        await m2_live_namespace_session._cleanup_session_at(
+            owned_paths,
+            settings=_settings(tmp_path, api_key="test-secret"),
+            provider_factory=_session_factory(provider),  # type: ignore[arg-type]
+            poll_interval=0,
+        )
+
+    assert provider.deleted == []
+    assert owned_paths.session.exists()
+
+
+def test_hand_authored_valid_prefix_and_shape_is_not_owned(tmp_path: Path) -> None:
+    paths = _paths(tmp_path)
+    _create_owned_session(paths)
+    payload = {
+        "format_version": 1,
+        "nonce": "f" * 64,
+        "namespace": "pufferlab-unix-live-" + "f" * 24,
+        "ownership_tag": "f" * 64,
+    }
+    paths.session.write_text(json.dumps(payload), encoding="utf-8")
+    paths.session.chmod(0o600)
+
+    with pytest.raises(RuntimeError, match="not locally owned"):
+        m2_live_namespace_session._load_owned_session_at(paths)
+
+
+@pytest.mark.parametrize("target", ["session", "owner_key"])
+def test_owned_files_reject_unsafe_permissions_and_symlinks(
     tmp_path: Path,
-    payload: dict[str, JsonValue],
+    target: str,
 ) -> None:
-    path = tmp_path / "m2-live-session.json"
-    path.write_text(json.dumps(payload), encoding="utf-8")
-    path.chmod(0o600)
-
-    with pytest.raises(RuntimeError):
-        m2_live_namespace_session.load_session(path)
-
-
-def test_m2_session_refuses_unsafe_permissions_and_symlinks(tmp_path: Path) -> None:
-    path = tmp_path / "m2-live-session.json"
-    path.write_text(
-        json.dumps({"format_version": 1, "namespace": _SAFE_SESSION_NAMESPACE}),
-        encoding="utf-8",
-    )
+    paths = _paths(tmp_path)
+    _create_owned_session(paths)
+    path = getattr(paths, target)
     path.chmod(0o644)
     with pytest.raises(RuntimeError, match="0600"):
-        m2_live_namespace_session.load_session(path)
+        m2_live_namespace_session._load_owned_session_at(paths)
 
-    target = tmp_path / "target.json"
-    path.rename(target)
-    path.symlink_to(target)
+    path.chmod(0o600)
+    moved = path.with_suffix(".target")
+    path.rename(moved)
+    path.symlink_to(moved)
     with pytest.raises(RuntimeError, match="missing or unreadable"):
-        m2_live_namespace_session.load_session(path)
+        m2_live_namespace_session._load_owned_session_at(paths)
+
+
+def test_public_namespace_apis_have_no_target_or_randomness_injection() -> None:
+    assert list(inspect.signature(m2_live_namespace_session.create_session).parameters) == []
+    assert list(inspect.signature(m2_live_namespace_session.load_session).parameters) == []
+    assert list(inspect.signature(m2_live_namespace_session.cleanup_session).parameters) == []
+    assert list(inspect.signature(m2_live_namespace_session.run_cli).parameters) == ["argv"]
+    with pytest.raises(SystemExit):
+        m2_live_namespace_session.run_cli(["cleanup", "pufferlab-unix-live-" + "f" * 24])
+
+
+def test_start_fsyncs_owner_session_and_directory_before_return(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _paths(tmp_path)
+    observed_types: list[str] = []
+    real_fsync = os.fsync
+
+    def observed_fsync(descriptor: int) -> None:
+        mode = os.fstat(descriptor).st_mode
+        observed_types.append("directory" if stat.S_ISDIR(mode) else "file")
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(m2_live_namespace_session.os, "fsync", observed_fsync)
+    _create_owned_session(paths)
+
+    assert observed_types == ["file", "directory", "file", "directory"]
+
+
+def test_start_refuses_to_return_if_session_fsync_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _paths(tmp_path)
+    regular_file_calls = 0
+    real_fsync = os.fsync
+
+    def failing_fsync(descriptor: int) -> None:
+        nonlocal regular_file_calls
+        if stat.S_ISREG(os.fstat(descriptor).st_mode):
+            regular_file_calls += 1
+            if regular_file_calls == 2:
+                raise OSError("simulated durability failure")
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(m2_live_namespace_session.os, "fsync", failing_fsync)
+    with pytest.raises(OSError, match="durability"):
+        _create_owned_session(paths)
+    assert not paths.session.exists()
+    assert paths.owner_key.exists()
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure_stage", ["delete", "poll", "close"])
-async def test_m2_session_retains_record_on_every_cleanup_failure(
+async def test_session_retains_record_on_every_cleanup_failure(
     tmp_path: Path,
     failure_stage: str,
 ) -> None:
-    path = tmp_path / "m2-live-session.json"
-    m2_live_namespace_session.create_session(path, token_factory=lambda _: "b" * 24)
+    paths = _paths(tmp_path)
+    session = _create_owned_session(paths)
     provider = _CleanupProvider()
     if failure_stage == "delete":
         provider.delete_failure = _provider_error(ApiErrorCode.PROVIDER_ERROR, "delete")
@@ -213,64 +314,61 @@ async def test_m2_session_retains_record_on_every_cleanup_failure(
         provider.close_failure = RuntimeError("credential=test-secret")
 
     with pytest.raises((ProviderError, RuntimeError)):
-        await m2_live_namespace_session.cleanup_session(
-            path,
+        await m2_live_namespace_session._cleanup_session_at(
+            paths,
             settings=_settings(tmp_path, api_key="test-secret"),
             provider_factory=_session_factory(provider),  # type: ignore[arg-type]
             poll_interval=0,
         )
 
-    assert provider.deleted == ["pufferlab-unix-live-" + "b" * 24]
+    assert provider.deleted == [session.namespace]
     assert provider.closed
-    assert path.exists()
+    assert paths.session.exists()
 
 
 @pytest.mark.asyncio
-async def test_m2_session_retains_record_if_it_changes_before_unlink(tmp_path: Path) -> None:
-    path = tmp_path / "m2-live-session.json"
-    m2_live_namespace_session.create_session(path, token_factory=lambda _: "c" * 24)
+async def test_session_retains_replacement_record_before_unlink(tmp_path: Path) -> None:
+    paths = _paths(tmp_path)
+    session = _create_owned_session(paths)
 
     class MutatingProvider(_CleanupProvider):
         async def namespace_metadata(self, namespace: str) -> ProviderNamespaceMetadata:
-            path.unlink()
-            m2_live_namespace_session.create_session(path, token_factory=lambda _: "d" * 24)
+            paths.session.unlink()
+            replacement = {
+                "format_version": 1,
+                "nonce": "f" * 64,
+                "namespace": "pufferlab-unix-live-" + "f" * 24,
+                "ownership_tag": "f" * 64,
+            }
+            paths.session.write_text(json.dumps(replacement), encoding="utf-8")
+            paths.session.chmod(0o600)
             raise _provider_error(ApiErrorCode.NOT_FOUND, "metadata")
 
     provider = MutatingProvider()
-    with pytest.raises(RuntimeError, match="changed during cleanup"):
-        await m2_live_namespace_session.cleanup_session(
-            path,
+    with pytest.raises(RuntimeError):
+        await m2_live_namespace_session._cleanup_session_at(
+            paths,
             settings=_settings(tmp_path, api_key="test-secret"),
             provider_factory=_session_factory(provider),  # type: ignore[arg-type]
             poll_interval=0,
         )
-    assert provider.deleted == ["pufferlab-unix-live-" + "c" * 24]
-    assert m2_live_namespace_session.load_session(path).namespace == (
-        "pufferlab-unix-live-" + "d" * 24
-    )
+    assert provider.deleted == [session.namespace]
+    assert paths.session.exists()
 
 
-def test_m2_session_cli_redacts_cleanup_failures(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+def test_namespace_cli_redacts_cleanup_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    path = tmp_path / "m2-live-session.json"
-    m2_live_namespace_session.create_session(path, token_factory=lambda _: "e" * 24)
-    provider = _CleanupProvider()
-    provider.delete_failure = RuntimeError("credential=test-secret query=private text")
+    async def fail() -> m2_live_namespace_session.M2LiveNamespaceSession:
+        raise RuntimeError("credential=test-secret query=private text")
 
-    exit_code = m2_live_namespace_session.run_cli(
-        ["cleanup"],
-        path=path,
-        settings=_settings(tmp_path, api_key="test-secret"),
-        provider_factory=_session_factory(provider),  # type: ignore[arg-type]
-    )
-
+    monkeypatch.setattr(m2_live_namespace_session, "cleanup_session", fail)
+    assert m2_live_namespace_session.run_cli(["cleanup"]) == 1
     captured = capsys.readouterr()
-    assert exit_code == 1
     assert captured.out == ""
     assert captured.err == "m2_namespace_session command=cleanup status=failed\n"
     assert "test-secret" not in captured.err
-    assert path.exists()
 
 
 def _retrieval_configs(dataset_id: UUID) -> tuple[RetrievalConfig, ...]:
@@ -330,16 +428,17 @@ def _retrieval_configs(dataset_id: UUID) -> tuple[RetrievalConfig, ...]:
     )
 
 
-def _build_completed_database(path: Path) -> UUID:
+def _build_completed_database(
+    path: Path,
+) -> tuple[UUID, verify_m2_evaluation._ExpectedSuite]:
     database = Database(path)
     database.migrate()
     repository = PufferLabRepository(database.session_factory)
-    dataset_id = _id("dataset")
     dataset = DatasetVersion(
-        id=dataset_id,
+        id=_id("dataset"),
         slug="synthetic-unix",
         version="v1",
-        namespace=_SAFE_SESSION_NAMESPACE,
+        namespace=_SAFE_NAMESPACE,
         index_profile=IndexProfile(
             id="test-profile",
             embedding_provider="sentence_transformers",
@@ -357,10 +456,9 @@ def _build_completed_database(path: Path) -> UUID:
         created_at=_FIXED_TIME,
     )
     repository.put_dataset_version(dataset)
-    configs = _retrieval_configs(dataset_id)
+    configs = _retrieval_configs(dataset.id)
     for config in configs:
         repository.put_retrieval_config(config)
-
     queries = tuple(
         JudgedQuery(
             id=_id(f"query:{index:02d}"),
@@ -375,7 +473,7 @@ def _build_completed_database(path: Path) -> UUID:
         id=_id("query-set"),
         name="synthetic curated 50",
         version="v1",
-        dataset_version_id=dataset_id,
+        dataset_version_id=dataset.id,
         query_count=50,
         content_hash="query-set-hash",
         created_at=_FIXED_TIME,
@@ -412,20 +510,12 @@ def _build_completed_database(path: Path) -> UUID:
         error=None,
     )
     repository.create_run(run)
-    running = repository.transition_run(
-        run.id,
-        EvalRunStatus.RUNNING,
-        at=_FIXED_TIME + timedelta(seconds=1),
-    )
+    repository.transition_run(run.id, EvalRunStatus.RUNNING, at=_FIXED_TIME + timedelta(seconds=1))
     for query_index, query in enumerate(queries):
         for config_index, config in enumerate(configs):
             payload = EvalSuccessPayload(
                 ranked_document_ids=[query.qrels[0].document_id],
-                metrics=PerQueryMetrics(
-                    ndcg_at_10=1.0,
-                    recall_at_50=1.0,
-                    mrr_at_10=1.0,
-                ),
+                metrics=PerQueryMetrics(ndcg_at_10=1.0, recall_at_50=1.0, mrr_at_10=1.0),
                 total_client_wall_latency_ms=float(config_index + query_index + 1),
                 stage_timings=[],
                 candidate_counts={"final": 1},
@@ -442,63 +532,102 @@ def _build_completed_database(path: Path) -> UUID:
                     created_at=_FIXED_TIME + timedelta(seconds=2),
                 )
             )
-    running = repository.get_run(running.id)
-    outcomes = repository.list_outcomes(running.id)
+    running = repository.get_run(run.id)
     summaries = finalize_durable_outcomes(
-        running,
-        outcomes,
-        query_ids=[query.id for query in queries],
+        running, repository.list_outcomes(run.id), query_ids=[query.id for query in queries]
     )
-    repository.complete_run(
-        running.id,
-        summaries,
-        at=_FIXED_TIME + timedelta(seconds=3),
-    )
+    repository.complete_run(run.id, summaries, at=_FIXED_TIME + timedelta(seconds=3))
     database.dispose()
-    return running.id
+    expected = verify_m2_evaluation._ExpectedSuite(
+        dataset=dataset, query_set=query_set, queries=queries, configs=configs
+    )
+    return run.id, expected
 
 
 @pytest.fixture(scope="module")
-def completed_database(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, UUID]:
-    data_dir = tmp_path_factory.mktemp("m2-completed")
-    database_path = data_dir / "pufferlab.sqlite3"
-    return database_path, _build_completed_database(database_path)
+def completed_database(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> tuple[Path, UUID, verify_m2_evaluation._ExpectedSuite]:
+    path = tmp_path_factory.mktemp("m2-completed") / "pufferlab.sqlite3"
+    run_id, expected = _build_completed_database(path)
+    return path, run_id, expected
 
 
-def _copy_database(completed_database: tuple[Path, UUID], target_dir: Path) -> tuple[Path, UUID]:
-    source, run_id = completed_database
+def _copy_database(
+    completed: tuple[Path, UUID, verify_m2_evaluation._ExpectedSuite], target_dir: Path
+) -> tuple[Path, UUID, verify_m2_evaluation._ExpectedSuite]:
+    source, run_id, expected = completed
     target = target_dir / "pufferlab.sqlite3"
     shutil.copy2(source, target)
-    return target, run_id
+    return target, run_id, expected
 
 
-def test_verifier_recomputes_exact_coverage_read_only_and_prints_safe_report(
-    completed_database: tuple[Path, UUID],
+def _verify(
+    path: Path, run_id: UUID, expected: verify_m2_evaluation._ExpectedSuite
+) -> verify_m2_evaluation.VerifiedEvaluation:
+    return verify_m2_evaluation._verify_evaluation_at(run_id, database_path=path, expected=expected)
+
+
+def test_verifier_recomputes_read_only_and_prints_safe_bound_report(
+    completed_database: tuple[Path, UUID, verify_m2_evaluation._ExpectedSuite],
 ) -> None:
-    path, run_id = completed_database
+    path, run_id, expected = completed_database
     before = hashlib.sha256(path.read_bytes()).hexdigest(), path.stat().st_mtime_ns
-
-    report = verify_m2_evaluation.verify_evaluation(run_id, settings=_settings(path.parent))
+    sidecars = tuple(path.parent.glob(f"{path.name}-*"))
+    report = _verify(path, run_id, expected)
     rendered = "\n".join(verify_m2_evaluation.render_report(report))
-
     after = hashlib.sha256(path.read_bytes()).hexdigest(), path.stat().st_mtime_ns
     assert before == after
-    assert report.query_count == 50
-    assert report.outcome_count == 200
-    assert len(report.summaries) == 4
-    assert len(report.export_sha256) == 64
-    assert all(summary.completed_queries == 50 for summary in report.summaries)
+    assert tuple(path.parent.glob(f"{path.name}-*")) == sidecars
+    assert report.dataset_version_id == expected.dataset.id
+    assert report.query_count == 50 and report.outcome_count == 200
+    assert len(report.summaries) == 4 and len(report.export_sha256) == 64
     assert "PRIVATE QUERY TEXT" not in rendered
-    assert "vector" not in rendered
-    assert "credential" not in rendered
-    assert rendered.endswith("verification=passed")
+    assert "vector" not in rendered and "credential" not in rendered
+    assert "[n=50]" in rendered and rendered.endswith("verification=passed")
+
+
+@pytest.mark.parametrize(
+    ("table", "mutation"),
+    [
+        ("dataset_versions", {"namespace": "pufferlab-unix-live-" + "f" * 24}),
+        ("dataset_versions", {"status": "failed", "document_count": 1}),
+        ("retrieval_configs", {"result_k": 49, "candidate_k": 99, "consistency": "eventual"}),
+    ],
+)
+def test_verifier_rejects_other_dataset_or_noncanonical_config(
+    completed_database: tuple[Path, UUID, verify_m2_evaluation._ExpectedSuite],
+    tmp_path: Path,
+    table: str,
+    mutation: dict[str, object],
+) -> None:
+    path, run_id, expected = _copy_database(completed_database, tmp_path)
+    with sqlite3.connect(path) as connection:
+        if table == "retrieval_configs":
+            row_id, payload_json = connection.execute(
+                "SELECT rowid, payload_json FROM retrieval_configs WHERE id = ?",
+                (str(expected.configs[0].id),),
+            ).fetchone()
+        else:
+            row_id, payload_json = connection.execute(
+                "SELECT rowid, payload_json FROM dataset_versions WHERE id = ?",
+                (str(expected.dataset.id),),
+            ).fetchone()
+        payload = json.loads(payload_json)
+        payload.update(mutation)
+        connection.execute(
+            f"UPDATE {table} SET payload_json = ? WHERE rowid = ?",
+            (json.dumps(payload), row_id),
+        )
+    with pytest.raises(verify_m2_evaluation.EvaluationVerificationError, match="canonical"):
+        _verify(path, run_id, expected)
 
 
 def test_verifier_rejects_persisted_summary_mismatch(
-    completed_database: tuple[Path, UUID],
+    completed_database: tuple[Path, UUID, verify_m2_evaluation._ExpectedSuite],
     tmp_path: Path,
 ) -> None:
-    path, run_id = _copy_database(completed_database, tmp_path)
+    path, run_id, expected = _copy_database(completed_database, tmp_path)
     with sqlite3.connect(path) as connection:
         payload = json.loads(
             connection.execute(
@@ -510,42 +639,31 @@ def test_verifier_rejects_persisted_summary_mismatch(
             "UPDATE eval_runs SET payload_json = ? WHERE id = ?",
             (json.dumps(payload), str(run_id)),
         )
-
-    with pytest.raises(
-        verify_m2_evaluation.EvaluationVerificationError,
-        match="summaries do not match",
-    ):
-        verify_m2_evaluation.verify_evaluation(run_id, settings=_settings(path.parent))
+    with pytest.raises(verify_m2_evaluation.EvaluationVerificationError, match="independent"):
+        _verify(path, run_id, expected)
 
 
 def test_verifier_rejects_incomplete_outcome_coverage(
-    completed_database: tuple[Path, UUID],
+    completed_database: tuple[Path, UUID, verify_m2_evaluation._ExpectedSuite],
     tmp_path: Path,
 ) -> None:
-    path, run_id = _copy_database(completed_database, tmp_path)
+    path, run_id, expected = _copy_database(completed_database, tmp_path)
     with sqlite3.connect(path) as connection:
         connection.execute(
-            "DELETE FROM query_outcomes WHERE rowid = "
-            "(SELECT rowid FROM query_outcomes WHERE run_id = ? LIMIT 1)",
-            (str(run_id),),
+            "DELETE FROM query_outcomes WHERE rowid IN (SELECT rowid FROM query_outcomes LIMIT 1)"
         )
-
-    with pytest.raises(
-        verify_m2_evaluation.EvaluationVerificationError,
-        match="exactly 200 outcomes",
-    ):
-        verify_m2_evaluation.verify_evaluation(run_id, settings=_settings(path.parent))
+    with pytest.raises(verify_m2_evaluation.EvaluationVerificationError, match="exactly 200"):
+        _verify(path, run_id, expected)
 
 
-def test_verifier_rejects_self_consistent_completed_run_with_a_failed_outcome(
-    completed_database: tuple[Path, UUID],
+def test_verifier_rejects_self_consistent_failed_outcome(
+    completed_database: tuple[Path, UUID, verify_m2_evaluation._ExpectedSuite],
     tmp_path: Path,
 ) -> None:
-    path, run_id = _copy_database(completed_database, tmp_path)
+    path, run_id, expected = _copy_database(completed_database, tmp_path)
     with sqlite3.connect(path) as connection:
         row_id, payload_json = connection.execute(
-            "SELECT rowid, payload_json FROM query_outcomes WHERE run_id = ? LIMIT 1",
-            (str(run_id),),
+            "SELECT rowid, payload_json FROM query_outcomes LIMIT 1"
         ).fetchone()
         outcome = QueryOutcome.model_validate_json(payload_json)
         failure = EvalFailurePayload(
@@ -557,81 +675,73 @@ def test_verifier_rejects_self_consistent_completed_run_with_a_failed_outcome(
             total_client_wall_latency_ms=1.0,
         )
         failed = outcome.model_copy(
-            update={
-                "status": QueryOutcomeStatus.FAILED,
-                "payload": encode_outcome_payload(failure),
-            }
+            update={"status": QueryOutcomeStatus.FAILED, "payload": encode_outcome_payload(failure)}
         )
         connection.execute(
             "UPDATE query_outcomes SET status = ?, payload_json = ? WHERE rowid = ?",
             (QueryOutcomeStatus.FAILED.value, canonical_json(failed), row_id),
         )
+    with pytest.raises(verify_m2_evaluation.EvaluationVerificationError, match="200 successful"):
+        _verify(path, run_id, expected)
 
-    database = Database(path)
-    repository = PufferLabRepository(database.session_factory)
-    run = repository.get_run(run_id)
-    _, queries = repository.get_query_set(run.query_set.id)
-    recomputed = finalize_durable_outcomes(
-        run,
-        repository.list_outcomes(run_id),
-        query_ids=[query.id for query in queries],
-    )
-    database.dispose()
+
+def test_verifier_recomputes_query_metrics_instead_of_trusting_self_consistent_storage(
+    completed_database: tuple[Path, UUID, verify_m2_evaluation._ExpectedSuite],
+    tmp_path: Path,
+) -> None:
+    path, run_id, expected = _copy_database(completed_database, tmp_path)
     with sqlite3.connect(path) as connection:
-        persisted = json.loads(
+        row_id, payload_json = connection.execute(
+            "SELECT rowid, payload_json FROM query_outcomes WHERE config_id = ? LIMIT 1",
+            (str(expected.configs[0].id),),
+        ).fetchone()
+        outcome = json.loads(payload_json)
+        outcome["payload"]["metrics"] = {
+            "ndcg_at_10": 0.25,
+            "recall_at_50": 0.25,
+            "mrr_at_10": 0.25,
+        }
+        connection.execute(
+            "UPDATE query_outcomes SET payload_json = ? WHERE rowid = ?",
+            (json.dumps(outcome), row_id),
+        )
+        run_payload = json.loads(
             connection.execute(
                 "SELECT payload_json FROM eval_runs WHERE id = ?", (str(run_id),)
             ).fetchone()[0]
         )
-        persisted["summaries"] = [summary.model_dump(mode="json") for summary in recomputed]
+        for metric in run_payload["summaries"][0]["metrics"][:3]:
+            metric["value"] = 0.985
         connection.execute(
             "UPDATE eval_runs SET payload_json = ? WHERE id = ?",
-            (json.dumps(persisted), str(run_id)),
+            (json.dumps(run_payload), str(run_id)),
         )
-
     with pytest.raises(
         verify_m2_evaluation.EvaluationVerificationError,
-        match="200 successful outcomes",
+        match="stored per-query metrics do not match ranking and qrels",
     ):
-        verify_m2_evaluation.verify_evaluation(run_id, settings=_settings(path.parent))
+        _verify(path, run_id, expected)
 
 
-def test_verifier_cli_never_exposes_tampered_sensitive_payload(
-    completed_database: tuple[Path, UUID],
-    tmp_path: Path,
+def test_verifier_cli_and_public_api_accept_only_run_uuid_and_redact(
+    monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    path, run_id = _copy_database(completed_database, tmp_path)
-    with sqlite3.connect(path) as connection:
-        row_id, payload_json = connection.execute(
-            "SELECT rowid, payload_json FROM query_outcomes WHERE run_id = ? LIMIT 1",
-            (str(run_id),),
-        ).fetchone()
-        payload = json.loads(payload_json)
-        payload["query_text"] = "TOP_SECRET_QUERY credential=test-secret vector=[0.1]"
-        connection.execute(
-            "UPDATE query_outcomes SET payload_json = ? WHERE rowid = ?",
-            (json.dumps(payload), row_id),
-        )
+    assert list(inspect.signature(verify_m2_evaluation.verify_evaluation).parameters) == ["run_id"]
+    assert list(inspect.signature(verify_m2_evaluation.run_cli).parameters) == ["argv"]
 
-    exit_code = verify_m2_evaluation.run_cli(
-        [str(run_id)],
-        settings=_settings(path.parent),
-    )
+    def fail(_: UUID) -> verify_m2_evaluation.VerifiedEvaluation:
+        raise RuntimeError("TOP_SECRET_QUERY credential=test-secret vector=[0.1]")
 
+    monkeypatch.setattr(verify_m2_evaluation, "verify_evaluation", fail)
+    assert verify_m2_evaluation.run_cli([str(_id("run"))]) == 1
     captured = capsys.readouterr()
-    assert exit_code == 1
-    assert captured.out == ""
-    assert captured.err == "verification=failed\n"
-    assert "TOP_SECRET_QUERY" not in captured.err
-    assert "test-secret" not in captured.err
+    assert captured.out == "" and captured.err == "verification=failed\n"
+    assert "TOP_SECRET_QUERY" not in captured.err and "test-secret" not in captured.err
 
 
 def test_verifier_forbidden_field_scan_is_recursive() -> None:
-    with pytest.raises(
-        verify_m2_evaluation.EvaluationVerificationError,
-        match="forbidden field",
-    ):
+    with pytest.raises(verify_m2_evaluation.EvaluationVerificationError, match="forbidden field"):
         verify_m2_evaluation._reject_forbidden_fields(
             {"outcomes": [{"outcome": {"vector": [0.1, 0.2]}}]}
         )

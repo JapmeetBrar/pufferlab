@@ -1,9 +1,11 @@
-"""Own and clean one immutable Milestone 2 live-evaluation namespace."""
+"""Own and clean one authenticated Milestone 2 live-evaluation namespace."""
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -11,6 +13,7 @@ import secrets
 import stat
 import sys
 from collections.abc import Callable, Sequence
+from contextlib import suppress
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Protocol
@@ -22,22 +25,46 @@ from pufferlab.providers.turbopuffer import TurbopufferProvider
 from pufferlab.providers.types import ProviderDeleteResult, ProviderNamespaceMetadata
 
 _ROOT = Path(__file__).parents[1]
-_SESSION_PATH = _ROOT / "data" / "m2-live-session.json"
+_DATA_DIR = _ROOT / "data"
+_SESSION_PATH = _DATA_DIR / "m2-live-session.json"
+_OWNER_KEY_PATH = _DATA_DIR / "m2-live-owner.key"
+_NAMESPACE_PREFIX = "pufferlab-unix-live-"
 _NAMESPACE_PATTERN = re.compile(r"pufferlab-unix-live-[0-9a-f]{24}")
-_SESSION_FIELDS = frozenset({"format_version", "namespace"})
+_HEX_64_PATTERN = re.compile(r"[0-9a-f]{64}")
+_SESSION_FIELDS = frozenset({"format_version", "nonce", "namespace", "ownership_tag"})
+_OWNER_KEY_BYTES = 32
+_NONCE_BYTES = 32
 
 
 @dataclass(frozen=True, slots=True)
 class M2LiveNamespaceSession:
     format_version: int
+    nonce: str
     namespace: str
+    ownership_tag: str
 
 
 @dataclass(frozen=True, slots=True)
-class _LoadedSession:
-    session: M2LiveNamespaceSession
+class _SessionPaths:
+    session: Path
+    owner_key: Path
+
+
+@dataclass(frozen=True, slots=True)
+class _LoadedFile:
+    content: bytes
     device: int
     inode: int
+
+
+@dataclass(frozen=True, slots=True)
+class _LoadedOwnedSession:
+    session: M2LiveNamespaceSession
+    session_file: _LoadedFile
+    owner_key_file: _LoadedFile
+
+
+_PRODUCTION_PATHS = _SessionPaths(session=_SESSION_PATH, owner_key=_OWNER_KEY_PATH)
 
 
 class _CleanupProvider(Protocol):
@@ -52,108 +79,238 @@ class _ProviderFactory(Protocol):
     def __call__(self, *, api_key: str, region: str) -> _CleanupProvider: ...
 
 
-def _validate_session(session: M2LiveNamespaceSession) -> None:
-    if session.format_version != 1 or _NAMESPACE_PATTERN.fullmatch(session.namespace) is None:
-        raise RuntimeError("M2 live namespace session is invalid; refusing cleanup")
-
-
-def _open_flags(*, write: bool) -> int:
+def _open_flags(*, write: bool, directory: bool = False) -> int:
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL if write else os.O_RDONLY
+    if directory:
+        flags |= getattr(os, "O_DIRECTORY", 0)
     return flags | getattr(os, "O_NOFOLLOW", 0)
 
 
-def create_session(
-    path: Path = _SESSION_PATH,
-    *,
-    token_factory: Callable[[int], str] = secrets.token_hex,
-) -> M2LiveNamespaceSession:
-    """Create exactly one exclusive record for an internally generated namespace."""
-    session = M2LiveNamespaceSession(
-        format_version=1,
-        namespace=f"pufferlab-unix-live-{token_factory(12)}",
-    )
-    _validate_session(session)
-    path.parent.mkdir(parents=True, exist_ok=True)
+def _require_safe_paths(paths: _SessionPaths) -> Path:
+    session_parent = paths.session.parent
+    if session_parent != paths.owner_key.parent:
+        raise RuntimeError("M2 live ownership files must share one fixed directory")
+    session_parent.mkdir(parents=True, exist_ok=True)
+    if session_parent.is_symlink() or not session_parent.is_dir():
+        raise RuntimeError("M2 live ownership directory is invalid")
+    return session_parent
+
+
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, _open_flags(write=False, directory=True))
+    try:
+        if not stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            raise RuntimeError("M2 live ownership directory is invalid")
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _write_exclusive(path: Path, content: bytes) -> None:
+    parent = path.parent
     descriptor = os.open(path, _open_flags(write=True), 0o600)
     try:
         os.fchmod(descriptor, 0o600)
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            json.dump(asdict(session), handle, sort_keys=True)
-            handle.write("\n")
+        with os.fdopen(descriptor, "wb") as handle:
+            descriptor = -1
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        _fsync_directory(parent)
     except BaseException:
-        path.unlink(missing_ok=True)
+        if descriptor >= 0:
+            os.close(descriptor)
+        try:
+            path.unlink(missing_ok=True)
+            _fsync_directory(parent)
+        except OSError:
+            pass
         raise
-    return session
 
 
-def _load_session_record(path: Path) -> _LoadedSession:
+def _read_secure_file(path: Path, *, label: str) -> _LoadedFile:
     try:
         descriptor = os.open(path, _open_flags(write=False))
     except OSError:
-        raise RuntimeError("M2 live namespace session is missing or unreadable") from None
-
+        raise RuntimeError(f"M2 live {label} is missing or unreadable") from None
     try:
         metadata = os.fstat(descriptor)
         if not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != 0o600:
-            raise RuntimeError("M2 live namespace session must be one regular 0600 file")
-        with os.fdopen(descriptor, encoding="utf-8") as handle:
+            raise RuntimeError(f"M2 live {label} must be one regular 0600 file")
+        with os.fdopen(descriptor, "rb") as handle:
             descriptor = -1
-            payload = json.load(handle)
-    except (OSError, json.JSONDecodeError):
-        raise RuntimeError("M2 live namespace session is missing or unreadable") from None
+            content = handle.read()
+    except OSError:
+        raise RuntimeError(f"M2 live {label} is missing or unreadable") from None
     finally:
         if descriptor >= 0:
             os.close(descriptor)
+    return _LoadedFile(content=content, device=metadata.st_dev, inode=metadata.st_ino)
 
+
+def _load_or_create_owner_key(
+    paths: _SessionPaths,
+    *,
+    random_bytes: Callable[[int], bytes],
+) -> _LoadedFile:
+    _require_safe_paths(paths)
+    with suppress(FileExistsError):
+        _write_exclusive(paths.owner_key, random_bytes(_OWNER_KEY_BYTES))
+    loaded = _read_secure_file(paths.owner_key, label="owner key")
+    if len(loaded.content) != _OWNER_KEY_BYTES:
+        raise RuntimeError("M2 live owner key is invalid")
+    return loaded
+
+
+def _namespace_for(owner_key: bytes, nonce: str) -> str:
+    digest = hmac.new(
+        owner_key,
+        b"pufferlab-m2-namespace-v1\0" + bytes.fromhex(nonce),
+        hashlib.sha256,
+    ).hexdigest()
+    return _NAMESPACE_PREFIX + digest[:24]
+
+
+def _ownership_tag(
+    owner_key: bytes,
+    *,
+    format_version: int,
+    nonce: str,
+    namespace: str,
+) -> str:
+    canonical = json.dumps(
+        {
+            "format_version": format_version,
+            "namespace": namespace,
+            "nonce": nonce,
+        },
+        allow_nan=False,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("ascii")
+    return hmac.new(
+        owner_key,
+        b"pufferlab-m2-session-v1\0" + canonical,
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def _validate_owned_session(session: M2LiveNamespaceSession, owner_key: bytes) -> None:
+    if (
+        session.format_version != 1
+        or _HEX_64_PATTERN.fullmatch(session.nonce) is None
+        or _NAMESPACE_PATTERN.fullmatch(session.namespace) is None
+        or _HEX_64_PATTERN.fullmatch(session.ownership_tag) is None
+    ):
+        raise RuntimeError("M2 live namespace session is invalid; refusing cleanup")
+    expected_namespace = _namespace_for(owner_key, session.nonce)
+    expected_tag = _ownership_tag(
+        owner_key,
+        format_version=session.format_version,
+        nonce=session.nonce,
+        namespace=session.namespace,
+    )
+    if not hmac.compare_digest(session.namespace, expected_namespace) or not hmac.compare_digest(
+        session.ownership_tag,
+        expected_tag,
+    ):
+        raise RuntimeError("M2 live namespace session is not locally owned; refusing cleanup")
+
+
+def _parse_session(content: bytes, owner_key: bytes) -> M2LiveNamespaceSession:
+    try:
+        payload = json.loads(content)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise RuntimeError("M2 live namespace session is unreadable") from None
     if not isinstance(payload, dict) or frozenset(payload) != _SESSION_FIELDS:
         raise RuntimeError("M2 live namespace session has an invalid shape")
-    format_version = payload["format_version"]
-    namespace = payload["namespace"]
-    if not isinstance(format_version, int) or isinstance(format_version, bool):
-        raise RuntimeError("M2 live namespace session has invalid values")
-    if not isinstance(namespace, str):
-        raise RuntimeError("M2 live namespace session has invalid values")
-    session = M2LiveNamespaceSession(format_version=format_version, namespace=namespace)
-    _validate_session(session)
-    return _LoadedSession(session=session, device=metadata.st_dev, inode=metadata.st_ino)
-
-
-def load_session(path: Path = _SESSION_PATH) -> M2LiveNamespaceSession:
-    """Load a record only after validating its exact shape, target, type, and mode."""
-    return _load_session_record(path).session
-
-
-def _require_unchanged_record(path: Path, expected: _LoadedSession) -> None:
-    current = _load_session_record(path)
     if (
-        current.session != expected.session
-        or current.device != expected.device
-        or current.inode != expected.inode
+        not isinstance(payload["format_version"], int)
+        or isinstance(payload["format_version"], bool)
+        or not isinstance(payload["nonce"], str)
+        or not isinstance(payload["namespace"], str)
+        or not isinstance(payload["ownership_tag"], str)
     ):
-        raise RuntimeError("M2 live namespace session changed during cleanup; retaining record")
+        raise RuntimeError("M2 live namespace session has invalid values")
+    session = M2LiveNamespaceSession(**payload)
+    _validate_owned_session(session, owner_key)
+    return session
 
 
-async def cleanup_session(
-    path: Path = _SESSION_PATH,
+def _load_owned_session_at(paths: _SessionPaths) -> _LoadedOwnedSession:
+    _require_safe_paths(paths)
+    owner_key_file = _read_secure_file(paths.owner_key, label="owner key")
+    if len(owner_key_file.content) != _OWNER_KEY_BYTES:
+        raise RuntimeError("M2 live owner key is invalid")
+    session_file = _read_secure_file(paths.session, label="namespace session")
+    session = _parse_session(session_file.content, owner_key_file.content)
+    return _LoadedOwnedSession(
+        session=session,
+        session_file=session_file,
+        owner_key_file=owner_key_file,
+    )
+
+
+def _create_session_at(
+    paths: _SessionPaths,
     *,
-    settings: Settings | None = None,
-    provider_factory: _ProviderFactory = TurbopufferProvider,
+    random_bytes: Callable[[int], bytes] = secrets.token_bytes,
+) -> M2LiveNamespaceSession:
+    owner_key_file = _load_or_create_owner_key(paths, random_bytes=random_bytes)
+    nonce = random_bytes(_NONCE_BYTES).hex()
+    namespace = _namespace_for(owner_key_file.content, nonce)
+    session = M2LiveNamespaceSession(
+        format_version=1,
+        nonce=nonce,
+        namespace=namespace,
+        ownership_tag=_ownership_tag(
+            owner_key_file.content,
+            format_version=1,
+            nonce=nonce,
+            namespace=namespace,
+        ),
+    )
+    _validate_owned_session(session, owner_key_file.content)
+    encoded = json.dumps(asdict(session), sort_keys=True).encode("utf-8") + b"\n"
+    _write_exclusive(paths.session, encoded)
+    return session
+
+
+def create_session() -> M2LiveNamespaceSession:
+    """Create only the fixed production record with OS-generated ownership material."""
+    return _create_session_at(_PRODUCTION_PATHS)
+
+
+def load_session() -> M2LiveNamespaceSession:
+    """Load only the fixed, authenticated production session record."""
+    return _load_owned_session_at(_PRODUCTION_PATHS).session
+
+
+def _require_unchanged_record(paths: _SessionPaths, expected: _LoadedOwnedSession) -> None:
+    current = _load_owned_session_at(paths)
+    if current != expected:
+        raise RuntimeError("M2 live ownership capability changed during cleanup; retaining record")
+
+
+async def _cleanup_session_at(
+    paths: _SessionPaths,
+    *,
+    settings: Settings,
+    provider_factory: _ProviderFactory,
     attempts: int = 30,
     poll_interval: float = 0.5,
 ) -> M2LiveNamespaceSession:
-    """Delete only the retained namespace and forget it only after confirmed clean closure."""
-    loaded = _load_session_record(path)
+    loaded = _load_owned_session_at(paths)
     if attempts < 1 or poll_interval < 0:
         raise ValueError("cleanup polling bounds are invalid")
 
-    resolved_settings = settings or Settings()
-    secret = resolved_settings.turbopuffer_api_key
+    secret = settings.turbopuffer_api_key
     if secret is None or not secret.get_secret_value():
         raise RuntimeError("TURBOPUFFER_API_KEY is required for M2 live namespace cleanup")
-
     provider = provider_factory(
         api_key=secret.get_secret_value(),
-        region=resolved_settings.turbopuffer_region,
+        region=settings.turbopuffer_region,
     )
     not_found_confirmed = False
     try:
@@ -178,46 +335,40 @@ async def cleanup_session(
     finally:
         await provider.close()
 
-    _require_unchanged_record(path, loaded)
-    path.unlink()
+    _require_unchanged_record(paths, loaded)
+    paths.session.unlink()
+    _fsync_directory(paths.session.parent)
     return loaded.session
 
 
-def run_cli(
-    argv: Sequence[str] | None = None,
-    *,
-    path: Path = _SESSION_PATH,
-    settings: Settings | None = None,
-    provider_factory: _ProviderFactory = TurbopufferProvider,
-) -> int:
-    """Run the redacted command surface; cleanup has no namespace argument."""
+async def cleanup_session() -> M2LiveNamespaceSession:
+    """Clean only the authenticated fixed-path production capability."""
+    return await _cleanup_session_at(
+        _PRODUCTION_PATHS,
+        settings=Settings(),
+        provider_factory=TurbopufferProvider,
+    )
+
+
+def run_cli(argv: Sequence[str] | None = None) -> int:
+    """Expose fixed production start/show/cleanup commands without target injection."""
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("start", help="create one immutable ignored session record")
-    subparsers.add_parser("show", help="print the owned namespace without credentials")
-    subparsers.add_parser("cleanup", help="delete and verify only the recorded namespace")
+    subparsers.add_parser("show", help="print the authenticated owned namespace")
+    subparsers.add_parser("cleanup", help="delete and verify only the authenticated record")
     arguments = parser.parse_args(argv)
 
     try:
         if arguments.command == "start":
-            session = create_session(path)
-            try:
-                session_path = str(path.relative_to(_ROOT))
-            except ValueError:
-                session_path = path.name
-            print(f"session_file={session_path}")
+            session = create_session()
+            print(f"session_file={_SESSION_PATH.relative_to(_ROOT)}")
             print(f"PUFFERLAB_SEARCH_NAMESPACE={session.namespace}")
         elif arguments.command == "show":
-            session = load_session(path)
+            session = load_session()
             print(f"PUFFERLAB_SEARCH_NAMESPACE={session.namespace}")
         else:
-            session = asyncio.run(
-                cleanup_session(
-                    path,
-                    settings=settings,
-                    provider_factory=provider_factory,
-                )
-            )
+            session = asyncio.run(cleanup_session())
             print(f"cleanup namespace={session.namespace} status=not_found_verified")
     except Exception:
         print(f"m2_namespace_session command={arguments.command} status=failed", file=sys.stderr)

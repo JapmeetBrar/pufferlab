@@ -1,10 +1,11 @@
-"""Verify one completed Milestone 2 evaluation from ignored SQLite state."""
+"""Independently verify one completed M2 evaluation from its owned local state."""
 
 from __future__ import annotations
 
 import argparse
 import hashlib
 import json
+import math
 import sqlite3
 import sys
 from collections.abc import Iterator, Sequence
@@ -14,21 +15,49 @@ from pathlib import Path
 from uuid import UUID
 
 from pufferlab.config import Settings
+from pufferlab.contracts.datasets import DatasetVersion
 from pufferlab.contracts.evals import (
     ConfigRunSummary,
     EvalRunExport,
     EvalRunStatus,
+    EvalSuccessPayload,
+    JudgedQuery,
+    MetricAggregate,
     MetricName,
+    QuerySet,
     QuerySetSummary,
 )
-from pufferlab.contracts.retrieval import RetrievalMode
-from pufferlab.jobs import finalize_durable_outcomes
+from pufferlab.contracts.retrieval import RetrievalConfig, RetrievalMode
+from pufferlab.datasets.cqadupstack import load_processed_pack_lock, load_source_lock
+from pufferlab.datasets.unix_application import (
+    build_ready_unix_evaluation_seed,
+    load_curated_unix_local_pack,
+)
+from pufferlab.evals.metrics import evaluate_ranking
+from pufferlab.evals.models import Judgment
+from pufferlab.jobs import decode_outcome_payload
 from pufferlab.jobs.eval_runner import export_outcome_record
-from pufferlab.persistence import PufferLabRepository
+from pufferlab.persistence import PufferLabRepository, QueryOutcome
 from pufferlab.persistence.canonical import canonical_json
+from pufferlab.retrieval.config import bind_retrieval_catalog
 from sqlalchemy import Engine, create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
+if __package__:
+    from scripts import m2_live_namespace_session as _packaged_session
+
+    m2_live_namespace_session = _packaged_session
+else:
+    import m2_live_namespace_session as _direct_session  # type: ignore[import-not-found]
+
+    m2_live_namespace_session = _direct_session
+
+_ROOT = Path(__file__).parents[1]
+_DATASET_DIR = _ROOT / "datasets" / "cqadupstack-unix"
+_PACK_CONTENT_SHA256 = "6d54fb92c04b9f193d081a7c430d8804e24e71855d3cbaa2bb50cde838f181b8"
+_PROCESSED_PACK = (
+    _ROOT / "data" / "cqadupstack-unix" / "processed" / f"cqadupstack-unix-{_PACK_CONTENT_SHA256}"
+)
 _QUERY_COUNT = 50
 _CONFIG_MODES = (
     RetrievalMode.BM25,
@@ -74,8 +103,17 @@ class EvaluationVerificationError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
+class _ExpectedSuite:
+    dataset: DatasetVersion
+    query_set: QuerySet
+    queries: tuple[JudgedQuery, ...]
+    configs: tuple[RetrievalConfig, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class VerifiedEvaluation:
     run_id: UUID
+    dataset_version_id: UUID
     query_set_id: UUID
     query_count: int
     outcome_count: int
@@ -115,6 +153,30 @@ def _read_only_repository(path: Path) -> Iterator[PufferLabRepository]:
         engine.dispose()
 
 
+def _load_expected_suite(namespace: str) -> _ExpectedSuite:
+    source_lock = load_source_lock(_DATASET_DIR / "source-lock.json")
+    processed_lock = load_processed_pack_lock(_DATASET_DIR / "processed-pack-lock.json")
+    local_pack = load_curated_unix_local_pack(
+        _PROCESSED_PACK,
+        source_lock=source_lock,
+        processed_pack_lock=processed_lock,
+        dataset_manifest_path=_DATASET_DIR / "dataset-manifest.json",
+        curated_manifest_path=_DATASET_DIR / "curated-50.json",
+    )
+    seed = build_ready_unix_evaluation_seed(local_pack, namespace=namespace)
+    bound = bind_retrieval_catalog(
+        seed.dataset_version,
+        local_pack.corpus.manifest,
+        namespace=namespace,
+    )
+    return _ExpectedSuite(
+        dataset=seed.dataset_version,
+        query_set=seed.query_set,
+        queries=seed.judged_queries,
+        configs=bound.configs,
+    )
+
+
 def _reject_forbidden_fields(value: object) -> None:
     if isinstance(value, dict):
         for key, item in value.items():
@@ -128,9 +190,131 @@ def _reject_forbidden_fields(value: object) -> None:
             _reject_forbidden_fields(item)
 
 
+def _mean(values: Sequence[float]) -> float:
+    if len(values) != _QUERY_COUNT:
+        raise EvaluationVerificationError("evaluation metric sample coverage is invalid")
+    return math.fsum(values) / len(values)
+
+
+def _percentile(values: Sequence[float], percentile: float) -> float:
+    if len(values) != _QUERY_COUNT:
+        raise EvaluationVerificationError("evaluation latency sample coverage is invalid")
+    ordered = sorted(values)
+    position = (len(ordered) - 1) * percentile
+    lower = math.floor(position)
+    upper = math.ceil(position)
+    fraction = position - lower
+    return ordered[lower] + fraction * (ordered[upper] - ordered[lower])
+
+
+def _recompute_summaries(
+    outcomes: Sequence[QueryOutcome],
+    *,
+    configs: tuple[RetrievalConfig, ...],
+    queries: tuple[JudgedQuery, ...],
+) -> tuple[ConfigRunSummary, ...]:
+    expected_identities = {(config.id, query.id) for config in configs for query in queries}
+    actual_identities = {(outcome.config_id, outcome.query_id) for outcome in outcomes}
+    if len(outcomes) != len(actual_identities) or actual_identities != expected_identities:
+        raise EvaluationVerificationError("evaluation outcome identity coverage is invalid")
+    query_by_id = {query.id: query for query in queries}
+    outcome_by_identity = {(outcome.config_id, outcome.query_id): outcome for outcome in outcomes}
+
+    summaries: list[ConfigRunSummary] = []
+    for config in configs:
+        ndcg_values: list[float] = []
+        recall_values: list[float] = []
+        mrr_values: list[float] = []
+        latency_values: list[float] = []
+        for query_id in sorted(query_by_id, key=str):
+            query = query_by_id[query_id]
+            outcome = outcome_by_identity[(config.id, query_id)]
+            try:
+                payload = decode_outcome_payload(outcome)
+            except (TypeError, ValueError):
+                raise EvaluationVerificationError("evaluation outcome payload is invalid") from None
+            if not isinstance(payload, EvalSuccessPayload):
+                raise EvaluationVerificationError("evaluation must have 200 successful outcomes")
+            recomputed = evaluate_ranking(
+                payload.ranked_document_ids,
+                [
+                    Judgment(
+                        document_id=qrel.document_id,
+                        relevance_grade=qrel.relevance_grade,
+                    )
+                    for qrel in query.qrels
+                ],
+            )
+            quality = (
+                recomputed.ndcg_at_10,
+                recomputed.recall_at_50,
+                recomputed.mrr_at_10,
+            )
+            stored_quality = (
+                payload.metrics.ndcg_at_10,
+                payload.metrics.recall_at_50,
+                payload.metrics.mrr_at_10,
+            )
+            if quality != stored_quality:
+                raise EvaluationVerificationError(
+                    "stored per-query metrics do not match ranking and qrels"
+                )
+            if any(value is None for value in quality):
+                raise EvaluationVerificationError("curated query quality metrics must be defined")
+            ndcg, recall, mrr = quality
+            assert ndcg is not None and recall is not None and mrr is not None
+            ndcg_values.append(ndcg)
+            recall_values.append(recall)
+            mrr_values.append(mrr)
+            latency_values.append(payload.total_client_wall_latency_ms)
+
+        summaries.append(
+            ConfigRunSummary(
+                config_id=config.id,
+                metrics=[
+                    MetricAggregate(
+                        name=MetricName.NDCG_AT_10,
+                        value=_mean(ndcg_values),
+                        sample_count=_QUERY_COUNT,
+                    ),
+                    MetricAggregate(
+                        name=MetricName.RECALL_AT_50,
+                        value=_mean(recall_values),
+                        sample_count=_QUERY_COUNT,
+                    ),
+                    MetricAggregate(
+                        name=MetricName.MRR_AT_10,
+                        value=_mean(mrr_values),
+                        sample_count=_QUERY_COUNT,
+                    ),
+                    MetricAggregate(
+                        name=MetricName.LATENCY_P50_MS,
+                        value=_percentile(latency_values, 0.50),
+                        sample_count=_QUERY_COUNT,
+                    ),
+                    MetricAggregate(
+                        name=MetricName.LATENCY_P95_MS,
+                        value=_percentile(latency_values, 0.95),
+                        sample_count=_QUERY_COUNT,
+                    ),
+                    MetricAggregate(
+                        name=MetricName.ERROR_RATE,
+                        value=0.0,
+                        sample_count=_QUERY_COUNT,
+                    ),
+                ],
+                completed_queries=_QUERY_COUNT,
+                failed_queries=0,
+            )
+        )
+    return tuple(summaries)
+
+
 def _verify_repository(
     repository: PufferLabRepository,
     run_id: UUID,
+    *,
+    expected: _ExpectedSuite,
 ) -> VerifiedEvaluation:
     run = repository.get_run(run_id)
     if run.status is not EvalRunStatus.COMPLETED:
@@ -145,53 +329,43 @@ def _verify_repository(
         raise EvaluationVerificationError("evaluation run lifecycle or coverage is invalid")
 
     config_ids = (run.baseline_config_id, *run.candidate_config_ids)
-    if len(config_ids) != len(_CONFIG_MODES) or len(set(config_ids)) != len(_CONFIG_MODES):
-        raise EvaluationVerificationError("evaluation run must contain four unique configs")
+    expected_config_ids = tuple(config.id for config in expected.configs)
+    if config_ids != expected_config_ids:
+        raise EvaluationVerificationError("evaluation run does not use the exact canonical configs")
     configs = tuple(repository.get_retrieval_config(config_id) for config_id in config_ids)
-    if tuple(config.mode for config in configs) != _CONFIG_MODES:
-        raise EvaluationVerificationError("evaluation configs are not the canonical ordered modes")
+    if configs != expected.configs or tuple(config.mode for config in configs) != _CONFIG_MODES:
+        raise EvaluationVerificationError("persisted evaluation configs are not canonical")
 
     query_set, queries = repository.get_query_set(run.query_set.id)
-    query_ids = tuple(query.id for query in queries)
-    expected_query_set = QuerySetSummary(
-        id=query_set.id,
-        name=query_set.name,
-        version=query_set.version,
-        query_count=query_set.query_count,
-        content_hash=query_set.content_hash,
+    if query_set != expected.query_set or tuple(queries) != expected.queries:
+        raise EvaluationVerificationError("persisted curated query set is not canonical")
+    dataset = repository.get_dataset_version(query_set.dataset_version_id)
+    if dataset != expected.dataset:
+        raise EvaluationVerificationError("persisted Unix dataset revision is not canonical")
+    expected_query_summary = QuerySetSummary(
+        id=expected.query_set.id,
+        name=expected.query_set.name,
+        version=expected.query_set.version,
+        query_count=expected.query_set.query_count,
+        content_hash=expected.query_set.content_hash,
     )
-    if (
-        run.query_set != expected_query_set
-        or run.total_queries != query_set.query_count
-        or query_set.dataset_version_id != configs[0].dataset_version_id
-        or any(config.dataset_version_id != query_set.dataset_version_id for config in configs)
-        or query_set.query_count != _QUERY_COUNT
-        or len(query_ids) != _QUERY_COUNT
-        or len(set(query_ids)) != _QUERY_COUNT
-    ):
-        raise EvaluationVerificationError("evaluation query-set binding or coverage is invalid")
+    if run.query_set != expected_query_summary:
+        raise EvaluationVerificationError("evaluation run query-set summary is not canonical")
 
     outcomes = repository.list_outcomes(run_id)
     if len(outcomes) != _OUTCOME_COUNT:
         raise EvaluationVerificationError("evaluation must contain exactly 200 outcomes")
-    try:
-        recomputed = finalize_durable_outcomes(run, outcomes, query_ids=query_ids)
-    except (TypeError, ValueError):
-        raise EvaluationVerificationError(
-            "durable outcome coverage or payload is invalid"
-        ) from None
-    if run.summaries != recomputed:
-        raise EvaluationVerificationError("persisted summaries do not match durable outcomes")
-    for summary in recomputed:
-        if summary.completed_queries != _QUERY_COUNT or summary.failed_queries != 0:
-            raise EvaluationVerificationError("evaluation must have 200 successful outcomes")
-        if tuple(metric.name for metric in summary.metrics) != _METRIC_ORDER:
-            raise EvaluationVerificationError("evaluation summary metric order is invalid")
-        if any(metric.sample_count != _QUERY_COUNT for metric in summary.metrics):
-            raise EvaluationVerificationError("evaluation summary sample coverage is invalid")
-        error_rate = summary.metrics[-1]
-        if error_rate.name is not MetricName.ERROR_RATE or error_rate.value != 0.0:
-            raise EvaluationVerificationError("evaluation error rate must be zero")
+    recomputed = _recompute_summaries(
+        outcomes,
+        configs=expected.configs,
+        queries=expected.queries,
+    )
+    if tuple(run.summaries) != recomputed:
+        raise EvaluationVerificationError("persisted summaries do not match independent results")
+    if any(
+        tuple(metric.name for metric in summary.metrics) != _METRIC_ORDER for summary in recomputed
+    ):
+        raise EvaluationVerificationError("evaluation summary metric order is invalid")
 
     exported = EvalRunExport(
         run=run,
@@ -214,23 +388,34 @@ def _verify_repository(
 
     return VerifiedEvaluation(
         run_id=run.id,
+        dataset_version_id=dataset.id,
         query_set_id=query_set.id,
-        query_count=len(query_ids),
+        query_count=len(queries),
         outcome_count=len(outcomes),
-        summaries=tuple(recomputed),
+        summaries=recomputed,
         export_sha256=hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
     )
 
 
-def verify_evaluation(
+def _verify_evaluation_at(
     run_id: UUID,
     *,
-    settings: Settings | None = None,
+    database_path: Path,
+    expected: _ExpectedSuite,
 ) -> VerifiedEvaluation:
-    """Read and independently verify one run without migrating or writing its database."""
-    resolved_settings = settings or Settings()
-    with _read_only_repository(resolved_settings.database_path) as repository:
-        return _verify_repository(repository, run_id)
+    with _read_only_repository(database_path) as repository:
+        return _verify_repository(repository, run_id, expected=expected)
+
+
+def verify_evaluation(run_id: UUID) -> VerifiedEvaluation:
+    """Verify the UUID against only fixed owned session, pack, locks, and database paths."""
+    session = m2_live_namespace_session.load_session()
+    expected = _load_expected_suite(session.namespace)
+    return _verify_evaluation_at(
+        run_id,
+        database_path=Settings().database_path,
+        expected=expected,
+    )
 
 
 def _metric_value(summary: ConfigRunSummary, name: str) -> str:
@@ -242,8 +427,9 @@ def _metric_value(summary: ConfigRunSummary, name: str) -> str:
 def render_report(report: VerifiedEvaluation) -> tuple[str, ...]:
     lines = [
         f"run_id={report.run_id} status=completed",
-        f"query_set_id={report.query_set_id} query_count={report.query_count} "
-        f"config_count={len(report.summaries)} outcome_count={report.outcome_count}",
+        f"dataset_version_id={report.dataset_version_id} query_set_id={report.query_set_id} "
+        f"query_count={report.query_count} config_count={len(report.summaries)} "
+        f"outcome_count={report.outcome_count}",
     ]
     for summary in report.summaries:
         metrics = " ".join(
@@ -266,17 +452,13 @@ def render_report(report: VerifiedEvaluation) -> tuple[str, ...]:
     return tuple(lines)
 
 
-def run_cli(
-    argv: Sequence[str] | None = None,
-    *,
-    settings: Settings | None = None,
-) -> int:
+def run_cli(argv: Sequence[str] | None = None) -> int:
     """Accept only one run UUID and never print stored payloads or exception details."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("run_id", type=UUID, help="completed evaluation run UUID")
     arguments = parser.parse_args(argv)
     try:
-        report = verify_evaluation(arguments.run_id, settings=settings)
+        report = verify_evaluation(arguments.run_id)
     except Exception:
         print("verification=failed", file=sys.stderr)
         return 1
