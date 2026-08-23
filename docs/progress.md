@@ -1,8 +1,8 @@
 # PufferLab Progress Ledger
 
-- **Active goal:** deliver Milestone 1 through the reviewed engineering loop: a real browser →
-  FastAPI → turbopuffer comparison of BM25 and vector retrieval using an isolated tiny fixture.
-- **Goal status:** review_requested
+- **Active goal:** deliver [Milestone 2](milestone-2-execution.md) through the reviewed engineering
+  loop: a persisted 50-query Unix evaluation across BM25, ANN, server RRF, and local reranking.
+- **Goal status:** implementing
 - **Last updated:** 2026-08-22
 - **Orchestrator:** root agent
 - **Dedicated reviewer:** reviewer agent
@@ -33,7 +33,14 @@ Process details live in [`engineering-loop.md`](engineering-loop.md).
 | M1-C | [Retrieval orchestration](implementation-plan.md#task-t5) and [compare API](implementation-plan.md#task-t8) | provider_worker | `codex/t5-compare-api` / [PR #6](https://github.com/JapmeetBrar/pufferlab/pull/6) | verified | Dedicated review approved the schema-bound filter validation and production ordering repair. PR #6 merged to protected `main` as `5ca296c`; post-merge Backend and Frontend checks passed. Hybrid multi-query/server RRF, warm hints, and eval execution remain deferred beyond the Milestone 1 comparison path. |
 | M1-D | [Playground query UI with side-by-side results](implementation-plan.md#task-t8) | frontend_worker | `codex/t8-playground` / [PR #8](https://github.com/JapmeetBrar/pufferlab/pull/8) | verified | Dedicated review approved the generated-type-only Playground, exact safe request, direct-error handling, stable URL state, responsive/accessibility behavior, and source/build exposure scans. PR #8 squash-merged to protected `main` as `b7ca478`; post-merge Backend and Frontend checks passed. |
 | M1-E | [Tiny-fixture ingestion command](implementation-plan.md#task-t7) and [setup documentation](implementation-plan.md#task-t11) | fixture_worker | `codex/m1-ingest-cli` / [PR #7](https://github.com/JapmeetBrar/pufferlab/pull/7) | verified | Dedicated review approved the installed manifest-pinned `pufferlab dataset ingest-tiny` command, owned namespace safety, shared normalized BGE runtime, idempotent exact-readiness coverage, redacted failures, and fresh-clone setup guidance. PR #7 squash-merged to protected `main` as `a5442f9`; post-merge Backend and Frontend checks passed. A real account credential has not been consumed, so live vertical-slice verification remains pending. |
-| M1-F | [Live vertical-slice verification](live-verification.md) | root + reviewer | `codex/m1-live-verification` / [draft PR #9](https://github.com/JapmeetBrar/pufferlab/pull/9) | review_requested | The credentialed `gcp-us-west1` run passed the pinned real model, isolated provider smoke test, exact 20-document ingest and idempotent rerun, direct public-API proof, live desktop/mobile browser flow, secret scan, and full local gates. The exact generated namespace was deleted and confirmed `NOT_FOUND`; only fingerprint `860a0799992d` is retained. Review accepted schema normalization at [`c8dd6d0`](https://github.com/JapmeetBrar/pufferlab/pull/9#issuecomment-5382722368) and timing semantics at [`9293155`](https://github.com/JapmeetBrar/pufferlab/pull/9#issuecomment-5382741571). The final immutable head now needs dedicated review, protected merge, and green `main` checks. |
+| M1-F | [Live vertical-slice verification](live-verification.md) | root + reviewer | `codex/m1-live-verification` / [PR #9](https://github.com/JapmeetBrar/pufferlab/pull/9) | verified | [Dedicated final review](https://github.com/JapmeetBrar/pufferlab/pull/9#issuecomment-5382791048) approved the exact evidence head; PR #9 squash-merged as `c1fa093`. The [canonical post-merge record](https://github.com/JapmeetBrar/pufferlab/pull/9#issuecomment-5382795239) confirms protected `main` Backend and Frontend checks passed. |
+| M2-0 | [Milestone 2 coordination and contract audit](milestone-2-execution.md#m2-0--coordination-and-contract-audit) | root | `codex/m2-plan` / PR pending | implementing | Record the finite dependency graph, module ownership, acceptance criteria, and Milestone 1 canonical closeout; request independent review before implementation branches fork. |
+| M2-A | [Pure evaluation engine](milestone-2-execution.md#m2-a--pure-evaluation-engine) | eval worker | `codex/m2-eval-engine` / PR pending | planned | Branch from the reviewed M2-0 merge; implement and golden-test deterministic metrics without service imports. |
+| M2-B | [SQLite persistence and run lifecycle](milestone-2-execution.md#m2-b--sqlite-persistence-and-run-lifecycle) | persistence worker | `codex/m2-persistence-jobs` / PR pending | planned | Branch from the reviewed M2-0 merge; implement immutable revisions, incremental outcomes, recovery, and cancellation. |
+| M2-C | [Hybrid retrieval and local reranking](milestone-2-execution.md#m2-c--hybrid-retrieval-and-local-reranking) | retrieval worker | `codex/m2-hybrid-retrieval` / PR pending | planned | Branch from the reviewed M2-0 merge; add same-snapshot server RRF, local reconstruction, and a pinned text-only reranker. |
+| M2-D | [CQADupStack Unix dataset foundation](milestone-2-execution.md#m2-d--cqadupstack-unix-dataset-foundation) | dataset worker | `codex/m2-unix-dataset` / PR pending | planned | Branch from the reviewed M2-0 merge; add deterministic preprocessing, attribution, qrels, and curated 50-query selection without tracking raw corpus data. |
+| M2-E | [Evaluation service and CLI](milestone-2-execution.md#m2-e--evaluation-application-service-and-cli) | integration worker | `codex/m2-eval-cli` / PR pending | planned | Wait for M2-A through M2-D to merge, then seed four configs and persist/export a bounded 50-query run. |
+| M2-F | [Live execution and goal finalization](milestone-2-execution.md#m2-f--live-execution-and-goal-finalization) | root + reviewer | `codex/m2-live-finalization` / PR pending | planned | Wait for M2-E and protected-main CI, then run the credentialed suite, confirm exact cleanup, record sanitized evidence, and enter final review. |
 
 ## Review history
 
@@ -46,6 +53,8 @@ Process details live in [`engineering-loop.md`](engineering-loop.md).
 | 2026-08-22 | M1-D / [PR #8](https://github.com/JapmeetBrar/pufferlab/pull/8) | `planned → assigned → implementing → review_requested → approved → merged → verified` | The worker based the UI on merged compare API commit `5ca296c`, normally merged protected `main` at `a5442f9`, and used only generated OpenAPI types for browser domain data. [Dedicated review](https://github.com/JapmeetBrar/pufferlab/pull/8#issuecomment-5379781262) verified the exact request/response/error boundary, stable URL, safe links/rendering, responsive/accessibility states, contrast, and exposure scans. PR #8 squash-merged as `b7ca478`; protected post-merge checks passed. Successful result rendering is fake-contract tested; live search remains the active M1-F verification step. |
 | 2026-08-22 | M1-E / [PR #7](https://github.com/JapmeetBrar/pufferlab/pull/7) | `implementing → review_requested → approved → merged → verified` | The worker wired the checked-in 20-document fixture to the exact pinned BGE passage embedder and merged ingestion/provider services behind one injectable CLI command. [Dedicated review](https://github.com/JapmeetBrar/pufferlab/pull/7#issuecomment-5379745253) independently verified the installed entrypoint, pinned lazy model path, owned namespace/readiness and idempotence boundaries, redacted failures, and the no-deletion policy. PR #7 squash-merged as `a5442f9` and protected post-merge checks passed. No credential or model download was consumed; live vertical-slice verification remains pending. |
 | 2026-08-22 | M1-F / [draft PR #9](https://github.com/JapmeetBrar/pufferlab/pull/9) | `implementing → review_requested → changes_requested → implementing → review_requested → changes_requested → implementing → review_requested` | [Early review at `bced42b`](https://github.com/JapmeetBrar/pufferlab/pull/9#issuecomment-5381764970) found the skipped-success credential path plus API, secret, cleanup, and evidence blockers. [Review at `d98b25a`](https://github.com/JapmeetBrar/pufferlab/pull/9#issuecomment-5382354782) requested stronger result binding and exit/signal propagation; [review at `70e5e34`](https://github.com/JapmeetBrar/pufferlab/pull/9#issuecomment-5382623833) accepted those repairs and authorized the credentialed run. Live diagnostics exposed only the provider-owned system `id:string` schema entry; normalization head `c8dd6d0` was [independently accepted](https://github.com/JapmeetBrar/pufferlab/pull/9#issuecomment-5382722368). Timing head `9293155` was [independently accepted](https://github.com/JapmeetBrar/pufferlab/pull/9#issuecomment-5382741571). The completed live run then exposed a Zsh-only second cleanup attempt after already-confirmed deletion; the runbook now disarms the restored outer trap at top level. All sanitized evidence is recorded and the final exact head awaits review. |
+| 2026-08-22 | M1-F / [PR #9](https://github.com/JapmeetBrar/pufferlab/pull/9) | `review_requested → approved → merged → verified` | [Dedicated final review](https://github.com/JapmeetBrar/pufferlab/pull/9#issuecomment-5382791048) reproduced the Bash/Zsh cleanup behavior, reran full gates, and found no blocker. PR #9 merged as `c1fa093`; [post-merge evidence](https://github.com/JapmeetBrar/pufferlab/pull/9#issuecomment-5382795239) records green Backend and Frontend checks on protected `main`. |
+| 2026-08-22 | M2-0 / `codex/m2-plan` | `planned → assigned → implementing` | Root created the coordination branch from `c1fa093`. Independent reviewer handoff follows after documentation validation; M2-A through M2-D must branch only from the reviewed merge. |
 
 ## Milestone 1 acceptance evidence
 
@@ -61,6 +70,22 @@ Process details live in [`engineering-loop.md`](engineering-loop.md).
 - [x] Every preceding delivery PR records an independent reviewer decision and merge. Finalization
   PR #9's own verdict, merge, and post-merge checks remain canonical in GitHub.
 
+## Milestone 2 acceptance evidence
+
+- [ ] Pure judged metrics match hand calculations and a trusted reference across edge cases.
+- [ ] Immutable revisions, incremental outcomes, interruption recovery, and cancellation persist in
+  SQLite under the ignored data directory.
+- [ ] The deterministic Unix pack preserves attribution/qrels and yields a curated 50-query suite
+  without tracking raw licensed data.
+- [ ] BM25, ANN, server RRF, and local-reranked configurations return contract-valid evidence and
+  separated client timings.
+- [ ] One CLI command completes and persists the 50-query/four-configuration run; JSON export
+  validates against the checked-in contract.
+- [ ] The credentialed run cleans only its exact generated namespace and retains no secret, raw
+  vector, corpus, or database artifact in Git.
+- [ ] Every Milestone 2 PR receives independent review, reviewer-only merge, and green protected
+  `main` checks.
+
 ## Decision log
 
 | Date | Decision | Reason |
@@ -72,3 +97,5 @@ Process details live in [`engineering-loop.md`](engineering-loop.md).
 | 2026-08-22 | Treat provider documentation as a contract-review input. | Independent review caught dense-vector and FTS constraints before provider implementation. |
 | 2026-08-22 | Make GitHub merge/check history canonical between finite ledger updates. | Avoids recursively opening a PR solely to record the previous ledger PR's merge. |
 | 2026-08-22 | Protect `main` with active ruleset `21190317` requiring PRs and Backend/Frontend checks. | Enforces review-unit and CI boundaries without bypasses; GitHub approvals remain zero because agents share one identity. |
+| 2026-08-22 | Split Milestone 2 into four parallel foundations, one serial integration PR, and one finalization PR. | Keeps pure metrics, persistence, retrieval, and licensed-data handling independently reviewable while enforcing a single integration point. |
+| 2026-08-22 | Keep downloaded CQADupStack data, generated embeddings, SQLite, and live evidence outside Git. | Preserves licensing, credential, reproducibility, and repository-size boundaries while checked-in manifests and hashes make processing auditable. |
