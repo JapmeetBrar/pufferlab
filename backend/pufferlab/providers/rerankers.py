@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import math
+import threading
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from time import perf_counter
@@ -73,7 +74,7 @@ class SentenceTransformersReranker:
         self.revision = revision
         self._model_factory = model_factory or _load_cross_encoder
         self._model: _CrossEncoder | None = None
-        self._lock = asyncio.Lock()
+        self._model_lock = threading.Lock()
         self._clock = clock
 
     async def rerank(
@@ -88,14 +89,28 @@ class SentenceTransformersReranker:
             raise ValueError("reranker candidates must have unique document IDs")
 
         start = self._clock()
-        async with self._lock:
-            values = await asyncio.to_thread(self._predict, query_text, tuple(candidates))
+        values = await asyncio.to_thread(
+            self._predict_serialized,
+            query_text,
+            tuple(candidates),
+        )
         duration_ms = max(0.0, (self._clock() - start) * 1000.0)
         scores = tuple(
             RerankScore(document_id=candidate.document_id, score=value)
             for candidate, value in zip(candidates, values, strict=True)
         )
         return RerankResult(scores=scores, client_duration_ms=duration_ms)
+
+    def _predict_serialized(
+        self,
+        query_text: str,
+        candidates: tuple[RerankCandidate, ...],
+    ) -> tuple[float, ...]:
+        # Cancellation of ``asyncio.to_thread`` does not stop its worker thread. A
+        # thread-owned lock therefore has to cover model loading and prediction; an
+        # asyncio lock would be released while the cancelled prediction still runs.
+        with self._model_lock:
+            return self._predict(query_text, candidates)
 
     def _predict(
         self,

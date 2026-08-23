@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import traceback
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -17,6 +18,7 @@ from pufferlab.providers.types import ProviderSchema, WriteDocument
 from turbopuffer import (
     APIError,
     APIResponseValidationError,
+    AsyncTurbopuffer,
     AuthenticationError,
     NotFoundError,
     RateLimitError,
@@ -267,7 +269,7 @@ async def test_bm25_query_shape_and_score_semantics() -> None:
 
     result = await provider.query_bm25(
         namespace="fixture",
-        text_attribute="body",
+        lexical_fields=(("title", 2.0), ("body", 1.0)),
         query_text="pufferfish",
         top_k=5,
         include_attributes=("title", "published_at"),
@@ -278,7 +280,13 @@ async def test_bm25_query_shape_and_score_semantics() -> None:
         (
             "query",
             {
-                "rank_by": ("body", "BM25", "pufferfish"),
+                "rank_by": (
+                    "Sum",
+                    [
+                        ("Product", 2.0, ("title", "BM25", "pufferfish")),
+                        ("Product", 1.0, ("body", "BM25", "pufferfish")),
+                    ],
+                ),
                 "top_k": 5,
                 "include_attributes": ["title", "published_at"],
                 "consistency": {"level": "strong"},
@@ -296,6 +304,50 @@ async def test_bm25_query_shape_and_score_semantics() -> None:
     assert score.direction is ScoreDirection.HIGHER_IS_BETTER
     assert score.source is ScoreSource.TURBOPUFFER_DIST
     assert score.value == 3.75
+
+
+@pytest.mark.asyncio
+async def test_weighted_bm25_shape_serializes_through_real_sdk() -> None:
+    captured: dict[str, object] = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads((await request.aread()).decode()))
+        return httpx.Response(200, json={"rows": []}, request=request)
+
+    http_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://sdk.test",
+    )
+    sdk = AsyncTurbopuffer(
+        api_key="not-a-real-key",
+        base_url="https://sdk.test",
+        http_client=http_client,
+        max_retries=0,
+    )
+    provider = TurbopufferProvider(
+        api_key="not-a-real-key",
+        region="gcp-us-central1",
+        client=sdk,
+    )
+
+    try:
+        await provider.query_bm25(
+            namespace="fixture",
+            lexical_fields=(("title", 2.0), ("body", 1.0)),
+            query_text="pufferfish",
+            top_k=5,
+            include_attributes=("title",),
+        )
+    finally:
+        await provider.close()
+
+    assert captured["rank_by"] == [
+        "Sum",
+        [
+            ["Product", 2.0, ["title", "BM25", "pufferfish"]],
+            ["Product", 1.0, ["body", "BM25", "pufferfish"]],
+        ],
+    ]
 
 
 @pytest.mark.asyncio
@@ -359,7 +411,7 @@ async def test_hybrid_rrf_uses_one_weighted_same_snapshot_multi_query() -> None:
 
     result = await provider.query_hybrid_rrf(
         namespace="fixture",
-        text_attribute="body",
+        lexical_fields=(("title", 2.0), ("body", 1.0)),
         query_text="shell pipe",
         vector_attribute="vector",
         query_vector=query_vector,
@@ -382,7 +434,13 @@ async def test_hybrid_rrf_uses_one_weighted_same_snapshot_multi_query() -> None:
                         "limit": 50,
                         "include_attributes": ["title"],
                         "filters": ("source", "Eq", "unix"),
-                        "rank_by": ("body", "BM25", "shell pipe"),
+                        "rank_by": (
+                            "Sum",
+                            [
+                                ("Product", 2.0, ("title", "BM25", "shell pipe")),
+                                ("Product", 1.0, ("body", "BM25", "shell pipe")),
+                            ],
+                        ),
                     },
                     {
                         "limit": 50,
@@ -433,7 +491,7 @@ async def test_debug_hybrid_probe_is_separate_and_preserves_raw_score_semantics(
 
     result = await provider.probe_hybrid_candidates(
         namespace="fixture",
-        text_attribute="body",
+        lexical_fields=(("title", 2.0), ("body", 1.0)),
         query_text="chmod command",
         vector_attribute="vector",
         query_vector=query_vector,
@@ -451,7 +509,13 @@ async def test_debug_hybrid_probe_is_separate_and_preserves_raw_score_semantics(
                     {
                         "limit": 25,
                         "include_attributes": ["title"],
-                        "rank_by": ("body", "BM25", "chmod command"),
+                        "rank_by": (
+                            "Sum",
+                            [
+                                ("Product", 2.0, ("title", "BM25", "chmod command")),
+                                ("Product", 1.0, ("body", "BM25", "chmod command")),
+                            ],
+                        ),
                     },
                     {
                         "limit": 25,
@@ -481,7 +545,7 @@ async def test_hybrid_rrf_rejects_unexpected_server_result_shapes(result_count: 
     with pytest.raises(ValueError, match="unexpected result count"):
         await provider.query_hybrid_rrf(
             namespace="fixture",
-            text_attribute="body",
+            lexical_fields=(("title", 2.0), ("body", 1.0)),
             query_text="query",
             vector_attribute="vector",
             query_vector=unit_vector(2, 0),
@@ -552,7 +616,7 @@ async def test_client_and_namespace_are_reused_and_close_is_idempotent() -> None
 
     await provider.query_bm25(
         namespace="same",
-        text_attribute="body",
+        lexical_fields=(("title", 2.0), ("body", 1.0)),
         query_text="one",
         top_k=1,
         include_attributes=(),
@@ -649,7 +713,7 @@ async def test_provider_errors_are_mapped_without_secret_material(
     with pytest.raises(ProviderError) as raised:
         await provider.query_bm25(
             namespace="fixture",
-            text_attribute="body",
+            lexical_fields=(("title", 2.0), ("body", 1.0)),
             query_text="secret test",
             top_k=1,
             include_attributes=(),
@@ -693,7 +757,7 @@ async def test_every_sdk_path_detaches_secret_bearing_exception_context(operatio
         if operation == "query":
             await provider.query_bm25(
                 namespace="fixture",
-                text_attribute="body",
+                lexical_fields=(("title", 2.0), ("body", 1.0)),
                 query_text="safe query",
                 top_k=1,
                 include_attributes=(),

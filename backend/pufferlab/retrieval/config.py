@@ -8,11 +8,11 @@ import math
 from dataclasses import dataclass
 from uuid import UUID, uuid5
 
-from pufferlab.contracts.retrieval import RetrievalConfigSummary, RetrievalMode
+from pufferlab.contracts.retrieval import LexicalSpec, RetrievalConfigSummary, RetrievalMode
 from pufferlab.datasets.models import DatasetManifest
 from pufferlab.datasets.schema import compile_namespace_write_spec
 from pufferlab.providers.rerankers import DEFAULT_RERANKER_MODEL, DEFAULT_RERANKER_REVISION
-from pufferlab.providers.types import ConsistencyLevel, DistanceMetric
+from pufferlab.providers.types import ConsistencyLevel, DistanceMetric, LexicalFieldWeights
 
 _CONFIG_ID_NAMESPACE = UUID("224ff18e-4b57-55bb-a6ec-4e40384550da")
 
@@ -24,7 +24,7 @@ class SeededSearchConfig:
     result_k: int
     candidate_k: int
     consistency: ConsistencyLevel
-    text_attribute: str | None = None
+    lexical_fields: LexicalFieldWeights | None = None
     vector_attribute: str | None = None
     embedding_model: str | None = None
     embedding_revision: str | None = None
@@ -64,6 +64,7 @@ def build_search_catalog(
     rrf_weights: tuple[float, float] = (1.0, 1.0),
     reranker_depth: int = 50,
     consistency: ConsistencyLevel = "strong",
+    lexical: LexicalSpec | None = None,
 ) -> SearchConfigCatalog:
     if result_k < 1:
         raise ValueError("result_k must be positive")
@@ -79,7 +80,12 @@ def build_search_catalog(
     if reranker_depth < result_k or reranker_depth > candidate_k:
         raise ValueError("reranker_depth must be between result_k and candidate_k")
     write_spec = compile_namespace_write_spec(manifest)
-    text_attribute = "body" if "body" in manifest.fts.attributes else manifest.fts.attributes[0]
+    lexical_spec = lexical or LexicalSpec()
+    lexical_fields = _compile_lexical_fields(manifest, lexical_spec)
+    lexical_payload = {
+        "title_weight": lexical_spec.title_weight,
+        "body_weight": lexical_spec.body_weight,
+    }
 
     common = {
         "dataset_slug": manifest.slug,
@@ -92,7 +98,7 @@ def build_search_catalog(
     bm25_payload = {
         **common,
         "mode": RetrievalMode.BM25.value,
-        "text_attribute": text_attribute,
+        "lexical": lexical_payload,
     }
     vector_payload = {
         **common,
@@ -106,7 +112,7 @@ def build_search_catalog(
     hybrid_payload = {
         **vector_payload,
         "mode": RetrievalMode.HYBRID_RRF.value,
-        "text_attribute": text_attribute,
+        "lexical": lexical_payload,
         "rrf_execution": "server",
         "rrf_rank_constant": rrf_rank_constant,
         "rrf_weights": rrf_weights,
@@ -122,7 +128,7 @@ def build_search_catalog(
 
     bm25 = SeededSearchConfig(
         summary=_summary(
-            name=f"BM25 · {text_attribute}",
+            name="BM25 · weighted title + body",
             mode=RetrievalMode.BM25,
             payload=bm25_payload,
         ),
@@ -130,7 +136,7 @@ def build_search_catalog(
         result_k=result_k,
         candidate_k=candidate_k,
         consistency=consistency,
-        text_attribute=text_attribute,
+        lexical_fields=lexical_fields,
     )
     vector = SeededSearchConfig(
         summary=_summary(
@@ -158,7 +164,7 @@ def build_search_catalog(
         result_k=result_k,
         candidate_k=candidate_k,
         consistency=consistency,
-        text_attribute=text_attribute,
+        lexical_fields=lexical_fields,
         vector_attribute=manifest.vector.attribute,
         embedding_model=manifest.embedding.model,
         embedding_revision=manifest.embedding.revision,
@@ -177,7 +183,7 @@ def build_search_catalog(
         result_k=result_k,
         candidate_k=candidate_k,
         consistency=consistency,
-        text_attribute=text_attribute,
+        lexical_fields=lexical_fields,
         vector_attribute=manifest.vector.attribute,
         embedding_model=manifest.embedding.model,
         embedding_revision=manifest.embedding.revision,
@@ -190,6 +196,28 @@ def build_search_catalog(
         reranker_depth=reranker_depth,
     )
     return SearchConfigCatalog((bm25, vector, hybrid, rerank))
+
+
+def _compile_lexical_fields(
+    manifest: DatasetManifest,
+    lexical: LexicalSpec,
+) -> LexicalFieldWeights:
+    requested = (
+        ("title", lexical.title_weight),
+        ("body", lexical.body_weight),
+    )
+    available = set(manifest.fts.attributes)
+    missing = [
+        attribute for attribute, weight in requested if weight > 0 and attribute not in available
+    ]
+    if missing:
+        raise ValueError(
+            "positive lexical weights require full-text-search attributes: " + ", ".join(missing)
+        )
+    compiled = tuple((attribute, weight) for attribute, weight in requested if weight > 0)
+    if not compiled:
+        raise ValueError("at least one lexical weight must be positive")
+    return compiled
 
 
 def _summary(

@@ -10,7 +10,7 @@ from pufferlab.contracts.common import (
     ScoreSource,
 )
 from pufferlab.contracts.filters import FilterLogical, FilterPredicate, LogicalOp, PredicateOp
-from pufferlab.contracts.retrieval import RetrievalMode
+from pufferlab.contracts.retrieval import LexicalSpec, RetrievalMode
 from pufferlab.contracts.search import RetrievalStage, SearchCompareRequest, TimingStage
 from pufferlab.datasets.models import DatasetManifest
 from pufferlab.datasets.schema import compile_namespace_write_spec
@@ -250,6 +250,7 @@ def test_catalog_is_deterministic_and_describes_all_four_modes() -> None:
     assert rerank_config.reranker_model == DEFAULT_RERANKER_MODEL
     assert rerank_config.reranker_revision == DEFAULT_RERANKER_REVISION
     assert rerank_config.reranker_depth == 50
+    assert _catalog().configs[0].lexical_fields == (("title", 2.0), ("body", 1.0))
 
     manifest = _manifest()
     changed_manifest = manifest.model_copy(
@@ -259,6 +260,48 @@ def test_catalog_is_deterministic_and_describes_all_four_modes() -> None:
     assert [summary.config_hash for summary in changed_schema] != [
         summary.config_hash for summary in first
     ]
+
+
+def test_catalog_lexical_weights_are_executable_and_part_of_identity() -> None:
+    original = _catalog()
+    changed = build_search_catalog(
+        _manifest(),
+        result_k=3,
+        lexical=LexicalSpec(title_weight=3.0, body_weight=0.5),
+    )
+
+    assert changed.configs[0].lexical_fields == (("title", 3.0), ("body", 0.5))
+    assert changed.summaries()[1] == original.summaries()[1]
+    for index in (0, 2, 3):
+        assert changed.summaries()[index].id != original.summaries()[index].id
+        assert changed.summaries()[index].config_hash != original.summaries()[index].config_hash
+
+    body_only = build_search_catalog(
+        _manifest(),
+        result_k=3,
+        lexical=LexicalSpec(title_weight=0.0, body_weight=1.0),
+    )
+    assert body_only.configs[0].lexical_fields == (("body", 1.0),)
+
+    with pytest.raises(ValueError, match="at least one lexical weight"):
+        build_search_catalog(
+            _manifest(),
+            result_k=3,
+            lexical=LexicalSpec(title_weight=0.0, body_weight=0.0),
+        )
+
+    body_fts_only = _manifest().model_copy(
+        update={
+            "fts": _manifest().fts.model_copy(update={"attributes": ["body"]}),
+        }
+    )
+    with pytest.raises(ValueError, match="title"):
+        build_search_catalog(body_fts_only, result_k=3)
+    assert build_search_catalog(
+        body_fts_only,
+        result_k=3,
+        lexical=LexicalSpec(title_weight=0.0, body_weight=1.0),
+    ).configs[0].lexical_fields == (("body", 1.0),)
 
 
 @pytest.mark.asyncio
@@ -310,7 +353,7 @@ async def test_compare_preserves_config_order_and_reports_observed_evidence() ->
     assert provider.bm25_calls == [
         {
             "namespace": "pufferlab-test",
-            "text_attribute": "body",
+            "lexical_fields": (("title", 2.0), ("body", 1.0)),
             "query_text": "find terminal basics",
             "top_k": 3,
             "include_attributes": ("external_id", "title", "body", "source_url"),

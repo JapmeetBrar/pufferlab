@@ -9,6 +9,7 @@ from pufferlab.contracts.common import JsonValue, ObservedScore
 type ConsistencyLevel = Literal["strong", "eventual"]
 type DistanceMetric = Literal["cosine_distance", "euclidean_squared"]
 type DocumentId = str | int
+type LexicalFieldWeights = tuple[tuple[str, float], ...]
 
 
 class FullTextSearchSchema(TypedDict, total=False):

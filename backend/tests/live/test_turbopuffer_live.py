@@ -13,14 +13,35 @@ from pufferlab.config import Settings
 from pufferlab.contracts.errors import ApiErrorCode
 from pufferlab.providers.errors import ProviderError
 from pufferlab.providers.turbopuffer import TurbopufferProvider
-from pufferlab.providers.types import ProviderSchema, WriteDocument
-from pufferlab.retrieval.rrf import reconstruct_rrf
+from pufferlab.providers.types import ProviderQueryResult, ProviderSchema, WriteDocument
+from pufferlab.retrieval.rrf import RrfEntry, reconstruct_rrf
 
 _LIVE_NAMESPACE_PREFIX = "pufferlab-live-test-"
 
 
 def _unit_vector(dimensions: int, hot_dimension: int) -> list[float]:
     return [float(position == hot_dimension) for position in range(dimensions)]
+
+
+def _assert_tie_safe_rrf_parity(
+    server: ProviderQueryResult,
+    reconstructed: tuple[RrfEntry, ...],
+) -> None:
+    expected = reconstructed[: len(server.documents)]
+    start = 0
+    while start < len(expected):
+        end = start + 1
+        while end < len(expected) and expected[end].score == expected[start].score:
+            end += 1
+        assert {document.id for document in server.documents[start:end]} == {
+            entry.document_id for entry in expected[start:end]
+        }
+        start = end
+
+    score_by_id = {entry.document_id: entry.score for entry in expected}
+    assert {document.id for document in server.documents} == set(score_by_id)
+    for document in server.documents:
+        assert document.score.value == pytest.approx(score_by_id[document.id])
 
 
 @pytest.mark.live
@@ -43,25 +64,30 @@ async def test_live_write_bm25_ann_server_rrf_parity_and_exact_cleanup() -> None
     hybrid_vector = [
         (left + right) / 2 for left, right in zip(puffer_vector, walrus_vector, strict=True)
     ]
+    full_text_search = {
+        "tokenizer": "word_v4",
+        "case_sensitive": False,
+        "language": "english",
+        "stemming": False,
+        "remove_stopwords": False,
+        "ascii_folding": False,
+        "max_token_length": 39,
+        "k1": 1.2,
+        "b": 0.75,
+        "k3": 8.0,
+    }
     schema = cast(
         ProviderSchema,
         {
-            "title": {"type": "string", "filterable": False},
+            "title": {
+                "type": "string",
+                "filterable": False,
+                "full_text_search": full_text_search,
+            },
             "body": {
                 "type": "string",
                 "filterable": False,
-                "full_text_search": {
-                    "tokenizer": "word_v4",
-                    "case_sensitive": False,
-                    "language": "english",
-                    "stemming": False,
-                    "remove_stopwords": False,
-                    "ascii_folding": False,
-                    "max_token_length": 39,
-                    "k1": 1.2,
-                    "b": 0.75,
-                    "k3": 8.0,
-                },
+                "full_text_search": full_text_search,
             },
             "vector": {"type": "[2]f32", "ann": True, "filterable": False},
         },
@@ -113,7 +139,7 @@ async def test_live_write_bm25_ann_server_rrf_parity_and_exact_cleanup() -> None
 
         bm25 = await provider.query_bm25(
             namespace=namespace_id,
-            text_attribute="body",
+            lexical_fields=(("title", 2.0), ("body", 1.0)),
             query_text="pufferfish search",
             top_k=3,
             include_attributes=("title", "body"),
@@ -128,7 +154,7 @@ async def test_live_write_bm25_ann_server_rrf_parity_and_exact_cleanup() -> None
         )
         hybrid = await provider.query_hybrid_rrf(
             namespace=namespace_id,
-            text_attribute="body",
+            lexical_fields=(("title", 2.0), ("body", 1.0)),
             query_text="pufferfish search",
             vector_attribute="vector",
             query_vector=puffer_vector,
@@ -141,7 +167,7 @@ async def test_live_write_bm25_ann_server_rrf_parity_and_exact_cleanup() -> None
         )
         probe = await provider.probe_hybrid_candidates(
             namespace=namespace_id,
-            text_attribute="body",
+            lexical_fields=(("title", 2.0), ("body", 1.0)),
             query_text="pufferfish search",
             vector_attribute="vector",
             query_vector=puffer_vector,
@@ -162,12 +188,7 @@ async def test_live_write_bm25_ann_server_rrf_parity_and_exact_cleanup() -> None
         assert ann.documents
         assert bm25.documents[0].score.direction.value == "higher_is_better"
         assert ann.documents[0].score.direction.value == "lower_is_better"
-        assert [document.id for document in hybrid.documents] == [
-            entry.document_id for entry in reconstructed[: len(hybrid.documents)]
-        ]
-        assert [document.score.value for document in hybrid.documents] == pytest.approx(
-            [entry.score for entry in reconstructed[: len(hybrid.documents)]]
-        )
+        _assert_tie_safe_rrf_parity(hybrid, reconstructed)
         assert all(document.score.kind.value == "rrf" for document in hybrid.documents)
         assert bm25.client_duration_ms >= 0
         assert ann.client_duration_ms >= 0

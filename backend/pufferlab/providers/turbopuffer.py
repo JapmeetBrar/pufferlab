@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import date, datetime
 from time import perf_counter
@@ -28,6 +29,7 @@ from pufferlab.providers.errors import ProviderError, ProviderErrorDetails, map_
 from pufferlab.providers.types import (
     ConsistencyLevel,
     DistanceMetric,
+    LexicalFieldWeights,
     ProviderDeleteResult,
     ProviderDocument,
     ProviderDocumentIdInventory,
@@ -91,6 +93,26 @@ def filter_to_turbopuffer(node: FilterNode) -> SdkFilter:
     if node.op is LogicalOp.AND:
         return ("And", children)
     return ("Or", children)
+
+
+def _weighted_bm25_rank_by(
+    lexical_fields: LexicalFieldWeights,
+    query_text: str,
+) -> tuple[object, ...]:
+    if not lexical_fields:
+        raise ValueError("lexical_fields must not be empty")
+    clauses: list[tuple[object, ...]] = []
+    seen: set[str] = set()
+    for attribute, weight in lexical_fields:
+        if not attribute.strip() or attribute in seen:
+            raise ValueError("lexical field names must be non-blank and unique")
+        if isinstance(weight, bool) or not math.isfinite(weight) or weight <= 0:
+            raise ValueError("lexical field weights must be finite and positive")
+        seen.add(attribute)
+        clauses.append(("Product", weight, (attribute, "BM25", query_text)))
+    if len(clauses) == 1:
+        return clauses[0]
+    return ("Sum", clauses)
 
 
 class TurbopufferProvider:
@@ -159,7 +181,7 @@ class TurbopufferProvider:
         self,
         *,
         namespace: str,
-        text_attribute: str,
+        lexical_fields: LexicalFieldWeights,
         query_text: str,
         top_k: int,
         include_attributes: Sequence[str],
@@ -168,7 +190,7 @@ class TurbopufferProvider:
         vector_attributes: Sequence[str] = ("vector",),
     ) -> ProviderQueryResult:
         kwargs = self._query_kwargs(
-            rank_by=(text_attribute, "BM25", query_text),
+            rank_by=_weighted_bm25_rank_by(lexical_fields, query_text),
             top_k=top_k,
             include_attributes=include_attributes,
             filters=filters,
@@ -215,7 +237,7 @@ class TurbopufferProvider:
         self,
         *,
         namespace: str,
-        text_attribute: str,
+        lexical_fields: LexicalFieldWeights,
         query_text: str,
         vector_attribute: str,
         query_vector: Sequence[float],
@@ -231,7 +253,7 @@ class TurbopufferProvider:
         """Execute production hybrid retrieval as one same-snapshot server RRF call."""
 
         queries = self._hybrid_subqueries(
-            text_attribute=text_attribute,
+            lexical_fields=lexical_fields,
             query_text=query_text,
             vector_attribute=vector_attribute,
             query_vector=query_vector,
@@ -275,7 +297,7 @@ class TurbopufferProvider:
         self,
         *,
         namespace: str,
-        text_attribute: str,
+        lexical_fields: LexicalFieldWeights,
         query_text: str,
         vector_attribute: str,
         query_vector: Sequence[float],
@@ -288,7 +310,7 @@ class TurbopufferProvider:
         """Return raw hybrid lists through a separate, explicitly debug-only request."""
 
         queries = self._hybrid_subqueries(
-            text_attribute=text_attribute,
+            lexical_fields=lexical_fields,
             query_text=query_text,
             vector_attribute=vector_attribute,
             query_vector=query_vector,
@@ -445,7 +467,7 @@ class TurbopufferProvider:
     @staticmethod
     def _hybrid_subqueries(
         *,
-        text_attribute: str,
+        lexical_fields: LexicalFieldWeights,
         query_text: str,
         vector_attribute: str,
         query_vector: Sequence[float],
@@ -462,7 +484,7 @@ class TurbopufferProvider:
             common["filters"] = filter_to_turbopuffer(filters)
         lexical = {
             **common,
-            "rank_by": (text_attribute, "BM25", query_text),
+            "rank_by": _weighted_bm25_rank_by(lexical_fields, query_text),
         }
         vector = {
             **common,

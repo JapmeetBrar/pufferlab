@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from typing import Protocol
 
 from pufferlab.config import Settings
@@ -98,10 +99,10 @@ class RuntimeSearchBackend:
             return self._service
         async with self._service_lock:
             if self._service is None:
-                self._service = self._build_service()
+                self._service = await self._build_service()
         return self._service
 
-    def _build_service(self) -> SearchCompareService:
+    async def _build_service(self) -> SearchCompareService:
         namespace = self._settings.pufferlab_search_namespace
         api_key = self._settings.turbopuffer_api_key
         if namespace is None or not namespace.strip() or api_key is None:
@@ -112,6 +113,7 @@ class RuntimeSearchBackend:
 
         failure: SearchError | None = None
         service: SearchCompareService | None = None
+        provider: RetrievalProvider | None = None
         try:
             embedder = self._embedder_factory(
                 model=self._manifest.embedding.model,
@@ -137,6 +139,9 @@ class RuntimeSearchBackend:
         except Exception:
             failure = search_unavailable()
         if failure is not None:
+            if provider is not None:
+                with suppress(Exception):
+                    await provider.close()
             raise failure from None
         assert service is not None
         return service

@@ -35,6 +35,7 @@ from pufferlab.providers.rerankers import RerankCandidate, Reranker, RerankResul
 from pufferlab.providers.types import (
     DistanceMetric,
     DocumentId,
+    LexicalFieldWeights,
     ProviderDocument,
     ProviderHybridProbeResult,
     ProviderQueryResult,
@@ -299,13 +300,13 @@ class SearchCompareService:
         config: SeededSearchConfig,
         request: SearchCompareRequest,
     ) -> ProviderQueryResult:
-        if config.text_attribute is None:
+        if config.lexical_fields is None:
             raise invalid_search("BM25 configuration is incomplete")
         failure: SearchError | None = None
         try:
             return await self._provider.query_bm25(
                 namespace=self._namespace,
-                text_attribute=config.text_attribute,
+                lexical_fields=config.lexical_fields,
                 query_text=request.query_text,
                 top_k=config.result_k,
                 include_attributes=_INCLUDE_ATTRIBUTES,
@@ -353,7 +354,7 @@ class SearchCompareService:
         request: SearchCompareRequest,
         embedding: QueryEmbedding,
     ) -> ProviderQueryResult:
-        text_attribute, vector_attribute, distance_metric = _required_hybrid_attributes(config)
+        lexical_fields, vector_attribute, distance_metric = _required_hybrid_attributes(config)
         result_k = (
             _required_reranker_depth(config)
             if config.mode is RetrievalMode.HYBRID_RERANK
@@ -363,7 +364,7 @@ class SearchCompareService:
         try:
             return await self._provider.query_hybrid_rrf(
                 namespace=self._namespace,
-                text_attribute=text_attribute,
+                lexical_fields=lexical_fields,
                 query_text=request.query_text,
                 vector_attribute=vector_attribute,
                 query_vector=embedding.vector,
@@ -389,10 +390,10 @@ class SearchCompareService:
         request: SearchCompareRequest,
         embedding: QueryEmbedding,
     ) -> ProviderHybridProbeResult:
-        text_attribute, vector_attribute, distance_metric = _required_hybrid_attributes(config)
+        lexical_fields, vector_attribute, distance_metric = _required_hybrid_attributes(config)
         return await self._provider.probe_hybrid_candidates(
             namespace=self._namespace,
-            text_attribute=text_attribute,
+            lexical_fields=lexical_fields,
             query_text=request.query_text,
             vector_attribute=vector_attribute,
             query_vector=embedding.vector,
@@ -712,14 +713,14 @@ def _document_rank_index(
 
 def _required_hybrid_attributes(
     config: SeededSearchConfig,
-) -> tuple[str, str, DistanceMetric]:
+) -> tuple[LexicalFieldWeights, str, DistanceMetric]:
     if (
-        config.text_attribute is None
+        config.lexical_fields is None
         or config.vector_attribute is None
         or config.distance_metric is None
     ):
         raise invalid_search("hybrid configuration is incomplete")
-    return config.text_attribute, config.vector_attribute, config.distance_metric
+    return config.lexical_fields, config.vector_attribute, config.distance_metric
 
 
 def _required_rrf_rank_constant(config: SeededSearchConfig) -> int:
