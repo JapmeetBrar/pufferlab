@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import io
+import json
 import shutil
 import traceback
 from collections.abc import Callable, Sequence
@@ -133,6 +135,13 @@ def _settings(*, api_key: str | None = "server-only-test-key") -> Settings:
     )
 
 
+@pytest.fixture
+def isolated_owned_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    state = tmp_path.resolve() / "owned-tiny-state"
+    monkeypatch.setattr("pufferlab.owned_tiny._production_state_path", lambda: state)
+    return state
+
+
 def _ingestor(
     events: list[tuple[str, object]],
     writer: FakeWriter,
@@ -143,7 +152,6 @@ def _ingestor(
         provider_factory=providers,
         embedder_factory=embedders,
         writer_factory=lambda provider: writer,
-        token_factory=lambda byte_count: "ab" * byte_count,
         optional_runtime_available=lambda: True,
     )
     return ingestor, providers, embedders
@@ -232,16 +240,10 @@ async def test_noncanonical_fixture_profile_is_rejected_before_factories(tmp_pat
 
 
 def test_default_namespace_is_random_owned_and_explicit_names_are_strictly_validated() -> None:
-    calls: list[int] = []
-
-    def token(byte_count: int) -> str:
-        calls.append(byte_count)
-        return "01" * byte_count
-
-    assert resolve_owned_namespace(None, token_factory=token) == (
-        "pufferlab-tiny-010101010101010101010101"
-    )
-    assert calls == [12]
+    generated = resolve_owned_namespace(None)
+    assert generated.startswith("pufferlab-tiny-")
+    assert len(generated) == len("pufferlab-tiny-") + 24
+    assert all(character in "0123456789abcdef" for character in generated[-24:])
     assert resolve_owned_namespace("pufferlab-my.safe_namespace-1") == (
         "pufferlab-my.safe_namespace-1"
     )
@@ -385,3 +387,274 @@ async def test_runtime_failure_is_detached_and_redacts_factory_details() -> None
     assert caught.value.__cause__ is None
     assert secret not in repr(caught.value)
     assert secret not in formatted
+
+
+@pytest.mark.asyncio
+async def test_validation_failure_does_not_retain_api_key_in_ingest_traceback_locals() -> None:
+    secret = "validation-retained-api-key-marker"
+    ingestor = TinyFixtureIngestor(optional_runtime_available=lambda: False)
+
+    with pytest.raises(TinyIngestionCommandError) as caught:
+        await ingestor.run(
+            _settings(api_key=secret),
+            IngestTinyOptions(),
+            emit=lambda message: None,
+        )
+
+    traceback_value = caught.value.__traceback__
+    production_locals: list[str] = []
+    while traceback_value is not None:
+        if traceback_value.tb_frame.f_code.co_filename.endswith("/pufferlab/cli/ingest.py"):
+            production_locals.append(repr(traceback_value.tb_frame.f_locals))
+        traceback_value = traceback_value.tb_next
+    assert secret not in "".join(production_locals)
+
+
+@pytest.mark.asyncio
+async def test_generated_ingest_persists_intent_before_factories_and_reaches_ready(
+    isolated_owned_state: Path,
+) -> None:
+    events: list[tuple[str, object]] = []
+    writer = FakeWriter()
+    providers = FakeProviderFactory(events)
+    embedders = FakeEmbedderFactory(events)
+
+    class InspectingProviderFactory:
+        def __call__(self, *, api_key: str, region: str) -> FakeProvider:
+            receipt = json.loads(
+                (isolated_owned_state / "receipt.json").read_text(encoding="utf-8")
+            )
+            assert receipt["state"] == "intent"
+            assert (isolated_owned_state / "owner.key").is_file()
+            assert (isolated_owned_state / "operation.lock").is_file()
+            return providers(api_key=api_key, region=region)
+
+    ingestor = TinyFixtureIngestor(
+        provider_factory=InspectingProviderFactory(),
+        embedder_factory=embedders,
+        writer_factory=lambda provider: writer,
+        optional_runtime_available=lambda: True,
+    )
+
+    report = await ingestor.run(_settings(), IngestTinyOptions(), emit=lambda message: None)
+    receipt = json.loads((isolated_owned_state / "receipt.json").read_text(encoding="utf-8"))
+
+    assert report.ready
+    assert report.namespace == receipt["namespace"]
+    assert receipt["state"] == "ready"
+    assert providers.calls == [("server-only-test-key", "aws-us-east-1")]
+    assert set(writer.namespaces) == {report.namespace}
+
+
+@pytest.mark.asyncio
+async def test_generated_ingest_resumes_exact_receipt_and_uses_creating_region(
+    isolated_owned_state: Path,
+) -> None:
+    events: list[tuple[str, object]] = []
+    writer = FakeWriter()
+    ingestor, providers, _ = _ingestor(events, writer)
+    first = await ingestor.run(_settings(), IngestTinyOptions(), emit=lambda message: None)
+    original = (isolated_owned_state / "receipt.json").read_bytes()
+    changed_region = Settings.model_validate(
+        {
+            "pufferlab_fixture_dir": FIXTURE_DIR,
+            "turbopuffer_api_key": "server-only-test-key",
+            "turbopuffer_region": "gcp-europe-west3",
+        }
+    )
+
+    second = await ingestor.run(changed_region, IngestTinyOptions(), emit=lambda message: None)
+
+    assert second.namespace == first.namespace
+    assert (isolated_owned_state / "receipt.json").read_bytes() == original
+    assert providers.calls == [
+        ("server-only-test-key", "aws-us-east-1"),
+        ("server-only-test-key", "aws-us-east-1"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_generated_factory_failure_retains_intent_and_rerun_target(
+    isolated_owned_state: Path,
+) -> None:
+    marker = "private-provider-start-marker"
+
+    def fail_provider(**kwargs: object) -> FakeProvider:
+        del kwargs
+        raise RuntimeError(marker)
+
+    first_ingestor = TinyFixtureIngestor(
+        provider_factory=fail_provider,
+        embedder_factory=FakeEmbedderFactory([]),
+        writer_factory=lambda provider: FakeWriter(),
+        optional_runtime_available=lambda: True,
+    )
+    with pytest.raises(TinyIngestionCommandError) as caught:
+        await first_ingestor.run(_settings(), IngestTinyOptions(), emit=lambda message: None)
+    first_receipt = json.loads((isolated_owned_state / "receipt.json").read_text(encoding="utf-8"))
+
+    writer = FakeWriter()
+    second_ingestor, providers, _ = _ingestor([], writer)
+    report = await second_ingestor.run(
+        _settings(),
+        IngestTinyOptions(),
+        emit=lambda message: None,
+    )
+
+    assert marker not in str(caught.value)
+    assert first_receipt["state"] == "intent"
+    assert report.namespace == first_receipt["namespace"]
+    assert providers.calls == [("server-only-test-key", "aws-us-east-1")]
+
+
+@pytest.mark.asyncio
+async def test_generated_provider_close_failure_retains_created_receipt(
+    isolated_owned_state: Path,
+) -> None:
+    class CloseFailingProvider(FakeProvider):
+        async def close(self) -> None:
+            self.close_calls += 1
+            raise RuntimeError("private-close-marker")
+
+    events: list[tuple[str, object]] = []
+
+    def provider_factory(*, api_key: str, region: str) -> CloseFailingProvider:
+        del api_key, region
+        return CloseFailingProvider()
+
+    ingestor = TinyFixtureIngestor(
+        provider_factory=provider_factory,
+        embedder_factory=FakeEmbedderFactory(events),
+        writer_factory=lambda provider: FakeWriter(),
+        optional_runtime_available=lambda: True,
+    )
+
+    with pytest.raises(TinyIngestionCommandError, match="close cleanly"):
+        await ingestor.run(_settings(), IngestTinyOptions(), emit=lambda message: None)
+
+    receipt = json.loads((isolated_owned_state / "receipt.json").read_text(encoding="utf-8"))
+    assert receipt["state"] == "created"
+
+
+@pytest.mark.asyncio
+async def test_rotated_key_resume_fails_before_factories_and_retains_ready_receipt(
+    isolated_owned_state: Path,
+) -> None:
+    writer = FakeWriter()
+    ingestor, providers, embedders = _ingestor([], writer)
+    await ingestor.run(_settings(), IngestTinyOptions(), emit=lambda message: None)
+    original = (isolated_owned_state / "receipt.json").read_bytes()
+
+    with pytest.raises(TinyIngestionCommandError, match="does not match") as caught:
+        await ingestor.run(
+            _settings(api_key="rotated-key"),
+            IngestTinyOptions(),
+            emit=lambda message: None,
+        )
+
+    assert caught.value.exit_code == 2
+    assert len(providers.calls) == 1
+    assert len(embedders.calls) == 1
+    assert (isolated_owned_state / "receipt.json").read_bytes() == original
+
+
+@pytest.mark.asyncio
+async def test_receipt_replacement_during_model_setup_fails_before_provider(
+    isolated_owned_state: Path,
+) -> None:
+    events: list[tuple[str, object]] = []
+    providers = FakeProviderFactory(events)
+    delegate = FakeEmbedderFactory(events)
+
+    def replacing_embedder(
+        *,
+        model: str,
+        revision: str,
+        dimensions: int,
+        batch_size: int,
+    ) -> FakeEmbedder:
+        receipt = isolated_owned_state / "receipt.json"
+        raw = receipt.read_bytes()
+        replacement = isolated_owned_state / "replacement"
+        replacement.write_bytes(raw)
+        replacement.chmod(0o600)
+        replacement.replace(receipt)
+        return delegate(
+            model=model,
+            revision=revision,
+            dimensions=dimensions,
+            batch_size=batch_size,
+        )
+
+    ingestor = TinyFixtureIngestor(
+        provider_factory=providers,
+        embedder_factory=replacing_embedder,
+        writer_factory=lambda provider: FakeWriter(),
+        optional_runtime_available=lambda: True,
+    )
+
+    with pytest.raises(TinyIngestionCommandError, match="runtime failed"):
+        await ingestor.run(_settings(), IngestTinyOptions(), emit=lambda message: None)
+
+    assert providers.calls == []
+    receipt_payload = json.loads(
+        (isolated_owned_state / "receipt.json").read_text(encoding="utf-8")
+    )
+    assert receipt_payload["state"] == "intent"
+
+
+@pytest.mark.asyncio
+async def test_explicit_namespace_never_creates_or_reads_owned_state(
+    isolated_owned_state: Path,
+) -> None:
+    events: list[tuple[str, object]] = []
+    writer = FakeWriter()
+    ingestor, _, _ = _ingestor(events, writer)
+
+    report = await ingestor.run(
+        _settings(),
+        IngestTinyOptions(namespace="pufferlab-explicit-caller-owned"),
+        emit=lambda message: None,
+    )
+
+    assert report.namespace == "pufferlab-explicit-caller-owned"
+    assert not isolated_owned_state.exists()
+
+
+def test_generated_cancellation_closes_provider_and_retains_intent(
+    isolated_owned_state: Path,
+) -> None:
+    class CancellingWriter(FakeWriter):
+        async def upsert_batch(
+            self,
+            namespace: str,
+            documents: Sequence[EmbeddedDocument],
+            *,
+            write_spec: NamespaceWriteSpec,
+        ) -> None:
+            del namespace, documents, write_spec
+            raise asyncio.CancelledError()
+
+    events: list[tuple[str, object]] = []
+    provider_factory = FakeProviderFactory(events)
+    ingestor = TinyFixtureIngestor(
+        provider_factory=provider_factory,
+        embedder_factory=FakeEmbedderFactory(events),
+        writer_factory=lambda provider: CancellingWriter(),
+        optional_runtime_available=lambda: True,
+    )
+    stderr = io.StringIO()
+
+    exit_code = main(
+        ["dataset", "ingest-tiny"],
+        settings_factory=_settings,
+        ingest_runner=ingestor.run,
+        stdout=io.StringIO(),
+        stderr=stderr,
+    )
+
+    receipt = json.loads((isolated_owned_state / "receipt.json").read_text(encoding="utf-8"))
+    assert exit_code == 130
+    assert receipt["state"] == "intent"
+    assert provider_factory.providers[0].close_calls == 1
+    assert stderr.getvalue() == "error: tiny fixture ingestion cancelled\n"

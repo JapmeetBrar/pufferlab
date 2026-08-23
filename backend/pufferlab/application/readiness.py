@@ -39,9 +39,11 @@ class OwnedTinyRequirementResolver(Protocol):
 def unresolved_owned_tiny_requirements(
     settings: Settings,
 ) -> tuple[CapabilityRequirementCode, ...]:
-    """Fail closed until M4-C supplies the authenticated receipt resolver."""
-    del settings
-    return (CapabilityRequirementCode.OWNED_TINY_RECEIPT_INVALID,)
+    """Inspect the authenticated fixed receipt through M4-C's read-only resolver."""
+
+    from pufferlab.owned_tiny import owned_tiny_requirements
+
+    return owned_tiny_requirements(settings)
 
 
 class LocalCapabilityInspector:

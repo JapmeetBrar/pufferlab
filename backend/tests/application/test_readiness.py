@@ -119,16 +119,14 @@ def test_default_runtime_discovery_does_not_import_the_optional_package() -> Non
     assert ("sentence_transformers" in sys.modules) is was_imported
 
 
-def test_default_receipt_resolver_fails_closed_until_m4_c() -> None:
+def test_default_receipt_resolver_allows_an_unrelated_explicit_namespace() -> None:
     response = LocalCapabilityInspector(
         _configured_settings(),
         runtime_available=lambda: True,
     ).inspect()
 
-    assert response.live_playground.requirements == (
-        CapabilityRequirementCode.OWNED_TINY_RECEIPT_INVALID,
-    )
-    assert response.live_playground.next_action is (CapabilityActionCode.RESOLVE_OWNED_TINY_RECEIPT)
+    assert response.live_playground.requirements == ()
+    assert response.live_playground.next_action is None
 
 
 def test_receipt_requirements_preserve_the_frozen_tail_order() -> None:
