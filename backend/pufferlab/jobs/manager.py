@@ -3,8 +3,9 @@
 import asyncio
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from uuid import UUID
+from uuid import UUID, uuid4
 
+from pufferlab.contracts.errors import ApiErrorCode, ApiErrorDetail
 from pufferlab.contracts.evals import ConfigRunSummary, EvalRun, EvalRunStatus
 from pufferlab.persistence.errors import PersistenceValidationError
 from pufferlab.persistence.repository import PufferLabRepository
@@ -51,6 +52,61 @@ class RunJobManager:
         finalize: SummaryFinalizer,
         on_progress: ProgressCallback | None = None,
     ) -> asyncio.Task[EvalRun]:
+        """Synchronously claim queued work, then schedule it on the local loop."""
+        loop = asyncio.get_running_loop()
+        self._validate_start(
+            run_id,
+            work_items,
+            max_concurrency=max_concurrency,
+            expected_status=EvalRunStatus.QUEUED,
+        )
+        claimed = self._repository.claim_queued_run(run_id)
+        return self._schedule_claimed(
+            claimed,
+            work_items,
+            executor,
+            loop=loop,
+            max_concurrency=max_concurrency,
+            finalize=finalize,
+            on_progress=on_progress,
+        )
+
+    def start_claimed(
+        self,
+        run_id: UUID,
+        work_items: Sequence[QueryWorkItem],
+        executor: OutcomeExecutor,
+        *,
+        max_concurrency: int,
+        finalize: SummaryFinalizer,
+        on_progress: ProgressCallback | None = None,
+    ) -> asyncio.Task[EvalRun]:
+        """Schedule work only after another owner has durably claimed the run."""
+        loop = asyncio.get_running_loop()
+        claimed = self._validate_start(
+            run_id,
+            work_items,
+            max_concurrency=max_concurrency,
+            expected_status=EvalRunStatus.RUNNING,
+        )
+        return self._schedule_claimed(
+            claimed,
+            work_items,
+            executor,
+            loop=loop,
+            max_concurrency=max_concurrency,
+            finalize=finalize,
+            on_progress=on_progress,
+        )
+
+    def _validate_start(
+        self,
+        run_id: UUID,
+        work_items: Sequence[QueryWorkItem],
+        *,
+        max_concurrency: int,
+        expected_status: EvalRunStatus,
+    ) -> EvalRun:
         if max_concurrency < 1:
             raise ValueError("max_concurrency must be at least one")
         if run_id in self._active:
@@ -58,17 +114,33 @@ class RunJobManager:
         if len(set(work_items)) != len(work_items):
             raise PersistenceValidationError("work items must be unique by config and query")
         run = self._repository.get_run(run_id)
-        if run.status is not EvalRunStatus.QUEUED:
-            raise PersistenceValidationError("only a queued run may start a local job")
+        if run.status is not expected_status:
+            if expected_status is EvalRunStatus.QUEUED:
+                message = "only a queued run may start a local job"
+            else:
+                message = "only a claimed running run may start a local job"
+            raise PersistenceValidationError(message)
         if run.environment.max_concurrency != max_concurrency:
             raise PersistenceValidationError(
                 "scheduler concurrency must match the persisted run environment"
             )
+        return run
 
+    def _schedule_claimed(
+        self,
+        run: EvalRun,
+        work_items: Sequence[QueryWorkItem],
+        executor: OutcomeExecutor,
+        *,
+        loop: asyncio.AbstractEventLoop,
+        max_concurrency: int,
+        finalize: SummaryFinalizer,
+        on_progress: ProgressCallback | None,
+    ) -> asyncio.Task[EvalRun]:
         cancellation_requested = asyncio.Event()
-        task = asyncio.create_task(
-            self._run(
-                run_id,
+        task = loop.create_task(
+            self._run_claimed(
+                run.id,
                 list(work_items),
                 executor,
                 max_concurrency=max_concurrency,
@@ -76,9 +148,9 @@ class RunJobManager:
                 finalize=finalize,
                 on_progress=on_progress,
             ),
-            name=f"pufferlab-eval-{run_id}",
+            name=f"pufferlab-eval-{run.id}",
         )
-        self._active[run_id] = _ActiveJob(cancellation_requested, task)
+        self._active[run.id] = _ActiveJob(cancellation_requested, task)
         return task
 
     async def cancel(self, run_id: UUID) -> EvalRun:
@@ -99,7 +171,7 @@ class RunJobManager:
         if active:
             await asyncio.gather(*(job.task for job in active), return_exceptions=True)
 
-    async def _run(
+    async def _run_claimed(
         self,
         run_id: UUID,
         work_items: list[QueryWorkItem],
@@ -114,7 +186,6 @@ class RunJobManager:
         next_index = 0
         first_failure: BaseException | None = None
         try:
-            self._repository.transition_run(run_id, EvalRunStatus.RUNNING)
             while True:
                 while (
                     first_failure is None
@@ -169,7 +240,11 @@ class RunJobManager:
                 await asyncio.gather(*inflight, return_exceptions=True)
             current = self._repository.get_run(run_id)
             if current.status is EvalRunStatus.RUNNING:
-                self._repository.transition_run(run_id, EvalRunStatus.FAILED)
+                self._repository.transition_run(
+                    run_id,
+                    EvalRunStatus.FAILED,
+                    error=_execution_failed_error(),
+                )
             raise
         finally:
             self._active.pop(run_id, None)
@@ -177,3 +252,12 @@ class RunJobManager:
 
 async def _execute(executor: OutcomeExecutor, item: QueryWorkItem) -> QueryOutcome:
     return await executor(item)
+
+
+def _execution_failed_error() -> ApiErrorDetail:
+    return ApiErrorDetail(
+        code=ApiErrorCode.INTERNAL_ERROR,
+        message="evaluation execution failed",
+        retryable=False,
+        trace_id=uuid4(),
+    )

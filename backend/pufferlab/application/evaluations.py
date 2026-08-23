@@ -64,6 +64,72 @@ class EvaluationSeedResult:
     configs: tuple[RetrievalConfig, ...]
 
 
+def create_evaluation_run(
+    repository: PufferLabRepository,
+    request: CreateEvalRunRequest,
+    environment: RunEnvironment,
+    *,
+    run_id: UUID | None = None,
+    run_id_factory: Callable[[], UUID] = uuid4,
+    now: Callable[[], datetime] = lambda: datetime.now(UTC),
+) -> EvalRun:
+    """Validate and persist one queued run without constructing provider resources."""
+    if len(request.candidate_config_ids) != 3:
+        raise PersistenceValidationError(
+            "evaluation runs require one baseline and exactly three candidates"
+        )
+    config_ids = [request.baseline_config_id, *request.candidate_config_ids]
+    if len(set(config_ids)) != 4:
+        raise PersistenceValidationError("evaluation run config IDs must be distinct")
+    query_set, queries = repository.get_query_set(request.query_set_id)
+    if query_set.query_count != 50 or len(queries) != 50:
+        raise PersistenceValidationError("evaluation runs require the curated 50-query set")
+    configs = tuple(repository.get_retrieval_config(config_id) for config_id in config_ids)
+    if tuple(config.mode for config in configs) != _CONFIG_MODE_ORDER:
+        raise PersistenceValidationError(
+            "evaluation runs require baseline/candidates in exact BM25, vector, server RRF, "
+            "and local reranker order"
+        )
+    _validate_canonical_configs(
+        repository.get_dataset_version(query_set.dataset_version_id),
+        configs,
+    )
+    if environment.max_concurrency != request.max_concurrency:
+        raise PersistenceValidationError(
+            "run environment concurrency must match the create-run request"
+        )
+    if environment.warmup_query_count != request.warmup_query_count:
+        raise PersistenceValidationError(
+            "run environment warmup count must match the create-run request"
+        )
+    if request.warmup_query_count > query_set.query_count:
+        raise PersistenceValidationError("warmup query count cannot exceed query-set size")
+
+    run = EvalRun(
+        id=run_id or run_id_factory(),
+        status=EvalRunStatus.QUEUED,
+        query_set=QuerySetSummary(
+            id=query_set.id,
+            name=query_set.name,
+            version=query_set.version,
+            query_count=query_set.query_count,
+            content_hash=query_set.content_hash,
+        ),
+        baseline_config_id=request.baseline_config_id,
+        candidate_config_ids=list(request.candidate_config_ids),
+        summaries=[],
+        completed_queries=0,
+        total_queries=query_set.query_count,
+        random_seed=request.random_seed,
+        environment=environment,
+        created_at=now(),
+        started_at=None,
+        completed_at=None,
+        error=None,
+    )
+    return repository.create_run(run)
+
+
 class EvaluationApplicationService:
     """Seed immutable revisions, schedule durable work, and export canonical run state."""
 
@@ -115,60 +181,14 @@ class EvaluationApplicationService:
         run_id: UUID | None = None,
     ) -> EvalRun:
         """Create one queued, immutable run after validating its exact 50-by-four shape."""
-        if len(request.candidate_config_ids) != 3:
-            raise PersistenceValidationError(
-                "evaluation runs require one baseline and exactly three candidates"
-            )
-        config_ids = [request.baseline_config_id, *request.candidate_config_ids]
-        if len(set(config_ids)) != 4:
-            raise PersistenceValidationError("evaluation run config IDs must be distinct")
-        query_set, queries = self._repository.get_query_set(request.query_set_id)
-        if query_set.query_count != 50 or len(queries) != 50:
-            raise PersistenceValidationError("evaluation runs require the curated 50-query set")
-        configs = [self._repository.get_retrieval_config(config_id) for config_id in config_ids]
-        if {config.mode for config in configs} != set(_CONFIG_MODE_ORDER):
-            raise PersistenceValidationError(
-                "evaluation runs require BM25, vector, server RRF, and local reranker configs"
-            )
-        config_by_mode = {config.mode: config for config in configs}
-        _validate_canonical_configs(
-            self._repository.get_dataset_version(query_set.dataset_version_id),
-            tuple(config_by_mode[mode] for mode in _CONFIG_MODE_ORDER),
+        return create_evaluation_run(
+            self._repository,
+            request,
+            environment,
+            run_id=run_id,
+            run_id_factory=self._run_id_factory,
+            now=self._now,
         )
-        if environment.max_concurrency != request.max_concurrency:
-            raise PersistenceValidationError(
-                "run environment concurrency must match the create-run request"
-            )
-        if environment.warmup_query_count != request.warmup_query_count:
-            raise PersistenceValidationError(
-                "run environment warmup count must match the create-run request"
-            )
-        if request.warmup_query_count > query_set.query_count:
-            raise PersistenceValidationError("warmup query count cannot exceed query-set size")
-
-        run = EvalRun(
-            id=run_id or self._run_id_factory(),
-            status=EvalRunStatus.QUEUED,
-            query_set=QuerySetSummary(
-                id=query_set.id,
-                name=query_set.name,
-                version=query_set.version,
-                query_count=query_set.query_count,
-                content_hash=query_set.content_hash,
-            ),
-            baseline_config_id=request.baseline_config_id,
-            candidate_config_ids=list(request.candidate_config_ids),
-            summaries=[],
-            completed_queries=0,
-            total_queries=query_set.query_count,
-            random_seed=request.random_seed,
-            environment=environment,
-            created_at=self._now(),
-            started_at=None,
-            completed_at=None,
-            error=None,
-        )
-        return self._repository.create_run(run)
 
     def start_run(
         self,
@@ -176,17 +196,43 @@ class EvaluationApplicationService:
         *,
         on_progress: ProgressCallback | None = None,
     ) -> asyncio.Task[EvalRun]:
-        """Start a queued run; terminal revisions are never reopened or mutated."""
+        """Synchronously claim and start a queued run for the existing CLI workflow."""
+        loop = asyncio.get_running_loop()
         if run_id in self._tasks:
             raise PersistenceValidationError(f"run {run_id} already has a local task")
         run = self._repository.get_run(run_id)
         if run.status is not EvalRunStatus.QUEUED:
             raise PersistenceValidationError("only a queued run may start")
-        task = asyncio.create_task(
+        claimed = self._repository.claim_queued_run(run_id, at=self._now())
+        return self._schedule_claimed_run(claimed, loop=loop, on_progress=on_progress)
+
+    def start_claimed_run(
+        self,
+        run_id: UUID,
+        *,
+        on_progress: ProgressCallback | None = None,
+    ) -> asyncio.Task[EvalRun]:
+        """Start application work for a run already durably claimed as RUNNING."""
+        loop = asyncio.get_running_loop()
+        if run_id in self._tasks:
+            raise PersistenceValidationError(f"run {run_id} already has a local task")
+        run = self._repository.get_run(run_id)
+        if run.status is not EvalRunStatus.RUNNING:
+            raise PersistenceValidationError("only a claimed running run may start")
+        return self._schedule_claimed_run(run, loop=loop, on_progress=on_progress)
+
+    def _schedule_claimed_run(
+        self,
+        run: EvalRun,
+        *,
+        loop: asyncio.AbstractEventLoop,
+        on_progress: ProgressCallback | None,
+    ) -> asyncio.Task[EvalRun]:
+        task = loop.create_task(
             self._execute_run(run, on_progress=on_progress),
-            name=f"pufferlab-evaluation-application-{run_id}",
+            name=f"pufferlab-evaluation-application-{run.id}",
         )
-        self._tasks[run_id] = task
+        self._tasks[run.id] = task
         return task
 
     async def run(
@@ -205,9 +251,15 @@ class EvaluationApplicationService:
 
     async def cancel(self, run_id: UUID) -> EvalRun:
         """Request cooperative manager cancellation and drain already-started work."""
-        await self._job_manager.cancel(run_id)
+        manager_failed = False
+        try:
+            await self._job_manager.cancel(run_id)
+        except BaseException:
+            manager_failed = True
         task = self._tasks.get(run_id)
         if task is None:
+            if manager_failed:
+                raise EvaluationRunError("evaluation cancellation encountered a failed run")
             return self._repository.get_run(run_id)
         try:
             return await task
@@ -252,11 +304,16 @@ class EvaluationApplicationService:
         *,
         on_progress: ProgressCallback | None,
     ) -> EvalRun:
-        query_set, queries = self._repository.get_query_set(run.query_set.id)
-        config_ids = [run.baseline_config_id, *run.candidate_config_ids]
-        ordered_queries = _randomized_queries(queries, seed=run.random_seed)
-        work_items = _interleaved_work_items(ordered_queries, config_ids)
+        terminal: EvalRun | None = None
+        failure: EvaluationRunError | None = None
         try:
+            current = self._repository.get_run(run.id)
+            if current.status is not EvalRunStatus.RUNNING:
+                return current
+            query_set, queries = self._repository.get_query_set(run.query_set.id)
+            config_ids = [run.baseline_config_id, *run.candidate_config_ids]
+            ordered_queries = _randomized_queries(queries, seed=run.random_seed)
+            work_items = _interleaved_work_items(ordered_queries, config_ids)
             await self._warm_up(
                 run_id=run.id,
                 query_set=query_set,
@@ -264,7 +321,7 @@ class EvaluationApplicationService:
                 config_ids=config_ids,
             )
             current = self._repository.get_run(run.id)
-            if current.status is not EvalRunStatus.QUEUED:
+            if current.status is not EvalRunStatus.RUNNING:
                 return current
             executor = EvaluationOutcomeExecutor(
                 run_id=run.id,
@@ -284,7 +341,7 @@ class EvaluationApplicationService:
                     query_ids=[query.id for query in queries],
                 )
 
-            return await self._job_manager.start(
+            return await self._job_manager.start_claimed(
                 run.id,
                 work_items,
                 executor,
@@ -292,15 +349,21 @@ class EvaluationApplicationService:
                 finalize=finalize,
                 on_progress=on_progress,
             )
-        except (SearchError, ProviderError):
-            return self._fail_queued_warmup(run.id)
-        except Exception:
+        except BaseException:
             current = self._repository.get_run(run.id)
-            if current.status is EvalRunStatus.QUEUED:
-                self._fail_queued_warmup(run.id)
-            raise EvaluationRunError(
-                "evaluation run failed; inspect the durable run status"
-            ) from None
+            if current.status is EvalRunStatus.RUNNING:
+                current = self._fail_running_execution(run.id)
+            if current.status is EvalRunStatus.CANCELLED:
+                terminal = current
+            else:
+                failure = EvaluationRunError(
+                    "evaluation run failed; inspect the durable run status"
+                )
+        if terminal is not None:
+            return terminal
+        if failure is None:  # pragma: no cover - every exception selects a terminal or failure
+            raise AssertionError("evaluation execution ended without a durable state")
+        raise failure
 
     async def _warm_up(
         self,
@@ -314,7 +377,7 @@ class EvaluationApplicationService:
         for raw_query in queries:
             query = raw_query
             for config_id in config_ids:
-                if self._repository.get_run(run_id).status is not EvalRunStatus.QUEUED:
+                if self._repository.get_run(run_id).status is not EvalRunStatus.RUNNING:
                     return
                 try:
                     await self._search_backend.search_one(
@@ -335,10 +398,8 @@ class EvaluationApplicationService:
         dataset = self._repository.get_dataset_version(query_set.dataset_version_id)
         return dataset.namespace
 
-    def _fail_queued_warmup(self, run_id: UUID) -> EvalRun:
+    def _fail_running_execution(self, run_id: UUID) -> EvalRun:
         current = self._repository.get_run(run_id)
-        if current.status is EvalRunStatus.QUEUED:
-            current = self._repository.transition_run(run_id, EvalRunStatus.RUNNING, at=self._now())
         if current.status is EvalRunStatus.RUNNING:
             return self._repository.transition_run(
                 run_id,
