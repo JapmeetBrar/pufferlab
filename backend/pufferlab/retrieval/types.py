@@ -5,10 +5,12 @@ from dataclasses import dataclass
 from typing import Protocol
 from uuid import UUID
 
+from pufferlab.contracts.common import ObservedScore
 from pufferlab.contracts.filters import FilterNode
 from pufferlab.contracts.retrieval import RetrievalConfigSummary
 from pufferlab.contracts.search import (
     ConfigSearchResult,
+    RetrievalStage,
     SearchCompareRequest,
     SearchCompareResponse,
 )
@@ -60,6 +62,46 @@ class SearchExecuteResult:
     config_id: UUID
     query_id: UUID | None
     result: ConfigSearchResult
+
+
+@dataclass(frozen=True, slots=True)
+class HybridProbeExecuteRequest:
+    """Internal explicit counterfactual-probe input with a caller-owned source trace."""
+
+    namespace: str
+    query_text: str
+    config_id: UUID
+    trace_id: UUID
+    query_id: UUID | None = None
+    filter_override: FilterNode | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class HybridProbeStageMembership:
+    """One bounded raw-list membership with no provider attributes or vector payload."""
+
+    stage: RetrievalStage
+    rank: int
+    score: ObservedScore
+
+
+@dataclass(frozen=True, slots=True)
+class HybridProbeCandidate:
+    document_id: UUID
+    stage_membership: tuple[HybridProbeStageMembership, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class HybridProbeExecuteResult:
+    """Safe explicit probe result kept separate from production-shaped search results."""
+
+    config_id: UUID
+    query_id: UUID | None
+    trace_id: UUID
+    duration_ms: float
+    bm25_candidate_count: int
+    vector_candidate_count: int
+    candidates: tuple[HybridProbeCandidate, ...]
 
 
 class RetrievalProvider(Protocol):
@@ -133,3 +175,12 @@ class SearchBackend(Protocol):
     async def search_one(self, request: SearchExecuteRequest) -> SearchExecuteResult: ...
 
     async def close(self) -> None: ...
+
+
+class ReplaySearchBackend(SearchBackend, Protocol):
+    """Dataset-bound search runtime with an explicit, separately traced debug probe."""
+
+    async def probe_hybrid_candidates(
+        self,
+        request: HybridProbeExecuteRequest,
+    ) -> HybridProbeExecuteResult: ...

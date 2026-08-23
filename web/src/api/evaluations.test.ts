@@ -6,10 +6,12 @@ import {
   createEvaluationRun,
   getEvaluationRegressions,
   getEvaluationRun,
+  getEvaluationRunQuery,
   listDatasetEvaluationConfigs,
   listEvaluationDatasets,
   listEvaluationQuerySets,
   listEvaluationRuns,
+  replayEvaluationRunQuery,
   type CreateEvaluationRunRequest,
 } from "./evaluations";
 
@@ -119,6 +121,55 @@ describe("evaluation API client", () => {
       signal: controller.signal,
     });
     expect(fetchMock.mock.calls[0]?.[1]).not.toHaveProperty("body");
+  });
+
+  it("encodes query-detail identities and forwards AbortSignal", async () => {
+    const fetchMock = successfulFetch();
+    vi.stubGlobal("fetch", fetchMock);
+    const controller = new AbortController();
+
+    await getEvaluationRunQuery("run/id", "query/id", controller.signal);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/eval-runs/run%2Fid/queries/query%2Fid",
+      { signal: controller.signal },
+    );
+  });
+
+  it("posts only generated replay fields and forwards AbortSignal", async () => {
+    const fetchMock = successfulFetch();
+    vi.stubGlobal("fetch", fetchMock);
+    const controller = new AbortController();
+    const request = {
+      contract_version: 1 as const,
+      config_ids: ["left-config", "right-config"],
+      include_counterfactual_probe: true,
+    };
+
+    await replayEvaluationRunQuery("run/id", "query/id", request, controller.signal);
+
+    const [input, init] = fetchMock.mock.calls[0] ?? [];
+    expect(requestUrl(input ?? "")).toBe(
+      "/api/v1/eval-runs/run%2Fid/queries/query%2Fid/replay",
+    );
+    expect(init).toMatchObject({
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      signal: controller.signal,
+    });
+    if (typeof init?.body !== "string") throw new Error("Expected a JSON request body");
+    const body = JSON.parse(init.body) as Record<string, unknown>;
+    expect(body).toEqual(request);
+    for (const forbidden of [
+      "query_text",
+      "qrels",
+      "document_id",
+      "namespace",
+      "vector",
+      "api_key",
+    ]) {
+      expect(body).not.toHaveProperty(forbidden);
+    }
   });
 
   it("parses a direct redacted ApiErrorDetail without a nested detail shape", async () => {

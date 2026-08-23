@@ -3,6 +3,11 @@ import { useQuery } from "@tanstack/react-query";
 import { getHealth } from "../api/client";
 import { RunDetailPage } from "../features/evals/RunDetailPage";
 import { RunListPage } from "../features/evals/RunListPage";
+import { QueryDetailPage } from "../features/evals/QueryDetailPage";
+import {
+  isUuid,
+  readPlaygroundForensicIdentity,
+} from "../features/evals/queryState";
 import { Playground } from "../features/playground/Playground";
 import "./app.css";
 import { AppLink, RouteHeading } from "./router";
@@ -23,10 +28,26 @@ export function App() {
     queryFn: ({ signal }) => getHealth(signal),
     retry: false,
   });
+  const queryMatch = /^\/runs\/([^/]+)\/queries\/([^/]+)$/.exec(location.pathname);
+  const queryRunId = queryMatch?.[1] === undefined ? null : decodePathId(queryMatch[1]);
+  const queryId = queryMatch?.[2] === undefined ? null : decodePathId(queryMatch[2]);
+  const nestedQueryIdentity =
+    queryRunId !== null && queryId !== null && isUuid(queryRunId) && isUuid(queryId)
+      ? { runId: queryRunId, queryId }
+      : null;
+  const playgroundForensicIdentity = location.pathname === "/playground"
+    ? readPlaygroundForensicIdentity(location.search)
+    : null;
   const runMatch = /^\/runs\/([^/]+)$/.exec(location.pathname);
   const runId = runMatch?.[1] === undefined ? null : decodePathId(runMatch[1]);
-  const playgroundRoute = location.pathname === "/" || location.pathname === "/playground";
-  const runsRoute = location.pathname === "/runs" || runId !== null;
+  const playgroundRoute =
+    (location.pathname === "/" || location.pathname === "/playground") &&
+    playgroundForensicIdentity === null;
+  const runsRoute =
+    location.pathname === "/runs" ||
+    runId !== null ||
+    nestedQueryIdentity !== null ||
+    playgroundForensicIdentity !== null;
 
   return (
     <>
@@ -60,7 +81,29 @@ export function App() {
         {runId !== null && (
           <RunDetailPage runId={runId} routeKey={location.pathname} search={location.search} />
         )}
-        {!playgroundRoute && location.pathname !== "/runs" && runId === null && (
+        {nestedQueryIdentity !== null && (
+          <QueryDetailPage
+            runId={nestedQueryIdentity.runId}
+            queryId={nestedQueryIdentity.queryId}
+            routeKey={`${location.pathname}:${nestedQueryIdentity.queryId}`}
+            routeKind="run-query"
+            search={location.search}
+          />
+        )}
+        {playgroundForensicIdentity !== null && (
+          <QueryDetailPage
+            runId={playgroundForensicIdentity.runId}
+            queryId={playgroundForensicIdentity.queryId}
+            routeKey={`/playground:${playgroundForensicIdentity.runId}:${playgroundForensicIdentity.queryId}`}
+            routeKind="playground"
+            search={location.search}
+          />
+        )}
+        {!playgroundRoute &&
+          location.pathname !== "/runs" &&
+          runId === null &&
+          nestedQueryIdentity === null &&
+          playgroundForensicIdentity === null && (
           <section className="route-state route-not-found">
             <p className="eyebrow">404</p>
             <RouteHeading routeKey={location.pathname}>Page not found</RouteHeading>
@@ -69,7 +112,7 @@ export function App() {
               View evaluation runs
             </AppLink>
           </section>
-        )}
+          )}
       </main>
     </>
   );

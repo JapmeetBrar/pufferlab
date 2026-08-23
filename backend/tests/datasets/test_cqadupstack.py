@@ -164,6 +164,7 @@ def test_curated_manifest_rejects_text_bearing_or_hash_drift() -> None:
         "source_lock_sha256": "a" * 64,
         "query_count": 50,
         "selection_sha256": curated_selection_sha256(entries),
+        "query_set_content_sha256": "b" * 64,
         "entries": tuple(entry.model_dump() for entry in entries),
     }
     CuratedQueryManifest.model_validate(payload)
@@ -207,6 +208,7 @@ def test_processed_pack_and_id_only_manifest_load_for_ingestion(tmp_path: Path) 
         source_lock_sha256=source_lock_sha256(source_lock),
         query_count=50,
         selection_sha256=curated_selection_sha256(entries),
+        query_set_content_sha256=None,
         entries=entries,
     )
     curated_path = tmp_path / "curated.json"

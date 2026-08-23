@@ -29,7 +29,11 @@ from pufferlab.providers.types import (
 from pufferlab.retrieval.config import build_search_catalog
 from pufferlab.retrieval.errors import SearchError
 from pufferlab.retrieval.service import SearchCompareService
-from pufferlab.retrieval.types import QueryEmbedding, SearchExecuteRequest
+from pufferlab.retrieval.types import (
+    HybridProbeExecuteRequest,
+    QueryEmbedding,
+    SearchExecuteRequest,
+)
 from pydantic import ValidationError
 
 MODEL = "BAAI/bge-small-en-v1.5"
@@ -222,6 +226,7 @@ def _service(
     resolved_provider = provider or FakeProvider()
     resolved_embedder = embedder or FakeEmbedder()
     resolved_reranker = reranker or FakeReranker()
+    next_trace = (UUID(int=TRACE_ID.int + offset) for offset in range(100))
     service = SearchCompareService(
         namespace="pufferlab-test",
         catalog=_catalog(),
@@ -229,7 +234,7 @@ def _service(
         provider=resolved_provider,
         query_embedder=resolved_embedder,
         reranker=resolved_reranker,
-        trace_id_factory=lambda: TRACE_ID,
+        trace_id_factory=lambda: next(next_trace),
     )
     return service, resolved_provider, resolved_embedder, resolved_reranker
 
@@ -397,7 +402,9 @@ async def test_compare_preserves_config_order_and_reports_observed_evidence() ->
     assert movement_by_document[DOCUMENT_B].ranks_by_config == {bm25.id: 2, vector.id: 1}
     assert movement_by_document[DOCUMENT_B].max_absolute_delta == 1
     assert movement_by_document[DOCUMENT_A].max_absolute_delta is None
-    assert response.results[0].trace_id == TRACE_ID == response.results[1].trace_id
+    assert response.results[0].trace_id == TRACE_ID
+    assert response.results[1].trace_id == UUID(int=TRACE_ID.int + 1)
+    assert response.results[0].trace_id != response.results[1].trace_id
 
     assert provider.bm25_calls == [
         {
@@ -419,6 +426,32 @@ async def test_compare_preserves_config_order_and_reports_observed_evidence() ->
     serialized = json.dumps(response.model_dump(mode="json"))
     assert "query_vector" not in serialized
     assert "[0.125, -0.25, 0.5]" not in serialized
+
+
+@pytest.mark.asyncio
+async def test_compare_rejects_duplicate_source_traces_before_provider_work() -> None:
+    provider = FakeProvider()
+    service = SearchCompareService(
+        namespace="pufferlab-test",
+        catalog=_catalog(),
+        write_spec=compile_namespace_write_spec(_manifest()),
+        provider=provider,
+        query_embedder=FakeEmbedder(),
+        reranker=FakeReranker(),
+        trace_id_factory=lambda: TRACE_ID,
+    )
+    bm25, vector, _, _ = service.list_configs()
+
+    with pytest.raises(SearchError, match="source traces must be distinct"):
+        await service.compare(
+            SearchCompareRequest(
+                query_text="find terminal basics",
+                config_ids=[bm25.id, vector.id],
+            )
+        )
+
+    assert provider.bm25_calls == []
+    assert provider.ann_calls == []
 
 
 @pytest.mark.asyncio
@@ -504,6 +537,67 @@ async def test_hybrid_modes_separate_server_probe_fusion_and_reranker_evidence()
     serialized = json.dumps(response.model_dump(mode="json"))
     assert "query_vector" not in serialized
     assert "rationale" not in serialized
+
+
+@pytest.mark.asyncio
+async def test_explicit_hybrid_probe_is_separate_bounded_and_attribute_free() -> None:
+    service, provider, embedder, _ = _service()
+    bm25, _, hybrid, _ = service.list_configs()
+    trace_id = UUID(int=900)
+
+    result = await service.probe_hybrid_candidates(
+        HybridProbeExecuteRequest(
+            namespace="pufferlab-test",
+            query_text="find shell permissions",
+            config_id=hybrid.id,
+            trace_id=trace_id,
+            query_id=UUID(int=901),
+        )
+    )
+
+    assert result.config_id == hybrid.id
+    assert result.trace_id == trace_id
+    assert result.duration_ms == 2.0
+    assert result.bm25_candidate_count == 2
+    assert result.vector_candidate_count == 2
+    assert [candidate.document_id for candidate in result.candidates] == [
+        DOCUMENT_A,
+        DOCUMENT_B,
+        DOCUMENT_C,
+    ]
+    assert [
+        (membership.stage, membership.rank) for membership in result.candidates[1].stage_membership
+    ] == [
+        (RetrievalStage.BM25_CANDIDATES, 2),
+        (RetrievalStage.VECTOR_CANDIDATES, 1),
+    ]
+    assert provider.hybrid_calls == []
+    assert provider.probe_calls == [
+        {
+            "namespace": "pufferlab-test",
+            "lexical_fields": (("title", 2.0), ("body", 1.0)),
+            "query_text": "find shell permissions",
+            "vector_attribute": "vector",
+            "query_vector": (0.125, -0.25, 0.5),
+            "candidate_k": 100,
+            "include_attributes": (),
+            "filters": None,
+            "consistency": "strong",
+            "distance_metric": "cosine_distance",
+        }
+    ]
+    assert embedder.queries == ["find shell permissions"]
+
+    with pytest.raises(SearchError, match="hybrid configuration"):
+        await service.probe_hybrid_candidates(
+            HybridProbeExecuteRequest(
+                namespace="pufferlab-test",
+                query_text="query",
+                config_id=bm25.id,
+                trace_id=UUID(int=902),
+            )
+        )
+    assert len(provider.probe_calls) == 1
 
 
 @pytest.mark.asyncio

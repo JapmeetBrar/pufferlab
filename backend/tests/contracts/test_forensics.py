@@ -17,11 +17,13 @@ from pufferlab.contracts.forensics import (
     EvidenceOrigin,
     ForensicCode,
     ForensicObservation,
+    ForensicWarning,
     ForensicWarningCode,
     PresenceEvidenceValue,
     ProbeStageMembership,
     RankEvidenceValue,
     ReplayCounterfactualProbe,
+    ReplayFailedCounterfactualProbe,
     ReplayProbeCandidate,
     RrfContributionEvidenceValue,
     ScoreEvidenceValue,
@@ -131,6 +133,18 @@ def _probe() -> ReplayCounterfactualProbe:
     )
 
 
+def _failed_probe() -> ReplayFailedCounterfactualProbe:
+    return ReplayFailedCounterfactualProbe(
+        config_id=_CONFIG_IDS[0],
+        observed_at=_LATER,
+        trace_id=UUID(int=500),
+        warning=ForensicWarning(
+            code=ForensicWarningCode.PROVENANCE_PROBE_FAILED,
+            message="The bounded provenance probe failed safely.",
+        ),
+    )
+
+
 def test_replay_request_accepts_only_two_server_resolved_config_ids() -> None:
     request = EvalRunQueryReplayRequest(config_ids=_CONFIG_IDS)
 
@@ -205,6 +219,8 @@ def test_counterfactual_evidence_cannot_claim_observed_causality() -> None:
 
     with pytest.raises(ValidationError, match="cannot claim observed certainty"):
         ForensicObservation(
+            config_id=_CONFIG_IDS[0],
+            document_id=UUID(int=400),
             code=ForensicCode.OUTSIDE_VECTOR_CANDIDATES,
             statement="The document was absent from a separately requested vector candidate list.",
             origin=EvidenceOrigin.LIVE_REPLAY_COUNTERFACTUAL_PROBE,
@@ -215,6 +231,8 @@ def test_counterfactual_evidence_cannot_claim_observed_causality() -> None:
         )
 
     observation = ForensicObservation(
+        config_id=_CONFIG_IDS[0],
+        document_id=UUID(int=400),
         code=ForensicCode.OUTSIDE_VECTOR_CANDIDATES,
         statement="The document was absent from a separately requested vector candidate list.",
         origin=EvidenceOrigin.LIVE_REPLAY_COUNTERFACTUAL_PROBE,
@@ -235,6 +253,8 @@ def test_stored_run_forensics_are_honestly_not_observable() -> None:
         trace_id=None,
     )
     observation = ForensicObservation(
+        config_id=_CONFIG_IDS[0],
+        document_id=UUID(int=400),
         code=ForensicCode.NOT_OBSERVABLE,
         statement="The M2 outcome did not persist stage membership or scores.",
         origin=EvidenceOrigin.STORED_RUN,
@@ -337,6 +357,7 @@ def test_replay_envelope_separates_primary_and_probe_evidence() -> None:
     assert payload["primary_origin"] == "live_replay_primary"
     assert payload["data_origin"] == "live"
     assert payload["original_stage_evidence_available"] is False
+    assert response.failed_counterfactual_probes == []
 
     primary = _primary()
     primary.results[0].timings.append(
@@ -357,6 +378,8 @@ def test_replay_envelope_separates_primary_and_probe_evidence() -> None:
 
 def test_replay_rejects_primary_evidence_without_an_actual_result_trace() -> None:
     observation = ForensicObservation(
+        config_id=_CONFIG_IDS[0],
+        document_id=UUID(int=400),
         code=ForensicCode.RERANKED_DOWN,
         statement="The primary replay showed a lower final rank after reranking.",
         origin=EvidenceOrigin.LIVE_REPLAY_PRIMARY,
@@ -380,6 +403,8 @@ def test_replay_rejects_primary_evidence_without_an_actual_result_trace() -> Non
 
     actual_trace = _primary().results[0].trace_id
     wrong_time = ForensicObservation(
+        config_id=_CONFIG_IDS[0],
+        document_id=UUID(int=400),
         code=ForensicCode.RERANKED_DOWN,
         statement="The primary replay showed a lower final rank after reranking.",
         origin=EvidenceOrigin.LIVE_REPLAY_PRIMARY,
@@ -430,6 +455,8 @@ def test_counterfactual_observation_binds_exact_probe_trace_time_and_count() -> 
         trace_id=_TRACE_ID,
     )
     observation = ForensicObservation(
+        config_id=_CONFIG_IDS[0],
+        document_id=UUID(int=400),
         code=ForensicCode.OUTSIDE_FUSION_TOP_K,
         statement="The separate probe observed one bounded BM25 candidate rank.",
         origin=EvidenceOrigin.LIVE_REPLAY_COUNTERFACTUAL_PROBE,
@@ -492,6 +519,8 @@ def test_client_computed_primary_source_requires_exact_time_for_observation_and_
     primary = _primary()
     actual_trace = primary.results[0].trace_id
     wrong_observation_time = ForensicObservation(
+        config_id=_CONFIG_IDS[0],
+        document_id=UUID(int=400),
         code=ForensicCode.RERANKED_DOWN,
         statement="A client computation referenced the primary replay.",
         origin=EvidenceOrigin.CLIENT_COMPUTED,
@@ -550,6 +579,8 @@ def test_client_computed_probe_source_requires_exact_time_and_rank_bounds() -> N
         trace_id=probe.trace_id,
     )
     observation = ForensicObservation(
+        config_id=_CONFIG_IDS[0],
+        document_id=UUID(int=400),
         code=ForensicCode.OUTSIDE_FUSION_TOP_K,
         statement="A client computation used the separately returned probe.",
         origin=EvidenceOrigin.CLIENT_COMPUTED,
@@ -652,6 +683,8 @@ def test_client_computed_primary_rank_must_exist_in_returned_hits() -> None:
         trace_id=actual_trace,
     )
     observation = ForensicObservation(
+        config_id=_CONFIG_IDS[0],
+        document_id=UUID(int=400),
         code=ForensicCode.RERANKED_DOWN,
         statement="A client computation used the final rank returned by the primary replay.",
         origin=EvidenceOrigin.CLIENT_COMPUTED,
@@ -676,7 +709,7 @@ def test_client_computed_primary_rank_must_exist_in_returned_hits() -> None:
     fabricated_rank = actual_rank.model_copy(
         update={"value": RankEvidenceValue(stage=RetrievalStage.FINAL, rank=2)}
     )
-    with pytest.raises(ValidationError, match="actual returned hit membership/rank"):
+    with pytest.raises(ValidationError, match="exact target document membership/rank"):
         EvalRunQueryReplayResponse(
             run_id=response.run_id,
             query_id=response.query_id,
@@ -686,4 +719,349 @@ def test_client_computed_primary_rank_must_exist_in_returned_hits() -> None:
             counterfactual_probes=[],
             observations=[observation.model_copy(update={"evidence": [fabricated_rank]})],
             observability_notice=response.observability_notice,
+        )
+
+
+def test_primary_evidence_binds_exact_config_document_rank_score_presence_and_count() -> None:
+    primary = _primary()
+    target_score = _score().model_copy(update={"value": 7.5})
+    primary.results[0].hits = [
+        SearchHit(
+            document_id=UUID(int=400),
+            external_id="doc-400",
+            title="First result",
+            body_excerpt="First bounded excerpt.",
+            final_rank=1,
+            final_score=_score(),
+            stage_membership=[],
+        ),
+        SearchHit(
+            document_id=UUID(int=401),
+            external_id="doc-401",
+            title="Target result",
+            body_excerpt="Target bounded excerpt.",
+            final_rank=2,
+            final_score=target_score,
+            stage_membership=[],
+        ),
+    ]
+    primary.results[0].candidate_counts = {RetrievalStage.FINAL.value: 2}
+    trace_id = primary.results[0].trace_id
+
+    def observation(value: object, *, config_id: UUID = _CONFIG_IDS[0]) -> ForensicObservation:
+        return ForensicObservation.model_validate(
+            {
+                "config_id": config_id,
+                "document_id": str(UUID(int=401)),
+                "code": ForensicCode.RERANKED_DOWN,
+                "statement": "A client computation is bound to one exact primary result.",
+                "origin": EvidenceOrigin.CLIENT_COMPUTED,
+                "observed_at": _NOW,
+                "trace_id": trace_id,
+                "evidence": [
+                    {
+                        "label": "target_value",
+                        "value": value,
+                        "origin": EvidenceOrigin.CLIENT_COMPUTED,
+                        "observed_at": _NOW,
+                        "trace_id": trace_id,
+                    }
+                ],
+                "certainty": EvidenceCertainty.OBSERVED,
+            }
+        )
+
+    def replay(item: ForensicObservation) -> EvalRunQueryReplayResponse:
+        return EvalRunQueryReplayResponse(
+            run_id=UUID(int=300),
+            query_id=_QUERY_ID,
+            config_ids=_CONFIG_IDS,
+            primary_observed_at=_NOW,
+            primary=primary,
+            counterfactual_probes=[],
+            observations=[item],
+            observability_notice="Original stage evidence is unavailable; this is a live replay.",
+        )
+
+    correct = (
+        RankEvidenceValue(stage=RetrievalStage.FINAL, rank=2),
+        ScoreEvidenceValue(stage=RetrievalStage.FINAL, score=target_score),
+        PresenceEvidenceValue(stage=RetrievalStage.FINAL, present=True),
+        CandidateCountEvidenceValue(stage=RetrievalStage.FINAL, count=2),
+    )
+    for value in correct:
+        assert replay(observation(value)).observations[0].document_id == UUID(int=401)
+
+    attacks = (
+        RankEvidenceValue(stage=RetrievalStage.FINAL, rank=1),
+        ScoreEvidenceValue(stage=RetrievalStage.FINAL, score=_score()),
+        PresenceEvidenceValue(stage=RetrievalStage.FINAL, present=False),
+        CandidateCountEvidenceValue(stage=RetrievalStage.FINAL, count=99),
+    )
+    for value in attacks:
+        with pytest.raises(ValidationError, match=r"exact target|exact config"):
+            replay(observation(value))
+    with pytest.raises(ValidationError, match="exact primary config"):
+        replay(observation(correct[0], config_id=_CONFIG_IDS[1]))
+
+
+def test_probe_evidence_binds_exact_document_rank_score_presence_and_rrf_input() -> None:
+    target_score = _score().model_copy(update={"value": 7.5})
+    probe = ReplayCounterfactualProbe(
+        config_id=_CONFIG_IDS[0],
+        observed_at=_NOW,
+        trace_id=_TRACE_ID,
+        duration_ms=1.0,
+        bm25_candidate_count=2,
+        vector_candidate_count=0,
+        candidates=[
+            ReplayProbeCandidate(
+                document_id=UUID(int=400),
+                stage_membership=[
+                    ProbeStageMembership(stage="bm25_candidates", rank=1, score=_score())
+                ],
+            ),
+            ReplayProbeCandidate(
+                document_id=UUID(int=401),
+                stage_membership=[
+                    ProbeStageMembership(
+                        stage="bm25_candidates",
+                        rank=2,
+                        score=target_score,
+                    )
+                ],
+            ),
+        ],
+        warnings=[],
+    )
+
+    def observation(
+        values: list[object], *, config_id: UUID = _CONFIG_IDS[0]
+    ) -> ForensicObservation:
+        return ForensicObservation.model_validate(
+            {
+                "config_id": config_id,
+                "document_id": str(UUID(int=401)),
+                "code": ForensicCode.OUTSIDE_FUSION_TOP_K,
+                "statement": "The separate probe is bound to one exact candidate document.",
+                "origin": EvidenceOrigin.LIVE_REPLAY_COUNTERFACTUAL_PROBE,
+                "observed_at": probe.observed_at,
+                "trace_id": probe.trace_id,
+                "evidence": [
+                    {
+                        "label": f"target_value_{index}",
+                        "value": value,
+                        "origin": EvidenceOrigin.LIVE_REPLAY_COUNTERFACTUAL_PROBE,
+                        "observed_at": probe.observed_at,
+                        "trace_id": probe.trace_id,
+                    }
+                    for index, value in enumerate(values)
+                ],
+                "certainty": EvidenceCertainty.COUNTERFACTUAL,
+            }
+        )
+
+    def replay(item: ForensicObservation) -> EvalRunQueryReplayResponse:
+        return EvalRunQueryReplayResponse(
+            run_id=UUID(int=300),
+            query_id=_QUERY_ID,
+            config_ids=_CONFIG_IDS,
+            primary_observed_at=_NOW,
+            primary=_primary(),
+            counterfactual_probes=[probe],
+            observations=[item],
+            observability_notice="Original stage evidence is unavailable; this is a live replay.",
+        )
+
+    correct_values: list[object] = [
+        RankEvidenceValue(stage="bm25_candidates", rank=2),
+        ScoreEvidenceValue(stage="bm25_candidates", score=target_score),
+        PresenceEvidenceValue(stage="bm25_candidates", present=True),
+        RrfContributionEvidenceValue(
+            stage="bm25_candidates",
+            rank=2,
+            weight=1.0,
+            rank_constant=60,
+            contribution=1.0 / 62.0,
+        ),
+    ]
+    assert replay(observation(correct_values)).observations[0].document_id == UUID(int=401)
+
+    attacks: list[object] = [
+        RankEvidenceValue(stage="bm25_candidates", rank=1),
+        ScoreEvidenceValue(stage="bm25_candidates", score=_score()),
+        PresenceEvidenceValue(stage="bm25_candidates", present=False),
+        RrfContributionEvidenceValue(
+            stage="bm25_candidates",
+            rank=1,
+            weight=1.0,
+            rank_constant=60,
+            contribution=1.0 / 61.0,
+        ),
+    ]
+    for value in attacks:
+        with pytest.raises(ValidationError, match="exact target"):
+            replay(observation([value]))
+    with pytest.raises(ValidationError, match="exact probe config"):
+        replay(observation(correct_values[:1], config_id=_CONFIG_IDS[1]))
+
+
+def test_failed_probe_is_bounded_and_binds_not_observable_warning_to_its_source() -> None:
+    failed_probe = _failed_probe()
+    warning = EvidenceItem(
+        label="provenance_probe_failure",
+        value=WarningEvidenceValue(code=ForensicWarningCode.PROVENANCE_PROBE_FAILED),
+        origin=EvidenceOrigin.LIVE_REPLAY_COUNTERFACTUAL_PROBE,
+        observed_at=failed_probe.observed_at,
+        trace_id=failed_probe.trace_id,
+    )
+    observation = ForensicObservation(
+        config_id=failed_probe.config_id,
+        document_id=UUID(int=401),
+        code=ForensicCode.NOT_OBSERVABLE,
+        statement="The failed probe cannot establish target membership.",
+        origin=EvidenceOrigin.LIVE_REPLAY_COUNTERFACTUAL_PROBE,
+        observed_at=failed_probe.observed_at,
+        trace_id=failed_probe.trace_id,
+        evidence=[warning],
+        certainty=EvidenceCertainty.INSUFFICIENT,
+    )
+    response = EvalRunQueryReplayResponse(
+        run_id=UUID(int=300),
+        query_id=_QUERY_ID,
+        config_ids=_CONFIG_IDS,
+        primary_observed_at=_NOW,
+        primary=_primary(),
+        counterfactual_probes=[],
+        failed_counterfactual_probes=[failed_probe],
+        observations=[observation],
+        observability_notice="Original stage evidence is unavailable; this is a live replay.",
+    )
+
+    payload = response.model_dump(mode="json")
+    failed_payload = payload["failed_counterfactual_probes"][0]
+    assert failed_payload["config_id"] == str(failed_probe.config_id)
+    assert failed_payload["warning"]["code"] == "provenance_probe_failed"
+    assert "candidates" not in failed_payload
+    assert "candidate_count" not in failed_payload
+
+    for forbidden in (
+        {"candidates": []},
+        {"provider_body": {"opaque": "x" * 100_000}},
+    ):
+        with pytest.raises(ValidationError, match="extra_forbidden"):
+            ReplayFailedCounterfactualProbe.model_validate({**failed_payload, **forbidden})
+    with pytest.raises(ValidationError, match="at most 512 characters"):
+        ReplayFailedCounterfactualProbe.model_validate(
+            {
+                **failed_payload,
+                "warning": {
+                    "code": ForensicWarningCode.PROVENANCE_PROBE_FAILED,
+                    "message": "x" * 513,
+                },
+            }
+        )
+    with pytest.raises(ValidationError, match="safe provenance-probe-failed warning"):
+        ReplayFailedCounterfactualProbe(
+            config_id=failed_probe.config_id,
+            observed_at=failed_probe.observed_at,
+            trace_id=failed_probe.trace_id,
+            warning=ForensicWarning(
+                code=ForensicWarningCode.NAMESPACE_UNAVAILABLE,
+                message="Wrong warning type.",
+            ),
+        )
+    with pytest.raises(ValidationError, match="exact probe config"):
+        EvalRunQueryReplayResponse(
+            **response.model_dump(exclude={"observations"}),
+            observations=[observation.model_copy(update={"config_id": _CONFIG_IDS[1]})],
+        )
+    with pytest.raises(ValidationError, match="probe trace/time"):
+        EvalRunQueryReplayResponse(
+            **response.model_dump(exclude={"observations"}),
+            observations=[observation.model_copy(update={"observed_at": _NOW})],
+        )
+    with pytest.raises(ValidationError, match="probe trace/time"):
+        EvalRunQueryReplayResponse(
+            **response.model_dump(exclude={"observations"}),
+            observations=[
+                observation.model_copy(
+                    update={"evidence": [warning.model_copy(update={"observed_at": _NOW})]}
+                )
+            ],
+        )
+    with pytest.raises(ValidationError, match="limited to safe failure warnings"):
+        EvalRunQueryReplayResponse(
+            **response.model_dump(exclude={"observations"}),
+            observations=[
+                observation.model_copy(
+                    update={
+                        "evidence": [
+                            warning.model_copy(
+                                update={
+                                    "value": RankEvidenceValue(
+                                        stage="bm25_candidates",
+                                        rank=1,
+                                    )
+                                }
+                            )
+                        ]
+                    }
+                )
+            ],
+        )
+    causal = observation.model_copy(
+        update={
+            "code": ForensicCode.OUTSIDE_FUSION_TOP_K,
+            "certainty": EvidenceCertainty.COUNTERFACTUAL,
+        }
+    )
+    with pytest.raises(ValidationError, match="must remain NOT_OBSERVABLE"):
+        EvalRunQueryReplayResponse(
+            **response.model_dump(exclude={"observations"}),
+            observations=[causal],
+        )
+
+
+def test_failed_probe_config_and_trace_sets_are_unique_and_disjoint() -> None:
+    failed_probe = _failed_probe()
+    primary_trace = _primary().results[0].trace_id
+    outside_config = failed_probe.model_copy(update={"config_id": UUID(int=999)})
+    with pytest.raises(ValidationError, match="uniquely match requested configs"):
+        EvalRunQueryReplayResponse(
+            run_id=UUID(int=300),
+            query_id=_QUERY_ID,
+            config_ids=_CONFIG_IDS,
+            primary_observed_at=_NOW,
+            primary=_primary(),
+            counterfactual_probes=[],
+            failed_counterfactual_probes=[outside_config],
+            observations=[],
+            observability_notice="Original stage evidence is unavailable; this is a live replay.",
+        )
+    with pytest.raises(ValidationError, match="disjoint traces"):
+        EvalRunQueryReplayResponse(
+            run_id=UUID(int=300),
+            query_id=_QUERY_ID,
+            config_ids=_CONFIG_IDS,
+            primary_observed_at=_NOW,
+            primary=_primary(),
+            counterfactual_probes=[],
+            failed_counterfactual_probes=[
+                failed_probe.model_copy(update={"trace_id": primary_trace})
+            ],
+            observations=[],
+            observability_notice="Original stage evidence is unavailable; this is a live replay.",
+        )
+    with pytest.raises(ValidationError, match="uniquely match requested configs"):
+        EvalRunQueryReplayResponse(
+            run_id=UUID(int=300),
+            query_id=_QUERY_ID,
+            config_ids=_CONFIG_IDS,
+            primary_observed_at=_NOW,
+            primary=_primary(),
+            counterfactual_probes=[_probe()],
+            failed_counterfactual_probes=[failed_probe],
+            observations=[],
+            observability_notice="Original stage evidence is unavailable; this is a live replay.",
         )

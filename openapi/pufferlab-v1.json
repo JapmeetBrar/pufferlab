@@ -977,6 +977,14 @@
             "title": "Data Origin",
             "type": "string"
           },
+          "failed_counterfactual_probes": {
+            "items": {
+              "$ref": "#/components/schemas/ReplayFailedCounterfactualProbe"
+            },
+            "maxItems": 2,
+            "title": "Failed Counterfactual Probes",
+            "type": "array"
+          },
           "observability_notice": {
             "maxLength": 512,
             "minLength": 1,
@@ -1536,6 +1544,16 @@
           "code": {
             "$ref": "#/components/schemas/ForensicCode"
           },
+          "config_id": {
+            "format": "uuid",
+            "title": "Config Id",
+            "type": "string"
+          },
+          "document_id": {
+            "format": "uuid",
+            "title": "Document Id",
+            "type": "string"
+          },
           "evidence": {
             "items": {
               "$ref": "#/components/schemas/EvidenceItem"
@@ -1579,6 +1597,8 @@
           }
         },
         "required": [
+          "config_id",
+          "document_id",
           "code",
           "statement",
           "origin",
@@ -2763,6 +2783,43 @@
           "warnings"
         ],
         "title": "ReplayCounterfactualProbe",
+        "type": "object"
+      },
+      "ReplayFailedCounterfactualProbe": {
+        "additionalProperties": false,
+        "properties": {
+          "config_id": {
+            "format": "uuid",
+            "title": "Config Id",
+            "type": "string"
+          },
+          "observed_at": {
+            "format": "date-time",
+            "title": "Observed At",
+            "type": "string"
+          },
+          "origin": {
+            "const": "live_replay_counterfactual_probe",
+            "default": "live_replay_counterfactual_probe",
+            "title": "Origin",
+            "type": "string"
+          },
+          "trace_id": {
+            "format": "uuid",
+            "title": "Trace Id",
+            "type": "string"
+          },
+          "warning": {
+            "$ref": "#/components/schemas/ForensicWarning"
+          }
+        },
+        "required": [
+          "config_id",
+          "observed_at",
+          "trace_id",
+          "warning"
+        ],
+        "title": "ReplayFailedCounterfactualProbe",
         "type": "object"
       },
       "ReplayProbeCandidate": {

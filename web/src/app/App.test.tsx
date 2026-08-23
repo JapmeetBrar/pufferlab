@@ -7,8 +7,12 @@ import type {
   SearchCompareResponse,
 } from "../api/client";
 import {
+  baselineId,
   candidateIds,
+  documentId,
   makeRunView,
+  queryDetail,
+  queryId,
   regressionResponse,
   runDetail,
   runId,
@@ -365,6 +369,74 @@ describe("App playground", () => {
 });
 
 describe("App routing", () => {
+  it("opens a frozen forensic Playground link with a provider-free GET and no config fetch", async () => {
+    const fetchMock = vi.fn((...args: [input: string | URL | Request, init?: RequestInit]) => {
+      const url = requestUrl(args[0]);
+      if (url.endsWith("/api/v1/health")) {
+        return Promise.resolve(jsonResponse({ contract_version: 1, status: "ok", version: "0.1.0" }));
+      }
+      if (url.endsWith(`/api/v1/eval-runs/${runId}/queries/${queryId}`)) {
+        return Promise.resolve(jsonResponse(queryDetail()));
+      }
+      return Promise.reject(new Error(`Unexpected request: ${url}`));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    window.history.replaceState(
+      null,
+      "",
+      `/playground?run=${runId}&query=${queryId}&left=${baselineId}&right=${candidateIds[0]}&document=${documentId}`,
+    );
+    renderApp();
+
+    const heading = await screen.findByRole("heading", { name: "Query forensics", level: 1 });
+    expect(heading).toHaveFocus();
+    expect(await screen.findByText("authored local query text")).toBeVisible();
+    const drawer = await screen.findByRole("dialog", { name: "Document evidence" });
+    expect(fetchMock.mock.calls.some(([input]) => requestUrl(input).endsWith("/api/v1/configs"))).toBe(false);
+    expect(fetchMock.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
+    expect(window.location.search).not.toContain("query_text");
+    fireEvent.click(within(drawer).getByRole("button", { name: "Close document evidence" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(heading).toHaveFocus();
+  });
+
+  it("restores a document drawer through nested-route back, forward, and refresh-safe URL state", async () => {
+    const fetchMock = vi.fn((input: string | URL | Request) => {
+      const url = requestUrl(input);
+      if (url.endsWith("/api/v1/health")) {
+        return Promise.resolve(jsonResponse({ contract_version: 1, status: "ok", version: "0.1.0" }));
+      }
+      if (url.endsWith(`/api/v1/eval-runs/${runId}/queries/${queryId}`)) {
+        return Promise.resolve(jsonResponse(queryDetail()));
+      }
+      return Promise.reject(new Error(`Unexpected request: ${url}`));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    window.history.replaceState(
+      null,
+      "",
+      `/runs/${runId}/queries/${queryId}?left=${baselineId}&right=${candidateIds[0]}`,
+    );
+    renderApp();
+
+    await screen.findByText("authored local query text");
+    const opener = screen.getAllByRole("button", { name: "Inspect document" })[0];
+    if (opener === undefined) throw new Error("Expected a document evidence opener");
+    fireEvent.click(opener);
+    expect(await screen.findByRole("dialog", { name: "Document evidence" })).toBeVisible();
+    await waitFor(() => expect(new URLSearchParams(window.location.search).get("document")).toBe(documentId));
+
+    window.history.back();
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(opener).toHaveFocus();
+    expect(new URLSearchParams(window.location.search).get("document")).toBeNull();
+
+    window.history.forward();
+    const restoredDrawer = await screen.findByRole("dialog", { name: "Document evidence" });
+    expect(new URLSearchParams(window.location.search).get("document")).toBe(documentId);
+    expect(within(restoredDrawer).getByRole("button", { name: "Close document evidence" })).toHaveFocus();
+  });
+
   it("uses semantic navigation, moves focus, and restores history without reloading", async () => {
     const fetchMock = vi.fn((input: string | URL | Request) => {
       const url = requestUrl(input);

@@ -40,10 +40,12 @@ export function RouteHeading({
   routeKey,
   children,
   className,
+  id,
 }: {
   routeKey: string;
   children: ReactNode;
   className?: string;
+  id?: string;
 }) {
   const headingRef = useRef<HTMLHeadingElement>(null);
   useEffect(() => {
@@ -51,7 +53,7 @@ export function RouteHeading({
   }, [routeKey]);
 
   return (
-    <h1 className={className} ref={headingRef} tabIndex={-1}>
+    <h1 className={className} id={id} ref={headingRef} tabIndex={-1}>
       {children}
     </h1>
   );
