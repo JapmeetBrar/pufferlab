@@ -40,7 +40,7 @@ Process details live in [`engineering-loop.md`](engineering-loop.md).
 | M2-C | [Hybrid retrieval and local reranking](milestone-2-execution.md#m2-c--hybrid-retrieval-and-local-reranking) | root retrieval worker | `codex/m2-hybrid-retrieval` / [PR #13](https://github.com/JapmeetBrar/pufferlab/pull/13) | verified | [Independent re-review](https://github.com/JapmeetBrar/pufferlab/pull/13#issuecomment-5384004506) approved exact head `b79bb5c`; PR #13 reviewer-only squash-merged as `48f4e29`. The [canonical merge record](https://github.com/JapmeetBrar/pufferlab/pull/13#issuecomment-5384007820) confirms protected-main Backend and Frontend checks passed. |
 | M2-D | [CQADupStack Unix dataset foundation](milestone-2-execution.md#m2-d--cqadupstack-unix-dataset-foundation) | dataset_worker | `codex/m2-unix-dataset` / [PR #14](https://github.com/JapmeetBrar/pufferlab/pull/14) | verified | [Independent re-review](https://github.com/JapmeetBrar/pufferlab/pull/14#issuecomment-5384120560) approved repaired head `7187702`; PR #14 reviewer-only squash-merged as `31387b6b62cc938a3b0d107c4c4ac5e0fd7fb4c9`. The [canonical record](https://github.com/JapmeetBrar/pufferlab/pull/14#issuecomment-5384124747) confirms protected-main Backend and Frontend checks passed, including full-history audit `160/357/19`. |
 | M2-E | [Evaluation service and CLI](milestone-2-execution.md#m2-e--evaluation-application-service-and-cli) | root integration worker + delegated seam workers | `codex/m2-eval-cli` / [PR #15](https://github.com/JapmeetBrar/pufferlab/pull/15) | verified | [Independent re-review](https://github.com/JapmeetBrar/pufferlab/pull/15#issuecomment-5384253856) reproduced both repair paths, approved the exact head, and reviewer-only squash-merged PR #15 as `0e91e2bd24194e375e0dd5d6b0e12b729a3409d0`. The [canonical record](https://github.com/JapmeetBrar/pufferlab/pull/15#issuecomment-5384257932) confirms protected-main Backend and Frontend passed. |
-| M2-F | [Live execution and goal finalization](milestone-2-execution.md#m2-f--live-execution-and-goal-finalization) | root + live_harness worker + reviewer | `codex/m2-live-finalization` / [draft PR #16](https://github.com/JapmeetBrar/pufferlab/pull/16) | implementing | [Independent pre-retry review](https://github.com/JapmeetBrar/pufferlab/pull/16#issuecomment-5384486966) approved exact head `d07582a` after reproducing the old 47,383-row request, validating the repaired five-page real-SDK request sequence offline, replaying pagination attacks, checking the safe zero-row/cleaned first-attempt state, passing 87 focused and 354 full backend tests plus one skip, six frontend tests/build, audits, and exact-head CI. Credentialed retry is authorized only under the reviewed coordinator. |
+| M2-F | [Live execution and goal finalization](milestone-2-execution.md#m2-f--live-execution-and-goal-finalization) | root + live_harness worker + reviewer | `codex/m2-live-finalization` / [draft PR #16](https://github.com/JapmeetBrar/pufferlab/pull/16) | review_requested | The reviewed retry completed the exact READY 47,382-document ingestion and all 200 judged outcomes with zero failures. Independent ranking/qrel recomputation and canonical export validation passed; exact authenticated cleanup reached `NOT_FOUND`; the session record is absent; post-cleanup read-only verification, full gates, artifact `176/431/19`, and secret-boundary scans pass. The dedicated reviewer must inspect the final evidence head, mark the PR ready, merge it, and verify protected `main`. |
 
 ## Review history
 
@@ -94,6 +94,7 @@ Process details live in [`engineering-loop.md`](engineering-loop.md).
 | 2026-08-22 | M2-F / [draft PR #16](https://github.com/JapmeetBrar/pufferlab/pull/16) | `implementing → implementing` (live readiness repair) | The first authorized run verified the real pinned BGE model and passed the separate self-cleaning BM25/ANN/server-RRF provider smoke test. Unix ingestion then checkpointed all 741 batches and 47,382 stable document IDs, but the final inventory path issued one `top_k=47,383` request against the provider's documented 10,000 maximum and failed closed before persisting a READY seed or starting evaluation. The coordinator trap confirmed exact namespace deletion to `NOT_FOUND`; the authenticated session record is absent, its mode-`0600` ignored owner key remains, and no tracked file changed. Repair is limited to strong-consistency ID-ordered keyset pagination capped at 10,000 rows per query, adversarial tests, full gates, and independent pre-retry review. |
 | 2026-08-22 | M2-F / [draft PR #16](https://github.com/JapmeetBrar/pufferlab/pull/16) | `implementing → review_requested` (live readiness repair) | Worker repair `9e4cdfb` preserves the exact count-plus-one inventory contract while paging at most 10,000 strongly consistent ascending IDs and advancing an exclusive `id > last_id` cursor. Tests cover the exact 47,382 corpus shape, the 10,001st-row truncation proof, an exact-full-page empty successor, cursor/consistency arguments, mixed or invalid IDs, duplicates/out-of-order/non-progress, oversized pages, and short-page/count inconsistency. Fifty-three focused tests pass; `make check` passes with 354 backend tests plus one opt-in skip and six frontend tests/build, Ruff/format/mypy/OpenAPI/diff gates pass, and artifact `176/428/19` plus secret-boundary audits are clean. Dedicated exact-head review is required before retry. |
 | 2026-08-22 | M2-F / [draft PR #16](https://github.com/JapmeetBrar/pufferlab/pull/16) | `review_requested → approved → implementing` (live readiness repair) | [Dedicated review at `d07582a`](https://github.com/JapmeetBrar/pufferlab/pull/16#issuecomment-5384486966) reproduced the original over-limit request and used the real SDK offline to verify five strong keyset pages bounded to 10,000 with exact cursors. All boundary/attack tests passed; the absent session, retained mode-`0600` owner key, zero application-table rows, unchanged read-only database, clean worktree, full gates/audits, and exact-head GitHub Backend/Frontend checks were independently confirmed. The runbook-scoped credentialed retry is authorized; the draft remains unmerged. |
+| 2026-08-22 | M2-F / [draft PR #16](https://github.com/JapmeetBrar/pufferlab/pull/16) | `implementing → review_requested` (goal-finalization review) | The authorized retry passed five-page exact readiness for all 47,382 documents, persisted dataset `dd403bda-d298-5a4a-bb45-a29dee84c61b`, query set `e490c239-69ee-57d6-b6b0-bb5cc31c8b2a`, four canonical configs, run `34af9297-e423-4787-a43b-37292aaf1d93`, and 200/200 successful outcomes. The authenticated verifier recomputed every quality metric from rankings and 83 exact qrels, matched all six 50-sample aggregates per config, validated export SHA-256 `46b175d9cd88e2f102876c00c5e3a60e533c8dd0cea07118b215efef0ba83e02`, and remained byte/mtime/sidecar read-only. Namespace fingerprint `505a2788e77e` reached exact `NOT_FOUND`; the session is absent and ignored owner key remains mode `0600`. Full gates pass with 354 backend tests plus one skip and six frontend tests/build; artifact `176/431/19`, secret-boundary, diff, and post-cleanup Bash gates pass. Final exact-head reviewer-only merge and protected-main verification remain. |
 
 ## Milestone 1 acceptance evidence
 
@@ -120,10 +121,33 @@ Process details live in [`engineering-loop.md`](engineering-loop.md).
   separated client timings.
 - [x] One CLI command completes and persists the 50-query/four-configuration run; JSON export
   validates against the checked-in contract.
-- [ ] The credentialed run cleans only its exact generated namespace and retains no secret, raw
+- [x] The credentialed run cleans only its exact generated namespace and retains no secret, raw
   vector, corpus, or database artifact in Git.
 - [ ] Every Milestone 2 PR receives independent review, reviewer-only merge, and green protected
   `main` checks.
+
+### Sanitized live run
+
+- Region: `gcp-us-west1`; namespace SHA-256 fingerprint: `505a2788e77e`; cleanup:
+  `not_found_verified` with no retained session record.
+- Pinned archive: 5,343,728,040 bytes, MD5 `4e41456d7df8ee7760a7f866133bda78`, SHA-256
+  `6072f7d345496387d24194c8af35c5fb6c2f0e5f9130c5b4a78b98bbfac88558`; processed-pack SHA-256
+  `6d54fb92c04b9f193d081a7c430d8804e24e71855d3cbaa2bb50cde838f181b8`.
+- Dataset/query/run: `dd403bda-d298-5a4a-bb45-a29dee84c61b` /
+  `e490c239-69ee-57d6-b6b0-bb5cc31c8b2a` / `34af9297-e423-4787-a43b-37292aaf1d93`;
+  47,382 documents, 50 queries, 83 curated qrels, 200 successful outcomes.
+- Canonical export SHA-256:
+  `46b175d9cd88e2f102876c00c5e3a60e533c8dd0cea07118b215efef0ba83e02`.
+
+| Mode / config | NDCG@10 | Recall@50 | MRR@10 | p50 ms | p95 ms | Error rate |
+|---|---:|---:|---:|---:|---:|---:|
+| BM25 / `66dcf586-d65e-5a36-9875-5bcb76a5630e` | 0.330995 | 0.488000 | 0.363190 | 201.502 | 275.288 | 0.000000 |
+| ANN / `93f50bf2-6327-5564-8823-ceba259d5d70` | 0.456537 | 0.696667 | 0.511500 | 504.903 | 959.744 | 0.000000 |
+| Server RRF / `59385c3a-bfa8-548f-996b-11ca01bbdb94` | 0.418917 | 0.675000 | 0.455627 | 546.025 | 1,198.534 | 0.000000 |
+| Local reranker / `db981631-4a65-597a-96f7-70ab850a4e24` | 0.435933 | 0.675000 | 0.498667 | 1,451.313 | 2,460.539 | 0.000000 |
+
+Every displayed aggregate has sample count 50; the verifier independently recomputed quality from
+ranked IDs plus exact qrels and latency percentiles from stored per-query client wall times.
 
 ## Decision log
 

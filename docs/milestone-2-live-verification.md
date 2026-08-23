@@ -101,6 +101,7 @@ Use Bash for the trap behavior below. Keep this shell open:
 ```bash
 bash
 set -Eeuo pipefail
+[[ -n "${BASH_VERSION:-}" ]]
 test ! -e data/m2-live-session.json
 
 _cleanup_namespace() {
