@@ -226,9 +226,18 @@ def default_doctor_dependencies() -> DoctorDependencies:
     return DoctorDependencies(
         capability_inspector_factory=LocalCapabilityInspector,
         catalog_factory=open_existing_read_only_catalog,
-        owned_tiny_target_resolver=lambda _settings: None,
+        owned_tiny_target_resolver=_default_owned_tiny_target_resolver,
         metadata_probe=probe_namespace_metadata,
     )
+
+
+def _default_owned_tiny_target_resolver(settings: Settings) -> DoctorLiveTarget | None:
+    from pufferlab.owned_tiny import resolve_owned_tiny_target
+
+    target = resolve_owned_tiny_target(settings)
+    if target is None:
+        return None
+    return DoctorLiveTarget(namespace=target.namespace, region=target.region)
 
 
 async def run_doctor(

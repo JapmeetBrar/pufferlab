@@ -126,6 +126,14 @@ def main(
             error_output=error_output,
         )
 
+    if arguments.command == "namespace":
+        return _run_namespace_command(
+            arguments,
+            settings_factory=settings_factory,
+            output=output,
+            error_output=error_output,
+        )
+
     if arguments.command == "demo" and arguments.demo_command == "seed":
         return _run_synthetic_demo_seed(
             settings_factory=settings_factory,
@@ -327,11 +335,57 @@ def _run_tiny_ingest(
                 emit=lambda message: print(message, file=output),
             )
         )
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        print("error: tiny fixture ingestion cancelled", file=error_output)
+        return 130
+    except SystemExit:
+        print("error: tiny fixture ingestion failed", file=error_output)
+        return 1
     except TinyIngestionCommandError as error:
         print(f"error: {error}", file=error_output)
         return error.exit_code
     except Exception:
         print("error: tiny fixture ingestion failed", file=error_output)
+        return 1
+    return 0
+
+
+def _run_namespace_command(
+    arguments: argparse.Namespace,
+    *,
+    settings_factory: Callable[[], Settings],
+    output: TextIO,
+    error_output: TextIO,
+) -> int:
+    from pufferlab.cli.namespace import (
+        NamespaceCommandError,
+        cleanup_owned_tiny,
+        show_owned_tiny,
+    )
+
+    try:
+        if arguments.namespace_command == "show-tiny":
+            show_owned_tiny(emit=lambda message: print(message, file=output))
+        elif arguments.namespace_command == "cleanup-tiny":
+            asyncio.run(
+                cleanup_owned_tiny(
+                    settings_factory(),
+                    emit=lambda message: print(message, file=output),
+                )
+            )
+        else:  # pragma: no cover - argparse freezes the subcommand domain
+            raise AssertionError("unknown namespace command")
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        print("error: namespace command cancelled", file=error_output)
+        return 130
+    except SystemExit:
+        print("error: namespace command failed", file=error_output)
+        return 1
+    except NamespaceCommandError as error:
+        print(f"error: {error}", file=error_output)
+        return error.exit_code
+    except Exception:
+        print("error: namespace command failed", file=error_output)
         return 1
     return 0
 
@@ -501,6 +555,29 @@ def _parser() -> argparse.ArgumentParser:
     _add_tiny_ingest_parser(dataset_commands)
     _add_unix_ingest_parser(dataset_commands)
 
+    namespace = commands.add_parser(
+        "namespace",
+        help="Inspect or clean the one authenticated generated tiny namespace.",
+    )
+    namespace_commands = namespace.add_subparsers(dest="namespace_command", required=True)
+    namespace_commands.add_parser(
+        "show-tiny",
+        help="Print region and namespace assignments from the authenticated fixed receipt.",
+        description=(
+            "Print TURBOPUFFER_REGION and PUFFERLAB_SEARCH_NAMESPACE assignments from the one "
+            "authenticated generated-tiny receipt. No provider request is made."
+        ),
+    )
+    namespace_commands.add_parser(
+        "cleanup-tiny",
+        help="Delete only the exact authenticated generated tiny namespace.",
+        description=(
+            "Delete only the target in the fixed authenticated generated-tiny receipt, then "
+            "perform bounded not-found verification. Verification metadata requests may be "
+            "billed as zero-row queries. No target, path, token, or ownership input is accepted."
+        ),
+    )
+
     config = commands.add_parser("config", help="Manage immutable retrieval configurations.")
     config_commands = config.add_subparsers(dest="config_command", required=True)
     seed = config_commands.add_parser(
@@ -593,7 +670,8 @@ def _add_tiny_ingest_parser(commands: argparse._SubParsersAction[argparse.Argume
         description=(
             "Embed and upsert the checked-in tiny fixture. This performs local model execution "
             "and cost-bearing turbopuffer writes. TURBOPUFFER_API_KEY is required; "
-            "TURBOPUFFER_REGION selects the target region."
+            "TURBOPUFFER_REGION selects the creating region. Without --namespace, the command "
+            "durably creates or resumes the one authenticated generated-tiny receipt."
         ),
     )
     _add_ingest_arguments(ingest, default_batch_size=20)
@@ -647,8 +725,9 @@ def _add_ingest_arguments(parser: argparse.ArgumentParser, *, default_batch_size
     parser.add_argument(
         "--namespace",
         help=(
-            "Explicit owned pufferlab-* target for an idempotent rerun. "
-            "Omit to generate a unique owned namespace."
+            "Caller-managed explicit pufferlab-* target for an idempotent rerun. Explicit "
+            "targets never receive generated-tiny cleanup authority. Omit to use the "
+            "command-specific generated target."
         ),
     )
     parser.add_argument(
