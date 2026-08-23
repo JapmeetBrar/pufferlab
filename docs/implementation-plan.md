@@ -33,9 +33,14 @@ Add eval dashboard, regression deep links, provenance reconstruction, robust emp
 
 Exit: the 3–5 minute demo works from a fresh documented setup.
 
-### Milestone 4 — Hardening/polish (days 9–10)
+### Milestone 4 — Operator-ready evaluation workflow
 
-Run live integration tests, browser smoke test, accessibility checks, ingestion recovery, cancellation, export, README, and recorded fallback screenshots/data.
+Close the remaining operator gaps after Milestone 3: typed local capability diagnostics, an
+authenticated generated-namespace cleanup path, provider-free CI evaluation gates, and a
+repeatable browser/accessibility check. Live integration, ingestion recovery, cancellation,
+export, README guidance, and deterministic fallback data shipped earlier and remain regression
+requirements. The finite architecture and branch plan is in
+[`milestone-4-execution.md`](milestone-4-execution.md).
 
 Exit: a reviewer can clone, configure, ingest, run, inspect, and clean up without oral guidance.
 
