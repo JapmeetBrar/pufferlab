@@ -260,7 +260,7 @@ def _synthetic_archive(
             for index in range(query_count)
         )
         qrels = "query-id\tcorpus-id\tscore\r\n" + "".join(
-            f"{20_000 + index}\t{10_000 + index}\t1\r\n"
+            f"{20_000 + index}\t{10_000 + index}\t{1 + (index % 3)}\r\n"
             f"{20_000 + index}\t{10_000 + ((index + 1) % query_count)}\t1\r\n"
             for index in range(query_count)
         )

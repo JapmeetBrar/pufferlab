@@ -76,6 +76,9 @@ both possible licenses and records the limitation. See [`NOTICE-DATASETS.md`](..
 Official qrels are accepted only when both their query and document IDs were retained. Duplicate or
 dangling query-document pairs fail preparation. The local pack directory name hashes the source
 lock, preprocessing specification and canonical hashes/counts of documents, queries and qrels.
+The ingestion-oriented `FixtureQuery` view still exposes positive expected document IDs for
+compatibility, while `load_curated_unix_local_pack` separately retains every official integer
+relevance grade so evaluation materialization is lossless.
 
 ## Curated 50-query suite
 
@@ -89,6 +92,30 @@ and source ID, then round-robins 13 exact-token, 13 semantic, 12 hybrid and 12 r
 without duplicates. The checked manifest records all applicable tags. This provides coverage for
 lexical anchors, natural-language intent, fusion candidates, and multi-judgment reranking cases
 without committing the licensed inputs used to derive them.
+
+## Evaluation and ingestion application boundary
+
+M2-E should call `UnixDatasetApplicationService.ingest` with its provider-neutral
+`IngestionService`, absolute-data-directory `IngestionCheckpointStore`, verified processed-pack
+path, and checked manifest paths. The application service owns local materialization, checkpoint
+lookup/save, stable-ID resume, readiness verification, and seed construction. It never deletes a
+namespace.
+
+The successful `UnixIngestionResult` exposes an `IngestionReport` plus one deterministic
+`UnixEvaluationSeed` containing:
+
+- a READY contract-native `DatasetVersion` bound to the exact caller namespace, corpus hash, and
+  compiled schema hash;
+- a contract-native `QuerySet` and ordered `JudgedQuery` values whose `Qrel` objects preserve the
+  official integer relevance grades and stable document UUIDs;
+- a parallel `CuratedJudgedQuerySeed` for every query with the checked primary tag, all authored
+  tags, and PufferLab-authored reason, because the current `JudgedQuery` contract has no reason
+  field.
+
+IDs and content hashes are UUIDv5/SHA-256 derivations of immutable inputs. The logical revision
+timestamp is the pinned upstream dump date rather than local wall-clock time. M2-E may persist
+`dataset_version`, `query_set`, and `judged_queries` directly; it can retain the parallel curation
+metadata in application memory for analysis without parsing the ID-only manifest again.
 
 ## Resume and namespace safety
 
