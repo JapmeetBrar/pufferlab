@@ -19,9 +19,15 @@ from sqlalchemy.pool import StaticPool
 from pufferlab.persistence.repository import PufferLabRepository
 
 _CURRENT_REVISION = "20260822_0001"
-_DESCRIPTOR_ROOT = Path("/dev/fd")
+# Canonical evaluation catalogs store metadata, 50 queries/qrels, and 200 outcomes rather than
+# corpus documents or vectors. 256 MiB leaves substantial evidence headroom while bounding both
+# this temporary image and SQLite's separate in-memory copy.
+_MAX_CATALOG_BYTES = 256 * 1024 * 1024
+_SNAPSHOT_CHUNK_BYTES = 1024 * 1024
 _OPEN_SUPPORTS_DIR_FD = os.open in os.supports_dir_fd
 _STAT_SUPPORTS_DIR_FD = os.stat in os.supports_dir_fd
+_PREAD_SUPPORTED = hasattr(os, "pread")
+_ZERO_CHUNK = bytes(_SNAPSHOT_CHUNK_BYTES)
 
 
 class ReadOnlyCatalogError(RuntimeError):
@@ -105,6 +111,7 @@ class _GuardedDatabaseFile:
             or directory == 0
             or not _OPEN_SUPPORTS_DIR_FD
             or not _STAT_SUPPORTS_DIR_FD
+            or not _PREAD_SUPPORTED
         ):
             raise ReadOnlyCatalogError()
         leaf_name = path.name
@@ -156,51 +163,35 @@ class _GuardedDatabaseFile:
     def path(self) -> Path:
         return self._parent_path / self._leaf_name
 
-    @property
-    def descriptor_path(self) -> Path:
-        fd = self._fd
-        if fd is None or not _DESCRIPTOR_ROOT.is_absolute():
-            raise ReadOnlyCatalogError()
-        descriptor = _DESCRIPTOR_ROOT / str(fd)
-        try:
-            close_on_exec = getattr(os, "O_CLOEXEC", None)
-            if not isinstance(close_on_exec, int) or close_on_exec == 0:
-                raise ReadOnlyCatalogError()
-            descriptor_fd = os.open(descriptor, os.O_RDONLY | close_on_exec)
-            try:
-                descriptor_identity = _identity_from_metadata(os.fstat(descriptor_fd))
-            finally:
-                os.close(descriptor_fd)
-        except Exception as error:
-            _detach_exception(error)
-            raise ReadOnlyCatalogError() from None
-        if descriptor_identity != self.identity:
-            raise ReadOnlyCatalogError()
-        return descriptor
+    def snapshot(self) -> bytearray:
+        """Read one bounded exact image only from the already guarded leaf description."""
 
-    def validate_descriptor_alias(self, alias: str) -> None:
-        """Accept only SQLite's evidenced names for this exact process-local descriptor."""
-
+        snapshot: bytearray | None = None
         fd = self._fd
-        if fd is None or alias not in {f"/dev/fd/{fd}", f"/proc/self/fd/{fd}"}:
+        if fd is None:
             raise ReadOnlyCatalogError()
         try:
-            close_on_exec = getattr(os, "O_CLOEXEC", None)
-            if not isinstance(close_on_exec, int) or close_on_exec == 0:
+            self.verify()
+            expected_size = self.identity.size
+            if expected_size <= 0 or expected_size > _MAX_CATALOG_BYTES:
                 raise ReadOnlyCatalogError()
-            descriptor_fd = os.open(alias, os.O_RDONLY | close_on_exec)
-            try:
-                descriptor_identity = _identity_from_metadata(os.fstat(descriptor_fd))
-            finally:
-                os.close(descriptor_fd)
-        except Exception as error:
-            _detach_exception(error)
-            raise ReadOnlyCatalogError() from None
-        if descriptor_identity != self.identity:
-            raise ReadOnlyCatalogError()
-
-    def sqlite_uri(self) -> str:
-        return f"{self.descriptor_path.as_uri()}?mode=ro&immutable=1"
+            snapshot = bytearray(expected_size)
+            offset = 0
+            while offset < expected_size:
+                chunk_size = min(_SNAPSHOT_CHUNK_BYTES, expected_size - offset)
+                chunk = os.pread(fd, chunk_size, offset)
+                if len(chunk) != chunk_size:
+                    raise ReadOnlyCatalogError()
+                snapshot[offset : offset + chunk_size] = chunk
+                chunk = b""
+                offset += chunk_size
+            if os.pread(fd, 1, expected_size) != b"":
+                raise ReadOnlyCatalogError()
+            self.verify()
+            return snapshot
+        except BaseException:
+            _erase_snapshot(snapshot)
+            raise
 
     def verify(self) -> None:
         fd = self._fd
@@ -374,16 +365,20 @@ def _open_existing_read_only_catalog_inner(path: Path) -> _OpenOutcome:
     guard: _GuardedDatabaseFile | None = None
     resolved: Path | None = None
     identity: _FileIdentity | None = None
+    snapshot: bytearray | None = None
     try:
         guard = _GuardedDatabaseFile.acquire(path)
         resolved = guard.path
         identity = guard.identity
-        connection = sqlite3.connect(
-            guard.sqlite_uri(),
-            uri=True,
-            check_same_thread=False,
-        )
-        creator = _PinnedConnectionCreator(connection)
+        snapshot = guard.snapshot()
+        try:
+            connection = sqlite3.connect(":memory:", check_same_thread=False)
+            creator = _PinnedConnectionCreator(connection)
+            connection.deserialize(snapshot)
+        finally:
+            _erase_snapshot(snapshot)
+            snapshot = None
+        guard.verify()
         _configure_connection(connection)
 
         engine = create_engine(
@@ -396,8 +391,6 @@ def _open_existing_read_only_catalog_inner(path: Path) -> _OpenOutcome:
             class_=Session,
             expire_on_commit=False,
         )
-        _validate_database_binding(engine, guard=guard)
-        guard.verify()
         _validate_catalog(engine)
         guard.verify()
         if _sidecars_exist(resolved) or _file_identity(resolved) != identity:
@@ -645,17 +638,6 @@ def _validate_catalog(engine: Engine) -> None:
             raise ReadOnlyCatalogError()
 
 
-def _validate_database_binding(engine: Engine, *, guard: _GuardedDatabaseFile) -> None:
-    with engine.connect() as connection:
-        databases = connection.exec_driver_sql("PRAGMA database_list").all()
-        if len(databases) != 1 or databases[0][1] != "main":
-            raise ReadOnlyCatalogError()
-        alias = databases[0][2]
-        if not isinstance(alias, str):
-            raise ReadOnlyCatalogError()
-        guard.validate_descriptor_alias(alias)
-
-
 def _configure_connection(connection: sqlite3.Connection) -> None:
     connection.execute("PRAGMA query_only=ON")
     connection.execute("PRAGMA temp_store=MEMORY")
@@ -706,6 +688,21 @@ def _clear_nonblocking(fd: int, *, nonblocking: int) -> None:
     except Exception as error:
         _detach_exception(error)
         raise ReadOnlyCatalogError() from None
+
+
+def _erase_snapshot(snapshot: bytearray | None) -> None:
+    if snapshot is None:
+        return
+    view = memoryview(snapshot)
+    try:
+        offset = 0
+        while offset < len(view):
+            chunk_size = min(_SNAPSHOT_CHUNK_BYTES, len(view) - offset)
+            view[offset : offset + chunk_size] = _ZERO_CHUNK[:chunk_size]
+            offset += chunk_size
+    finally:
+        view.release()
+        snapshot.clear()
 
 
 def _sidecars_exist(path: Path) -> bool:

@@ -354,68 +354,225 @@ def test_existing_catalog_connect_boundary_cannot_substitute_valid_database(
         assert catalog.repository.list_dataset_versions(limit=2) != [replacement_dataset]
 
     assert substitution_count == 1
-    assert len(connect_targets) == 1
-    assert "/dev/fd/" in connect_targets[0]
+    assert connect_targets == [":memory:"]
     assert str(path) not in connect_targets[0]
     assert _snapshot(path) == original_before
     assert _snapshot(replacement) == replacement_before
 
 
-def test_existing_catalog_accepts_only_identity_verified_same_descriptor_aliases(
+def test_existing_catalog_never_passes_a_disk_or_caller_path_to_sqlite(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     path = _database(tmp_path / "catalog.sqlite3")
-    catalog = open_existing_read_only_catalog(path)
-    guard = catalog._guard
-    guard_fd = guard._fd
-    assert guard_fd is not None
-    real_open = read_only_module.os.open
-    linux_alias = f"/proc/self/fd/{guard_fd}"
-    macos_alias = f"/dev/fd/{guard_fd}"
-    opened_aliases: list[str] = []
+    real_connect = sqlite3.connect
+    targets: list[tuple[str, dict[str, Any]]] = []
 
-    def evidenced_open(target: Any, flags: int, *args: Any, **kwargs: Any) -> int:
-        if str(target) == linux_alias:
-            opened_aliases.append(linux_alias)
-            return real_open(macos_alias, flags, *args, **kwargs)
-        return real_open(target, flags, *args, **kwargs)
+    def tracked_connect(*args: Any, **kwargs: Any) -> sqlite3.Connection:
+        targets.append((str(args[0]), dict(kwargs)))
+        return real_connect(*args, **kwargs)
 
-    monkeypatch.setattr(read_only_module.os, "open", evidenced_open)
-    guard.validate_descriptor_alias(macos_alias)
-    guard.validate_descriptor_alias(linux_alias)
-    with pytest.raises(ReadOnlyCatalogError):
-        guard.validate_descriptor_alias(str(path))
-    with pytest.raises(ReadOnlyCatalogError):
-        guard.validate_descriptor_alias(f"/dev/fd/{guard_fd + 1}")
-    catalog.close()
+    monkeypatch.setattr(read_only_module.sqlite3, "connect", tracked_connect)
+    with (
+        open_existing_read_only_catalog(path) as catalog,
+        catalog._engine.connect() as connection,
+    ):
+        databases = connection.exec_driver_sql("PRAGMA database_list").all()
 
-    assert opened_aliases == [linux_alias]
+    assert targets == [(":memory:", {"check_same_thread": False})]
+    assert databases[0][1:] == ("main", "")
+    assert all(row[2] == "" for row in databases)
+    assert str(path) not in repr(targets)
 
 
-def test_existing_catalog_rejects_allowed_descriptor_alias_with_wrong_identity(
+def test_existing_catalog_reads_fixed_pread_chunks_from_guarded_leaf(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     path = _database(tmp_path / "catalog.sqlite3")
-    replacement = _database(tmp_path / "replacement.sqlite3")
-    catalog = open_existing_read_only_catalog(path)
-    guard = catalog._guard
-    guard_fd = guard._fd
-    assert guard_fd is not None
-    alias = f"/dev/fd/{guard_fd}"
-    real_open = os.open
+    with sqlite3.connect(path) as connection:
+        connection.execute("CREATE TABLE local_padding (value BLOB NOT NULL)")
+        connection.execute(
+            "INSERT INTO local_padding VALUES (?)",
+            (bytes(read_only_module._SNAPSHOT_CHUNK_BYTES * 2 + 17),),
+        )
+    expected_size = path.stat().st_size
+    real_pread = os.pread
+    reads: list[tuple[int, int]] = []
 
-    def substituted_alias_open(target: Any, flags: int, *args: Any, **kwargs: Any) -> int:
-        if str(target) == alias:
-            return real_open(replacement, flags)
-        return real_open(target, flags, *args, **kwargs)
+    def tracked_pread(fd: int, size: int, offset: int) -> bytes:
+        reads.append((size, offset))
+        return real_pread(fd, size, offset)
 
-    monkeypatch.setattr(read_only_module.os, "open", substituted_alias_open)
+    monkeypatch.setattr(read_only_module.os, "pread", tracked_pread)
+    with open_existing_read_only_catalog(path):
+        pass
+
+    expected_reads: list[tuple[int, int]] = []
+    offset = 0
+    while offset < expected_size:
+        chunk_size = min(read_only_module._SNAPSHOT_CHUNK_BYTES, expected_size - offset)
+        expected_reads.append((chunk_size, offset))
+        offset += chunk_size
+    expected_reads.append((1, expected_size))
+    assert reads == expected_reads
+
+
+def test_existing_catalog_erases_snapshot_after_successful_deserialize(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = _database(tmp_path / "catalog.sqlite3")
+    real_connect = sqlite3.connect
+    retained_snapshots: list[bytearray] = []
+
+    class TrackingConnection(sqlite3.Connection):
+        def deserialize(self, data: bytes, /, *, name: str = "main") -> None:
+            retained_snapshots.append(cast(bytearray, data))
+            super().deserialize(data, name=name)
+
+    def tracked_connect(*args: Any, **kwargs: Any) -> sqlite3.Connection:
+        return real_connect(*args, factory=TrackingConnection, **kwargs)
+
+    monkeypatch.setattr(read_only_module.sqlite3, "connect", tracked_connect)
+    with open_existing_read_only_catalog(path):
+        pass
+
+    assert retained_snapshots == [bytearray()]
+
+
+@pytest.mark.parametrize("attack", ["swap", "truncate", "grow", "short"])
+def test_existing_catalog_fails_closed_on_snapshot_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    attack: str,
+) -> None:
+    path, _original_dataset = _database_with_dataset(tmp_path / "catalog.sqlite3")
+    replacement, _replacement_dataset = _database_with_dataset(
+        tmp_path / "replacement.sqlite3",
+        replacement=True,
+    )
+    original_before = _snapshot(path)
+    replacement_before = _snapshot(replacement)
+    original_bytes = path.read_bytes()
+    original_metadata = path.stat()
+    displaced = tmp_path / "displaced.sqlite3"
+    real_pread = os.pread
+    attacked = False
+
+    def attacking_pread(fd: int, size: int, offset: int) -> bytes:
+        nonlocal attacked
+        if attacked:
+            return real_pread(fd, size, offset)
+        attacked = True
+        if attack == "swap":
+            path.replace(displaced)
+            replacement.replace(path)
+            return real_pread(fd, size, offset)
+        if attack == "truncate":
+            with path.open("r+b") as stream:
+                stream.truncate(max(1, len(original_bytes) // 2))
+            return real_pread(fd, size, offset)
+        chunk = real_pread(fd, size, offset)
+        if attack == "grow":
+            with path.open("ab") as stream:
+                stream.write(b"growth")
+            return chunk
+        assert attack == "short"
+        return chunk[:-1]
+
+    monkeypatch.setattr(read_only_module.os, "pread", attacking_pread)
+    try:
+        with pytest.raises(ReadOnlyCatalogError):
+            open_existing_read_only_catalog(path)
+    finally:
+        if attack == "swap":
+            if path.exists():
+                path.replace(replacement)
+            if displaced.exists():
+                displaced.replace(path)
+        elif attack in {"truncate", "grow"}:
+            with path.open("r+b") as stream:
+                stream.write(original_bytes)
+                stream.truncate(len(original_bytes))
+            os.utime(
+                path,
+                ns=(original_metadata.st_atime_ns, original_metadata.st_mtime_ns),
+            )
+
+    assert attacked
+    assert _snapshot(path) == original_before
+    assert _snapshot(replacement) == replacement_before
+
+
+@pytest.mark.parametrize("kind", ["zero", "oversize"])
+def test_existing_catalog_rejects_invalid_snapshot_size_before_read_or_sqlite(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+) -> None:
+    path = tmp_path / f"{kind}.sqlite3"
+    size = 0 if kind == "zero" else read_only_module._MAX_CATALOG_BYTES + 1
+    with path.open("wb") as stream:
+        stream.truncate(size)
+    before = path.stat()
+
+    def forbidden_pread(*_args: Any, **_kwargs: Any) -> bytes:
+        raise AssertionError("oversize/zero catalog must not be read")
+
+    def forbidden_connect(*_args: Any, **_kwargs: Any) -> sqlite3.Connection:
+        raise AssertionError("oversize/zero catalog must not reach SQLite")
+
+    monkeypatch.setattr(read_only_module.os, "pread", forbidden_pread)
+    monkeypatch.setattr(read_only_module.sqlite3, "connect", forbidden_connect)
     with pytest.raises(ReadOnlyCatalogError):
-        guard.validate_descriptor_alias(alias)
-    monkeypatch.setattr(read_only_module.os, "open", real_open)
-    catalog.close()
+        open_existing_read_only_catalog(path)
+
+    after = path.stat()
+    assert (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns) == (
+        before.st_dev,
+        before.st_ino,
+        before.st_size,
+        before.st_mtime_ns,
+    )
+
+
+def test_existing_catalog_erases_snapshot_after_deserialize_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    marker = "snapshot-payload-hostile-marker"
+    path = _database(tmp_path / "catalog.sqlite3")
+    with sqlite3.connect(path) as connection:
+        connection.execute("CREATE TABLE local_marker (value TEXT NOT NULL)")
+        connection.execute("INSERT INTO local_marker VALUES (?)", (marker,))
+    retained_snapshots: list[bytearray] = []
+    injected = RuntimeError(marker)
+
+    class FailingConnection:
+        close_calls = 0
+
+        def deserialize(self, snapshot: bytearray) -> None:
+            assert marker.encode() in snapshot
+            retained_snapshots.append(snapshot)
+            raise injected
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+    connection = FailingConnection()
+
+    def failing_connect(*_args: Any, **_kwargs: Any) -> sqlite3.Connection:
+        return cast(sqlite3.Connection, connection)
+
+    monkeypatch.setattr(read_only_module.sqlite3, "connect", failing_connect)
+    with pytest.raises(ReadOnlyCatalogError) as error:
+        open_existing_read_only_catalog(path)
+
+    assert retained_snapshots == [bytearray()]
+    assert connection.close_calls == 1
+    assert injected.__traceback__ is None
+    assert marker not in _traceback_locals(error.value)
 
 
 def test_existing_catalog_refuses_reopen_after_pinned_connection_invalidation(
@@ -445,21 +602,19 @@ def test_existing_catalog_refuses_reopen_after_pinned_connection_invalidation(
     assert _snapshot(replacement) == replacement_before
 
 
-def test_existing_catalog_fails_closed_without_descriptor_binding(
+def test_existing_catalog_fails_closed_without_pread_support(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    path = _database(tmp_path / "descriptor-support-hostile-marker.sqlite3")
+    path = _database(tmp_path / "pread-support-hostile-marker.sqlite3")
     before = _snapshot(path)
-    missing_descriptor_root = tmp_path / "missing-descriptor-root"
-    monkeypatch.setattr(read_only_module, "_DESCRIPTOR_ROOT", missing_descriptor_root)
+    monkeypatch.setattr(read_only_module, "_PREAD_SUPPORTED", False)
 
     with pytest.raises(ReadOnlyCatalogError) as error:
         open_existing_read_only_catalog(path)
 
     assert _snapshot(path) == before
-    assert not missing_descriptor_root.exists()
-    assert "descriptor-support-hostile-marker" not in _traceback_locals(error.value)
+    assert "pread-support-hostile-marker" not in _traceback_locals(error.value)
 
 
 @pytest.mark.parametrize(
@@ -468,8 +623,11 @@ def test_existing_catalog_fails_closed_without_descriptor_binding(
         "normal",
         "acquire_cancel",
         "acquire_system_exit",
+        "snapshot_cancel",
+        "snapshot_system_exit",
         "connect_error",
         "connect_cancel",
+        "connect_system_exit",
         "validate_error",
         "validate_cancel",
     ],
@@ -521,11 +679,27 @@ def test_existing_catalog_closes_exact_guard_fd_on_every_open_outcome(
             raise injected
 
         monkeypatch.setattr(read_only_module, "_clear_nonblocking", failing_clear)
+    elif outcome.startswith("snapshot"):
+        injected = (
+            KeyboardInterrupt("snapshot-cancel-hostile-marker")
+            if outcome == "snapshot_cancel"
+            else SystemExit("snapshot-exit-hostile-marker")
+        )
+
+        def failing_pread(_fd: int, _size: int, _offset: int) -> bytes:
+            assert injected is not None
+            raise injected
+
+        monkeypatch.setattr(read_only_module.os, "pread", failing_pread)
     elif outcome.startswith("connect"):
         injected = (
             RuntimeError("connect-error-hostile-marker")
             if outcome == "connect_error"
-            else KeyboardInterrupt("connect-cancel-hostile-marker")
+            else (
+                KeyboardInterrupt("connect-cancel-hostile-marker")
+                if outcome == "connect_cancel"
+                else SystemExit("connect-exit-hostile-marker")
+            )
         )
 
         def failing_connect(*_args: Any, **_kwargs: Any) -> sqlite3.Connection:
@@ -548,7 +722,7 @@ def test_existing_catalog_closes_exact_guard_fd_on_every_open_outcome(
 
     if outcome == "normal":
         open_existing_read_only_catalog(path).close()
-    elif outcome == "acquire_system_exit":
+    elif outcome.endswith("system_exit"):
         with pytest.raises(SystemExit):
             open_existing_read_only_catalog(path)
     elif outcome.endswith("cancel"):
@@ -625,6 +799,9 @@ def test_existing_catalog_clears_nonblocking_before_sqlite_use(tmp_path: Path) -
     "outcome",
     [
         "normal",
+        "deserialize_error",
+        "deserialize_cancel",
+        "deserialize_system_exit",
         "configuration_error",
         "configuration_cancel",
         "validation_error",
@@ -638,9 +815,23 @@ def test_existing_catalog_closes_exact_sqlite_connection_once(
 ) -> None:
     path = _database(tmp_path / "connection-close.sqlite3")
     real_connect = sqlite3.connect
+    injected: BaseException | None = None
+    if outcome != "normal":
+        if outcome.endswith("error"):
+            injected = RuntimeError("connection setup failure")
+        elif outcome.endswith("system_exit"):
+            injected = SystemExit("connection setup exit")
+        else:
+            injected = KeyboardInterrupt()
 
     class TrackingConnection(sqlite3.Connection):
         close_calls = 0
+
+        def deserialize(self, data: bytes, /, *, name: str = "main") -> None:
+            if outcome.startswith("deserialize"):
+                assert injected is not None
+                raise injected
+            super().deserialize(data, name=name)
 
         def close(self) -> None:
             self.close_calls += 1
@@ -654,28 +845,27 @@ def test_existing_catalog_closes_exact_sqlite_connection_once(
         return connection
 
     monkeypatch.setattr(read_only_module.sqlite3, "connect", tracked_connect)
-    if outcome != "normal":
-        injected: BaseException = (
-            RuntimeError("connection setup failure")
-            if outcome.endswith("error")
-            else KeyboardInterrupt()
-        )
 
     if outcome.startswith("configuration"):
 
         def failing_configuration(_connection: sqlite3.Connection) -> None:
+            assert injected is not None
             raise injected
 
         monkeypatch.setattr(read_only_module, "_configure_connection", failing_configuration)
     elif outcome.startswith("validation"):
 
         def failing_validation(_engine: object) -> None:
+            assert injected is not None
             raise injected
 
         monkeypatch.setattr(read_only_module, "_validate_catalog", failing_validation)
 
     if outcome == "normal":
         open_existing_read_only_catalog(path).close()
+    elif outcome.endswith("system_exit"):
+        with pytest.raises(SystemExit):
+            open_existing_read_only_catalog(path)
     elif outcome.endswith("cancel"):
         with pytest.raises(KeyboardInterrupt):
             open_existing_read_only_catalog(path)
@@ -685,6 +875,8 @@ def test_existing_catalog_closes_exact_sqlite_connection_once(
 
     assert len(connections) == 1
     assert connections[0].close_calls == 1
+    if injected is not None:
+        assert injected.__traceback__ is None
 
 
 def test_open_does_not_convert_process_control_exceptions(
