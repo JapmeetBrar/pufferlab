@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from inspect import signature
 from pathlib import Path
 from uuid import UUID, uuid5
 
@@ -19,7 +20,7 @@ from pufferlab.contracts.retrieval import (
 from pufferlab.datasets.loader import load_fixture_corpus
 from pufferlab.datasets.models import DatasetManifest
 from pufferlab.datasets.schema import compile_namespace_write_spec
-from pufferlab.retrieval.config import bind_retrieval_catalog
+from pufferlab.retrieval.config import BoundSearchCatalog, bind_retrieval_catalog
 
 ROOT = Path(__file__).resolve().parents[3]
 FIXTURE_DIR = ROOT / "fixtures" / "tiny-corpus"
@@ -108,6 +109,65 @@ def test_binder_compiles_complete_contracts_and_exact_executable_summaries() -> 
     assert bound.catalog.configs[3].reranker_depth == 50
     assert len({config.id for config in bound.configs}) == 4
     assert all(len(config.config_hash) == 64 for config in bound.configs)
+    for persisted, executable in zip(bound.configs, bound.catalog.configs, strict=True):
+        assert executable.summary == _summary(persisted)
+        assert executable.mode is persisted.mode
+        assert executable.result_k == persisted.result_k
+        assert executable.candidate_k == persisted.candidate_k
+        assert executable.consistency == persisted.consistency
+        assert executable.rrf_rank_constant == (
+            persisted.rrf.rank_constant if persisted.rrf is not None else None
+        )
+        assert executable.rrf_weights == (
+            persisted.rrf.weights if persisted.rrf is not None else None
+        )
+        assert executable.reranker_depth == (
+            persisted.reranker.depth if persisted.reranker is not None else None
+        )
+
+
+def test_bound_catalog_rejects_stale_identity_after_provider_semantics_change() -> None:
+    manifest = load_fixture_corpus(FIXTURE_DIR).manifest
+    dataset = _dataset_version(manifest)
+    bound = bind_retrieval_catalog(dataset, manifest)
+    bm25 = bound.configs[0]
+    tampered = bm25.model_copy(
+        update={
+            "result_k": 1,
+            "candidate_k": 1,
+            "lexical": LexicalSpec(title_weight=2.0, body_weight=99.0),
+        }
+    )
+
+    with pytest.raises(ValueError, match="identity"):
+        BoundSearchCatalog(
+            dataset_version=dataset,
+            manifest=manifest,
+            configs=(tampered, *bound.configs[1:]),
+        )
+    assert "catalog" not in signature(BoundSearchCatalog).parameters
+
+
+def test_bound_catalog_derives_all_executable_depth_and_lexical_values_from_contracts() -> None:
+    manifest = load_fixture_corpus(FIXTURE_DIR).manifest
+    dataset = _dataset_version(manifest)
+
+    bound = bind_retrieval_catalog(
+        dataset,
+        manifest,
+        result_k=1,
+        candidate_k=1,
+        reranker_depth=1,
+        lexical=LexicalSpec(title_weight=2.0, body_weight=99.0),
+    )
+
+    assert all(config.result_k == 1 for config in bound.configs)
+    assert all(config.candidate_k == 1 for config in bound.configs)
+    assert all(config.result_k == 1 for config in bound.catalog.configs)
+    assert all(config.candidate_k == 1 for config in bound.catalog.configs)
+    assert bound.catalog.configs[0].lexical_fields == (("title", 2.0), ("body", 99.0))
+    assert bound.catalog.configs[2].lexical_fields == (("title", 2.0), ("body", 99.0))
+    assert bound.catalog.configs[3].reranker_depth == 1
 
 
 def test_binder_is_idempotent_and_dataset_revision_and_namespace_bound() -> None:

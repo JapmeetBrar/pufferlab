@@ -1,15 +1,27 @@
 import traceback
+from datetime import UTC, datetime
+from inspect import signature
 from pathlib import Path
+from uuid import UUID
 
 import pytest
 from fastapi.testclient import TestClient
 from pufferlab.config import Settings
+from pufferlab.contracts.datasets import (
+    DatasetStatus,
+    DatasetVersion,
+    FtsProfile,
+    IndexProfile,
+)
 from pufferlab.contracts.filters import FilterLogical, FilterPredicate, LogicalOp, PredicateOp
 from pufferlab.contracts.search import SearchCompareRequest
 from pufferlab.datasets.loader import load_fixture_corpus
+from pufferlab.datasets.models import DatasetManifest
+from pufferlab.datasets.schema import compile_namespace_write_spec
 from pufferlab.main import create_app
 from pufferlab.providers.rerankers import Reranker
 from pufferlab.providers.types import ProviderQueryResult
+from pufferlab.retrieval.config import bind_retrieval_catalog
 from pufferlab.retrieval.errors import SearchError
 from pufferlab.retrieval.runtime import RuntimeSearchBackend
 from pufferlab.retrieval.types import QueryEmbedding, SearchExecuteRequest
@@ -83,6 +95,46 @@ def _settings(**overrides: object) -> Settings:
     }
     values.update(overrides)
     return Settings.model_validate(values)
+
+
+def _bound_dataset_version() -> tuple[DatasetManifest, DatasetVersion]:
+    corpus = load_fixture_corpus(FIXTURE_DIR)
+    manifest = corpus.manifest
+    write_spec = compile_namespace_write_spec(manifest)
+    dataset = DatasetVersion(
+        id=UUID("8f8248a2-ef60-4c57-861e-5e94782e9907"),
+        slug=manifest.slug,
+        version=manifest.version,
+        namespace="pufferlab-bound-runtime",
+        index_profile=IndexProfile(
+            id=f"{manifest.slug}-{write_spec.schema_hash[:16]}",
+            embedding_provider=manifest.embedding.provider,
+            embedding_model=manifest.embedding.model,
+            embedding_revision=manifest.embedding.revision,
+            vector_attribute=manifest.vector.attribute,
+            vector_dimensions=manifest.embedding.dimensions,
+            vector_dtype=manifest.vector.dtype,
+            distance_metric=manifest.vector.distance_metric,
+            fts_profile=FtsProfile(
+                tokenizer=manifest.fts.tokenizer,
+                case_sensitive=manifest.fts.case_sensitive,
+                language=manifest.fts.language,
+                stemming=manifest.fts.stemming,
+                remove_stopwords=manifest.fts.remove_stopwords,
+                ascii_folding=manifest.fts.ascii_folding,
+                max_token_length=manifest.fts.max_token_length,
+                k1=manifest.fts.k1,
+                b=manifest.fts.b,
+                k3=manifest.fts.k3,
+            ),
+            schema_hash=write_spec.schema_hash,
+        ),
+        document_count=len(corpus.documents),
+        corpus_hash=corpus.corpus_hash,
+        status=DatasetStatus.READY,
+        created_at=datetime(2014, 9, 26, tzinfo=UTC),
+    )
+    return manifest, dataset
 
 
 def _runtime_without_credentials() -> tuple[
@@ -200,6 +252,48 @@ async def test_runtime_executes_one_config_and_rejects_a_different_namespace() -
             )
         )
     assert len(provider_factory.provider.bm25_calls) == 1
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_runtime_accepts_only_the_complete_bound_evaluation_catalog() -> None:
+    manifest, dataset = _bound_dataset_version()
+    bound = bind_retrieval_catalog(dataset, manifest)
+    provider_factory = FakeProviderFactory()
+    runtime = RuntimeSearchBackend(
+        settings=_settings(pufferlab_search_namespace=dataset.namespace),
+        manifest=manifest,
+        bound_catalog=bound,
+        provider_factory=provider_factory,
+        embedder_factory=FakeEmbedderFactory(),
+    )
+    bm25, _, _, _ = runtime.list_configs()
+
+    result = await runtime.search_one(
+        SearchExecuteRequest(
+            namespace=dataset.namespace,
+            query_text="query",
+            config_id=bm25.id,
+        )
+    )
+
+    assert result.result.config == bound.catalog.summaries()[0]
+    assert provider_factory.provider.bm25_calls[0]["top_k"] == 50
+    assert "catalog" not in signature(RuntimeSearchBackend).parameters
+    assert "bound_catalog" in signature(RuntimeSearchBackend).parameters
+
+    with pytest.raises(ValueError, match="namespace"):
+        RuntimeSearchBackend(
+            settings=_settings(pufferlab_search_namespace="pufferlab-wrong"),
+            manifest=manifest,
+            bound_catalog=bound,
+        )
+    with pytest.raises(ValueError, match="manifest"):
+        RuntimeSearchBackend(
+            settings=_settings(pufferlab_search_namespace=dataset.namespace),
+            manifest=manifest.model_copy(update={"title": "different manifest"}),
+            bound_catalog=bound,
+        )
     await runtime.close()
 
 

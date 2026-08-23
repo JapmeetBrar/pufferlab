@@ -13,13 +13,11 @@ from pufferlab.datasets.loader import load_fixture_corpus
 from pufferlab.datasets.models import DatasetManifest
 from pufferlab.datasets.schema import compile_namespace_write_spec
 from pufferlab.providers.rerankers import (
-    DEFAULT_RERANKER_MODEL,
-    DEFAULT_RERANKER_REVISION,
     Reranker,
     SentenceTransformersReranker,
 )
 from pufferlab.providers.turbopuffer import TurbopufferProvider
-from pufferlab.retrieval.config import SearchConfigCatalog, build_search_catalog
+from pufferlab.retrieval.config import BoundSearchCatalog, build_search_catalog
 from pufferlab.retrieval.embeddings import SentenceTransformerQueryEmbedder
 from pufferlab.retrieval.errors import SearchError, invalid_search, search_unavailable
 from pufferlab.retrieval.filter_validation import FixtureFilterValidator
@@ -58,7 +56,7 @@ class RuntimeSearchBackend:
         *,
         settings: Settings,
         manifest: DatasetManifest,
-        catalog: SearchConfigCatalog | None = None,
+        bound_catalog: BoundSearchCatalog | None = None,
         provider_factory: _ProviderFactory | None = None,
         embedder_factory: _EmbedderFactory | None = None,
         reranker_factory: _RerankerFactory | None = None,
@@ -67,7 +65,23 @@ class RuntimeSearchBackend:
         self._manifest = manifest
         self._write_spec = compile_namespace_write_spec(manifest)
         self._filter_validator = FixtureFilterValidator(self._write_spec)
-        self._catalog: SearchConfigCatalog = catalog or build_search_catalog(manifest)
+        if bound_catalog is not None:
+            if bound_catalog.manifest != manifest:
+                raise ValueError("bound retrieval catalog manifest does not match runtime manifest")
+            configured_namespace = settings.pufferlab_search_namespace
+            if configured_namespace != bound_catalog.dataset_version.namespace:
+                raise ValueError(
+                    "bound retrieval catalog namespace does not match runtime namespace"
+                )
+            self._catalog = bound_catalog.catalog
+        else:
+            self._catalog = build_search_catalog(manifest)
+        self._bound_catalog = bound_catalog
+        reranker_config = self._catalog.configs[-1]
+        if reranker_config.reranker_model is None or reranker_config.reranker_revision is None:
+            raise ValueError("retrieval catalog is missing its reranker model identity")
+        self._reranker_model = reranker_config.reranker_model
+        self._reranker_revision = reranker_config.reranker_revision
         self._provider_factory: _ProviderFactory = provider_factory or TurbopufferProvider
         self._embedder_factory: _EmbedderFactory = (
             embedder_factory or SentenceTransformerQueryEmbedder
@@ -142,8 +156,8 @@ class RuntimeSearchBackend:
                 region=self._settings.turbopuffer_region,
             )
             reranker = self._reranker_factory(
-                model=DEFAULT_RERANKER_MODEL,
-                revision=DEFAULT_RERANKER_REVISION,
+                model=self._reranker_model,
+                revision=self._reranker_revision,
             )
             service = SearchCompareService(
                 namespace=namespace,

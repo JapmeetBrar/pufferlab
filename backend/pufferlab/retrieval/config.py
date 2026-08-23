@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field
 from uuid import UUID, uuid5
 
 from pufferlab.contracts.datasets import DatasetStatus, DatasetVersion
@@ -66,15 +66,24 @@ class SearchConfigCatalog:
 
 @dataclass(frozen=True, slots=True)
 class BoundSearchCatalog:
-    """Persistable retrieval revisions and their exact executable counterparts."""
+    """One dataset-bound persisted suite with an executable catalog derived from it."""
 
+    dataset_version: DatasetVersion
+    manifest: DatasetManifest
     configs: tuple[RetrievalConfig, ...]
-    catalog: SearchConfigCatalog
+    catalog: SearchConfigCatalog = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
-        persisted_summaries = tuple(_contract_summary(config) for config in self.configs)
-        if persisted_summaries != self.catalog.summaries():
-            raise ValueError("persisted and executable retrieval configurations must match")
+        _validate_dataset_binding(self.dataset_version, self.manifest, namespace=None)
+        object.__setattr__(
+            self,
+            "catalog",
+            _compile_bound_executable_catalog(
+                self.dataset_version,
+                self.manifest,
+                self.configs,
+            ),
+        )
 
 
 def build_search_catalog(
@@ -275,32 +284,13 @@ def bind_retrieval_catalog(
     )
 
     persisted: list[RetrievalConfig] = []
-    rebound: list[SeededSearchConfig] = []
     for seeded, (mode, lexical_value, vector, rrf, reranker) in zip(
         executable.configs,
         specifications,
         strict=True,
     ):
-        identity_payload = {
-            "candidate_k": candidate_k,
-            "consistency": consistency,
-            "dataset_version_id": str(dataset_version.id),
-            "filters": None,
-            "lexical": (
-                lexical_value.model_dump(mode="json") if lexical_value is not None else None
-            ),
-            "mode": mode.value,
-            "name": seeded.summary.name,
-            "reranker": reranker.model_dump(mode="json") if reranker is not None else None,
-            "result_k": result_k,
-            "revision": 1,
-            "rrf": rrf.model_dump(mode="json") if rrf is not None else None,
-            "vector": vector.model_dump(mode="json") if vector is not None else None,
-        }
-        canonical = _canonical_json(identity_payload)
-        config_hash = hashlib.sha256(canonical.encode()).hexdigest()
-        config = RetrievalConfig(
-            id=uuid5(_CONFIG_ID_NAMESPACE, canonical),
+        draft = RetrievalConfig(
+            id=UUID(int=0),
             revision=1,
             name=seeded.summary.name,
             dataset_version_id=dataset_version.id,
@@ -313,12 +303,116 @@ def bind_retrieval_catalog(
             vector=vector,
             rrf=rrf,
             reranker=reranker,
-            config_hash=config_hash,
+            config_hash="pending",
             created_at=dataset_version.created_at,
         )
+        canonical = _canonical_json(_retrieval_identity_payload(draft))
+        config_hash = hashlib.sha256(canonical.encode()).hexdigest()
+        config = draft.model_copy(
+            update={
+                "id": uuid5(_CONFIG_ID_NAMESPACE, canonical),
+                "config_hash": config_hash,
+            }
+        )
         persisted.append(config)
-        rebound.append(replace(seeded, summary=_contract_summary(config)))
-    return BoundSearchCatalog(tuple(persisted), SearchConfigCatalog(tuple(rebound)))
+    # Construction derives the catalog again from the immutable contracts. This intentionally
+    # treats the initial compiler output only as a contract authoring aid, never as runtime input.
+    return BoundSearchCatalog(
+        dataset_version=dataset_version,
+        manifest=manifest,
+        configs=tuple(persisted),
+    )
+
+
+def _compile_bound_executable_catalog(
+    dataset_version: DatasetVersion,
+    manifest: DatasetManifest,
+    configs: tuple[RetrievalConfig, ...],
+) -> SearchConfigCatalog:
+    expected_modes = (
+        RetrievalMode.BM25,
+        RetrievalMode.VECTOR,
+        RetrievalMode.HYBRID_RRF,
+        RetrievalMode.HYBRID_RERANK,
+    )
+    if tuple(config.mode for config in configs) != expected_modes:
+        raise ValueError("bound retrieval configs must contain the canonical four-mode order")
+
+    seeded: list[SeededSearchConfig] = []
+    for config in configs:
+        # model_copy can bypass Pydantic validation, so crossing into executable code always
+        # revalidates the complete immutable contract before reading individual fields.
+        try:
+            validated = RetrievalConfig.model_validate(config.model_dump(mode="python"))
+        except ValueError as error:
+            raise ValueError("bound retrieval config is not contract-valid") from error
+        if validated != config:
+            raise ValueError("bound retrieval config changed during validation")
+        if config.dataset_version_id != dataset_version.id:
+            raise ValueError("retrieval config does not match the bound dataset version")
+        if config.created_at != dataset_version.created_at:
+            raise ValueError("retrieval config creation time does not match the dataset revision")
+        if config.filters is not None:
+            raise ValueError("bound evaluation retrieval configs do not support filters")
+
+        canonical = _canonical_json(_retrieval_identity_payload(config))
+        expected_hash = hashlib.sha256(canonical.encode()).hexdigest()
+        expected_id = uuid5(_CONFIG_ID_NAMESPACE, canonical)
+        if config.config_hash != expected_hash or config.id != expected_id:
+            raise ValueError("retrieval config identity does not match its immutable payload")
+
+        lexical_fields = (
+            _compile_lexical_fields(manifest, config.lexical)
+            if config.lexical is not None
+            else None
+        )
+        vector_attribute: str | None = None
+        embedding_model: str | None = None
+        embedding_revision: str | None = None
+        embedding_dimensions: int | None = None
+        distance_metric: DistanceMetric | None = None
+        if config.vector is not None:
+            if (
+                config.vector.attribute != dataset_version.index_profile.vector_attribute
+                or config.vector.embedding_model != dataset_version.index_profile.embedding_model
+            ):
+                raise ValueError("retrieval vector spec does not match the bound index profile")
+            vector_attribute = config.vector.attribute
+            embedding_model = config.vector.embedding_model
+            embedding_revision = dataset_version.index_profile.embedding_revision
+            embedding_dimensions = dataset_version.index_profile.vector_dimensions
+            distance_metric = dataset_version.index_profile.distance_metric
+
+        seeded.append(
+            SeededSearchConfig(
+                summary=_contract_summary(config),
+                mode=config.mode,
+                result_k=config.result_k,
+                candidate_k=config.candidate_k,
+                consistency=config.consistency,
+                lexical_fields=lexical_fields,
+                vector_attribute=vector_attribute,
+                embedding_model=embedding_model,
+                embedding_revision=embedding_revision,
+                embedding_dimensions=embedding_dimensions,
+                distance_metric=distance_metric,
+                rrf_rank_constant=(config.rrf.rank_constant if config.rrf is not None else None),
+                rrf_weights=config.rrf.weights if config.rrf is not None else None,
+                reranker_model=(config.reranker.model if config.reranker is not None else None),
+                reranker_revision=(
+                    config.reranker.revision if config.reranker is not None else None
+                ),
+                reranker_depth=(config.reranker.depth if config.reranker is not None else None),
+            )
+        )
+    return SearchConfigCatalog(tuple(seeded))
+
+
+def _retrieval_identity_payload(config: RetrievalConfig) -> dict[str, object]:
+    return config.model_dump(
+        mode="json",
+        exclude={"id", "config_hash", "created_at"},
+    )
 
 
 def _compile_lexical_fields(
