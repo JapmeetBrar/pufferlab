@@ -176,8 +176,16 @@ test("failed capability refetch invalidates configured readiness without browser
   const initialConfigGets = configGets.length;
   expect(initialConfigGets).toBeGreaterThan(0);
 
+  const runListResponsePromise = page.waitForResponse((response) =>
+    response.request().method() === "GET" &&
+    response.url().endsWith("/api/v1/eval-runs?limit=50"),
+  );
   await page.getByRole("link", { name: "Evaluation runs" }).click();
+  const runListResponse = await runListResponsePromise;
+  expect(runListResponse.status()).toBe(200);
+  expect(await runListResponse.finished()).toBeNull();
   await expect(page.getByRole("heading", { name: "Evaluation runs", level: 1 })).toBeFocused();
+  await expect(page.locator(`a[href="/runs/${runId}"]`)).toBeVisible();
   await page.getByRole("link", { name: "Playground" }).click();
 
   await expect(page.getByText("Live-search setup unavailable")).toBeVisible();
