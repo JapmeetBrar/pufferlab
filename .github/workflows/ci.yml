@@ -27,6 +27,8 @@ jobs:
         run: uv run mypy
       - name: Test
         run: uv run pytest
+      - name: Audit dataset artifact boundary
+        run: uv run python scripts/audit_dataset_artifacts.py
       - name: Check OpenAPI snapshot
         run: uv run python scripts/generate_openapi.py --check
 

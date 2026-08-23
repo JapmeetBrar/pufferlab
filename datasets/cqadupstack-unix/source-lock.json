@@ -1,0 +1,80 @@
+{
+  "format_version": 1,
+  "dataset": "CQADupStack",
+  "subset": "unix",
+  "archive": {
+    "url": "https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/cqadupstack.zip",
+    "bytes": 5343728040,
+    "published_md5": "4e41456d7df8ee7760a7f866133bda78",
+    "completed_download_sha256": "6072f7d345496387d24194c8af35c5fb6c2f0e5f9130c5b4a78b98bbfac88558",
+    "last_modified": "Tue, 20 Apr 2021 14:25:04 GMT",
+    "etag": "\"607ee440-13e82d1a8\""
+  },
+  "beir": {
+    "url": "https://github.com/beir-cellar/beir/tree/ef83d29307061c65d04b035b4f4e7c18bd8374af",
+    "commit": "ef83d29307061c65d04b035b4f4e7c18bd8374af",
+    "license_url": "https://github.com/beir-cellar/beir/blob/ef83d29307061c65d04b035b4f4e7c18bd8374af/LICENSE"
+  },
+  "cqadupstack": {
+    "url": "https://github.com/D1Doris/CQADupStack/tree/f73fc5b2cc708c61d33bc76a3de93de0bf5bf584",
+    "commit": "f73fc5b2cc708c61d33bc76a3de93de0bf5bf584",
+    "license_url": "https://github.com/D1Doris/CQADupStack/blob/f73fc5b2cc708c61d33bc76a3de93de0bf5bf584/LICENSE.md"
+  },
+  "beir_md5_registry_url": "https://github.com/beir-cellar/beir/blob/ef83d29307061c65d04b035b4f4e7c18bd8374af/examples/dataset/md5.csv",
+  "paper_doi": "10.1145/2838931.2838934",
+  "source_dump_date": "2014-09-26",
+  "source_site": "Unix & Linux Stack Exchange",
+  "source_site_url": "https://unix.stackexchange.com/",
+  "content_license": "CC-BY-SA-2.5 OR CC-BY-SA-3.0",
+  "content_license_urls": [
+    "https://creativecommons.org/licenses/by-sa/2.5/",
+    "https://creativecommons.org/licenses/by-sa/3.0/"
+  ],
+  "stack_exchange_license_chronology_url": "https://stackoverflow.com/help/licensing",
+  "beir_paper_url": "https://arxiv.org/abs/2104.08663",
+  "members": {
+    "corpus": {
+      "path": "cqadupstack/unix/corpus.jsonl",
+      "records": 47382,
+      "compressed_bytes": 17356767,
+      "uncompressed_bytes": 52466222,
+      "crc32": "6bdfe142"
+    },
+    "queries": {
+      "path": "cqadupstack/unix/queries.jsonl",
+      "records": 1072,
+      "compressed_bytes": 290036323,
+      "uncompressed_bytes": 826061363,
+      "crc32": "fe744c49"
+    },
+    "qrels": {
+      "path": "cqadupstack/unix/qrels/test.tsv",
+      "records": 1693,
+      "compressed_bytes": 10142,
+      "uncompressed_bytes": 26039,
+      "crc32": "e6d85907"
+    }
+  },
+  "preprocessing": {
+    "version": "pufferlab-cqadupstack-unix-v1",
+    "specification_sha256": "e28559f846751ad6aae5d85d6a8871be9c75a9de8fb39954475259305c8e8c32"
+  },
+  "attribution_availability": {
+    "observed_corpus_fields": ["_id", "title", "text", "metadata"],
+    "observed_query_fields": ["_id", "text", "metadata"],
+    "author_display_name": "unavailable_in_pinned_archive",
+    "contribution_timestamp": "unavailable_in_pinned_archive",
+    "revision_timestamp": "unavailable_in_pinned_archive",
+    "license_selection": "CC-BY-SA-2.5-or-3.0_due_to_missing_timestamp"
+  },
+  "forbidden_source_token_windows": [
+    {
+      "token_count": 7,
+      "sha256": "24b6ba6ae914d0cf90e562a337b6d3ac5fe280a30a2fcd18fffba15701552970"
+    },
+    {
+      "token_count": 5,
+      "sha256": "c3e9237ee91ae4478585746ec2f4acc8d0112ece8c89ccd2830203fc6535d1b7"
+    }
+  ]
+}
