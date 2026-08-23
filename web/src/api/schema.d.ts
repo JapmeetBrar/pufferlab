@@ -638,6 +638,8 @@ export interface components {
              * @constant
              */
             data_origin: "live";
+            /** Failed Counterfactual Probes */
+            failed_counterfactual_probes?: components["schemas"]["ReplayFailedCounterfactualProbe"][];
             /** Observability Notice */
             observability_notice: string;
             /** Observations */
@@ -836,6 +838,16 @@ export interface components {
         ForensicObservation: {
             certainty: components["schemas"]["EvidenceCertainty"];
             code: components["schemas"]["ForensicCode"];
+            /**
+             * Config Id
+             * Format: uuid
+             */
+            config_id: string;
+            /**
+             * Document Id
+             * Format: uuid
+             */
+            document_id: string;
             /** Evidence */
             evidence: components["schemas"]["EvidenceItem"][];
             /** Observed At */
@@ -1312,6 +1324,31 @@ export interface components {
             vector_candidate_count: number;
             /** Warnings */
             warnings: components["schemas"]["ForensicWarning"][];
+        };
+        /** ReplayFailedCounterfactualProbe */
+        ReplayFailedCounterfactualProbe: {
+            /**
+             * Config Id
+             * Format: uuid
+             */
+            config_id: string;
+            /**
+             * Observed At
+             * Format: date-time
+             */
+            observed_at: string;
+            /**
+             * Origin
+             * @default live_replay_counterfactual_probe
+             * @constant
+             */
+            origin: "live_replay_counterfactual_probe";
+            /**
+             * Trace Id
+             * Format: uuid
+             */
+            trace_id: string;
+            warning: components["schemas"]["ForensicWarning"];
         };
         /** ReplayProbeCandidate */
         ReplayProbeCandidate: {
