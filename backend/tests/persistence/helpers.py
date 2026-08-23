@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID, uuid5
@@ -9,6 +10,7 @@ from pufferlab.contracts.datasets import (
     IndexProfile,
 )
 from pufferlab.contracts.evals import (
+    ConfigRunSummary,
     EvalRun,
     EvalRunStatus,
     JudgedQuery,
@@ -156,3 +158,25 @@ def make_outcome(
         payload={"ranked_document_ids": [str(stable_uuid(f"result-{value}"))], "value": value},
         created_at=FIXED_TIME,
     )
+
+
+def summarize_outcomes(
+    run: EvalRun,
+    outcomes: Sequence[QueryOutcome],
+) -> list[ConfigRunSummary]:
+    summaries: list[ConfigRunSummary] = []
+    for config_id in [run.baseline_config_id, *run.candidate_config_ids]:
+        config_outcomes = [outcome for outcome in outcomes if outcome.config_id == config_id]
+        summaries.append(
+            ConfigRunSummary(
+                config_id=config_id,
+                metrics=[],
+                completed_queries=sum(
+                    outcome.status is QueryOutcomeStatus.SUCCEEDED for outcome in config_outcomes
+                ),
+                failed_queries=sum(
+                    outcome.status is QueryOutcomeStatus.FAILED for outcome in config_outcomes
+                ),
+            )
+        )
+    return summaries

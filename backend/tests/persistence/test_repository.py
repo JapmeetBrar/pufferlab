@@ -1,18 +1,29 @@
+import json
+from datetime import timedelta, timezone
+
 import pytest
-from pufferlab.contracts.evals import EvalRunStatus
+from pufferlab.contracts.evals import ConfigRunSummary, EvalRunStatus
 from pufferlab.persistence import (
     Database,
     ImmutableRecordError,
     InvalidRunTransitionError,
     PersistenceValidationError,
     PufferLabRepository,
+    QueryOutcomeStatus,
     RecordNotFoundError,
 )
-from pufferlab.persistence.canonical import canonical_json
-from pufferlab.persistence.models import DatasetVersionRow
+from pufferlab.persistence.canonical import canonical_json, canonical_utc
+from pufferlab.persistence.models import DatasetVersionRow, EvalRunRow, QueryOutcomeRow
 from sqlalchemy import select
 
-from .helpers import SampleGraph, make_outcome, persist_graph
+from .helpers import (
+    FIXED_TIME,
+    SampleGraph,
+    make_outcome,
+    persist_graph,
+    stable_uuid,
+    summarize_outcomes,
+)
 
 
 def test_immutable_revision_graph_round_trips_exactly(
@@ -36,7 +47,17 @@ def test_immutable_revision_graph_round_trips_exactly(
         )
     assert stored_json == canonical_json(sample_graph.dataset)
 
-    # Exact replays are idempotent; a changed payload under the same identity is not.
+    # Same-instant offsets and exact replays are idempotent; changed payloads are not.
+    pacific_time = FIXED_TIME.astimezone(timezone(-timedelta(hours=7)))
+    repository.put_dataset_version(
+        sample_graph.dataset.model_copy(update={"created_at": pacific_time})
+    )
+    for config in sample_graph.configs:
+        repository.put_retrieval_config(config.model_copy(update={"created_at": pacific_time}))
+    repository.put_query_set(
+        sample_graph.query_set.model_copy(update={"created_at": pacific_time}),
+        sample_graph.queries,
+    )
     persist_graph(repository, sample_graph)
     with pytest.raises(ImmutableRecordError, match="immutable revision"):
         repository.put_dataset_version(
@@ -50,6 +71,55 @@ def test_immutable_revision_graph_round_trips_exactly(
     changed_queries[0] = changed_queries[0].model_copy(update={"text": "Different text"})
     with pytest.raises(ImmutableRecordError, match="immutable revision"):
         repository.put_query_set(sample_graph.query_set, changed_queries)
+
+
+def test_revision_run_and_outcome_payload_times_are_canonical_utc(
+    database: Database,
+    repository: PufferLabRepository,
+    sample_graph: SampleGraph,
+) -> None:
+    pacific_time = FIXED_TIME.astimezone(timezone(-timedelta(hours=7)))
+    offset_dataset = sample_graph.dataset.model_copy(update={"created_at": pacific_time})
+    repository.put_dataset_version(offset_dataset)
+    for config in sample_graph.configs:
+        repository.put_retrieval_config(config.model_copy(update={"created_at": pacific_time}))
+    repository.put_query_set(
+        sample_graph.query_set.model_copy(update={"created_at": pacific_time}),
+        sample_graph.queries,
+    )
+
+    run = sample_graph.make_run("offset-time").model_copy(update={"created_at": pacific_time})
+    repository.create_run(run)
+    repository.create_run(run.model_copy(update={"created_at": FIXED_TIME}))
+    repository.transition_run(run.id, EvalRunStatus.RUNNING, at=pacific_time)
+    offset_outcome = make_outcome(
+        run,
+        sample_graph.configs[0].id,
+        sample_graph.queries[0].id,
+    ).model_copy(update={"created_at": pacific_time})
+    repository.record_outcome(offset_outcome)
+    repository.record_outcome(offset_outcome.model_copy(update={"created_at": FIXED_TIME}))
+
+    expected = canonical_utc(FIXED_TIME, field_name="test")
+    with database.session_factory() as session:
+        dataset_row = session.get(DatasetVersionRow, str(sample_graph.dataset.id))
+        run_row = session.get(EvalRunRow, str(run.id))
+        outcome_row = session.get(
+            QueryOutcomeRow,
+            (str(run.id), str(offset_outcome.config_id), str(offset_outcome.query_id)),
+        )
+    assert dataset_row is not None
+    assert run_row is not None
+    assert outcome_row is not None
+    assert dataset_row.created_at == json.loads(dataset_row.payload_json)["created_at"] == expected
+    assert json.loads(run_row.payload_json)["created_at"] == expected
+    assert json.loads(run_row.payload_json)["started_at"] == expected
+    assert outcome_row.created_at == json.loads(outcome_row.payload_json)["created_at"] == expected
+
+    with pytest.raises(PersistenceValidationError, match="timezone-aware"):
+        repository.put_dataset_version(
+            sample_graph.dataset.model_copy(update={"created_at": FIXED_TIME.replace(tzinfo=None)})
+        )
 
 
 def test_query_set_validation_rolls_back_the_whole_revision(
@@ -104,7 +174,8 @@ def test_outcomes_drive_progress_and_completed_runs_are_immutable(
         for index, config in enumerate(sample_graph.configs, start=3):
             repository.record_outcome(make_outcome(run, config.id, query.id, value=index))
 
-    completed = repository.transition_run(run.id, EvalRunStatus.COMPLETED)
+    outcomes = repository.list_outcomes(run.id)
+    completed = repository.complete_run(run.id, summarize_outcomes(run, outcomes))
     assert completed.completed_queries == completed.total_queries == 2
     assert completed.completed_at is not None
     assert len(repository.list_outcomes(run.id)) == 4
@@ -120,7 +191,7 @@ def test_outcomes_drive_progress_and_completed_runs_are_immutable(
     [
         (EvalRunStatus.QUEUED, EvalRunStatus.RUNNING, True),
         (EvalRunStatus.QUEUED, EvalRunStatus.CANCELLED, True),
-        (EvalRunStatus.QUEUED, EvalRunStatus.INTERRUPTED, True),
+        (EvalRunStatus.QUEUED, EvalRunStatus.INTERRUPTED, False),
         (EvalRunStatus.QUEUED, EvalRunStatus.COMPLETED, False),
         (EvalRunStatus.QUEUED, EvalRunStatus.FAILED, False),
         (EvalRunStatus.RUNNING, EvalRunStatus.CANCELLED, True),
@@ -149,7 +220,7 @@ def test_run_transition_graph(
             repository.transition_run(run.id, target)
 
 
-def test_startup_recovery_interrupts_queued_and_running_only(
+def test_startup_recovery_interrupts_running_and_preserves_queued(
     repository: PufferLabRepository,
     sample_graph: SampleGraph,
 ) -> None:
@@ -170,8 +241,54 @@ def test_startup_recovery_interrupts_queued_and_running_only(
 
     interrupted = repository.interrupt_stale_runs()
 
-    assert set(interrupted) == {queued.id, running.id}
-    assert repository.get_run(queued.id).status is EvalRunStatus.INTERRUPTED
+    assert interrupted == [running.id]
+    queued_after_recovery = repository.get_run(queued.id)
+    assert queued_after_recovery.status is EvalRunStatus.QUEUED
+    assert queued_after_recovery.completed_at is None
     assert repository.get_run(running.id).status is EvalRunStatus.INTERRUPTED
     assert repository.list_outcomes(running.id) == [durable_outcome]
     assert repository.get_run(cancelled.id).status is EvalRunStatus.CANCELLED
+
+
+def test_completion_requires_exact_summaries_matching_durable_outcomes(
+    repository: PufferLabRepository,
+    sample_graph: SampleGraph,
+) -> None:
+    persist_graph(repository, sample_graph)
+    run = sample_graph.make_run("summary-validation")
+    repository.create_run(run)
+    repository.transition_run(run.id, EvalRunStatus.RUNNING)
+    for query_index, query in enumerate(sample_graph.queries):
+        for config_index, config in enumerate(sample_graph.configs):
+            outcome = make_outcome(run, config.id, query.id)
+            if query_index == config_index == 0:
+                outcome = outcome.model_copy(update={"status": QueryOutcomeStatus.FAILED})
+            repository.record_outcome(outcome)
+    summaries = summarize_outcomes(run, repository.list_outcomes(run.id))
+
+    with pytest.raises(InvalidRunTransitionError, match="require final config summaries"):
+        repository.transition_run(run.id, EvalRunStatus.COMPLETED)
+    with pytest.raises(PersistenceValidationError, match="exactly one ordered summary"):
+        repository.complete_run(run.id, summaries[:1])
+    with pytest.raises(PersistenceValidationError, match="duplicate"):
+        repository.complete_run(run.id, [summaries[0], summaries[0]])
+    foreign_summary = ConfigRunSummary(
+        config_id=stable_uuid("foreign-config"),
+        metrics=[],
+        completed_queries=2,
+        failed_queries=0,
+    )
+    with pytest.raises(PersistenceValidationError, match="exactly one ordered summary"):
+        repository.complete_run(run.id, [summaries[0], foreign_summary])
+    with pytest.raises(PersistenceValidationError, match="exactly one ordered summary"):
+        repository.complete_run(run.id, list(reversed(summaries)))
+    bad_count = summaries[0].model_copy(
+        update={"completed_queries": summaries[0].completed_queries + 1}
+    )
+    with pytest.raises(PersistenceValidationError, match="counts do not match"):
+        repository.complete_run(run.id, [bad_count, summaries[1]])
+
+    completed = repository.complete_run(run.id, summaries)
+    assert completed.status is EvalRunStatus.COMPLETED
+    assert completed.summaries == summaries
+    assert completed.summaries[0].failed_queries == 1

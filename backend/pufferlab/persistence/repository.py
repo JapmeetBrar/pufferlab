@@ -50,7 +50,6 @@ _ALLOWED_TRANSITIONS = {
     EvalRunStatus.QUEUED: {
         EvalRunStatus.RUNNING,
         EvalRunStatus.CANCELLED,
-        EvalRunStatus.INTERRUPTED,
     },
     EvalRunStatus.RUNNING: {
         EvalRunStatus.COMPLETED,
@@ -278,6 +277,8 @@ class PufferLabRepository:
         canonical_utc(transition_at, field_name="run_transition.at")
         with self._session_factory.begin() as session:
             row = self._require_run(session, run_id)
+            if target is EvalRunStatus.COMPLETED:
+                self._validate_completion_summaries(session, row, summaries)
             return self._transition_row(
                 row,
                 target,
@@ -285,6 +286,21 @@ class PufferLabRepository:
                 summaries=summaries,
                 error=error,
             )
+
+    def complete_run(
+        self,
+        run_id: UUID,
+        summaries: Sequence[ConfigRunSummary],
+        *,
+        at: datetime | None = None,
+    ) -> EvalRun:
+        """Atomically validate final summaries and make a fully durable run immutable."""
+        return self.transition_run(
+            run_id,
+            EvalRunStatus.COMPLETED,
+            at=at,
+            summaries=summaries,
+        )
 
     def record_outcome(self, outcome: QueryOutcome) -> EvalRun:
         payload = canonical_json(outcome)
@@ -348,16 +364,14 @@ class PufferLabRepository:
             return [QueryOutcome.model_validate_json(row.payload_json) for row in rows]
 
     def interrupt_stale_runs(self, *, at: datetime | None = None) -> list[UUID]:
-        """Fail closed on process-owned queued/running work after a restart."""
+        """Fail closed on work that was running when the owning process stopped."""
         transition_at = at or datetime.now(UTC)
         canonical_utc(transition_at, field_name="startup_recovery.at")
         interrupted: list[UUID] = []
         with self._session_factory.begin() as session:
             rows = session.scalars(
                 select(EvalRunRow)
-                .where(
-                    EvalRunRow.status.in_([EvalRunStatus.QUEUED.value, EvalRunStatus.RUNNING.value])
-                )
+                .where(EvalRunRow.status == EvalRunStatus.RUNNING.value)
                 .order_by(EvalRunRow.created_at, EvalRunRow.id)
             ).all()
             for row in rows:
@@ -491,6 +505,49 @@ class PufferLabRepository:
         )
         row.payload_json = canonical_json(updated)
         return updated
+
+    @staticmethod
+    def _validate_completion_summaries(
+        session: Session,
+        row: EvalRunRow,
+        summaries: Sequence[ConfigRunSummary] | None,
+    ) -> None:
+        if summaries is None:
+            raise InvalidRunTransitionError("completed runs require final config summaries")
+
+        run_config_ids = session.scalars(
+            select(RunConfigRow.config_id)
+            .where(RunConfigRow.run_id == row.id)
+            .order_by(RunConfigRow.ordinal)
+        ).all()
+        summary_ids = [str(summary.config_id) for summary in summaries]
+        if len(summary_ids) != len(set(summary_ids)):
+            raise PersistenceValidationError("completion summaries contain duplicate config IDs")
+        if summary_ids != list(run_config_ids):
+            raise PersistenceValidationError(
+                "completion requires exactly one ordered summary for every run config"
+            )
+
+        outcome_counts = {config_id: {"succeeded": 0, "failed": 0} for config_id in run_config_ids}
+        rows = session.execute(
+            select(QueryOutcomeRow.config_id, QueryOutcomeRow.status, func.count())
+            .where(QueryOutcomeRow.run_id == row.id)
+            .group_by(QueryOutcomeRow.config_id, QueryOutcomeRow.status)
+        ).all()
+        for config_id, status, count in rows:
+            if config_id in outcome_counts and status in outcome_counts[config_id]:
+                outcome_counts[config_id][status] = int(count)
+
+        for summary in summaries:
+            counts = outcome_counts[str(summary.config_id)]
+            if (
+                summary.completed_queries != counts["succeeded"]
+                or summary.failed_queries != counts["failed"]
+                or summary.completed_queries + summary.failed_queries != row.total_queries
+            ):
+                raise PersistenceValidationError(
+                    "completion summary outcome counts do not match durable outcomes"
+                )
 
     @staticmethod
     def _completed_query_count(session: Session, run_id: UUID) -> int:

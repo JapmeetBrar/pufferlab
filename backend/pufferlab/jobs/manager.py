@@ -5,7 +5,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from uuid import UUID
 
-from pufferlab.contracts.evals import EvalRun, EvalRunStatus
+from pufferlab.contracts.evals import ConfigRunSummary, EvalRun, EvalRunStatus
 from pufferlab.persistence.errors import PersistenceValidationError
 from pufferlab.persistence.repository import PufferLabRepository
 from pufferlab.persistence.types import QueryOutcome
@@ -19,6 +19,9 @@ class QueryWorkItem:
 
 type OutcomeExecutor = Callable[[QueryWorkItem], Awaitable[QueryOutcome]]
 type ProgressCallback = Callable[[EvalRun], Awaitable[None]]
+type SummaryFinalizer = Callable[
+    [EvalRun, Sequence[QueryOutcome]], Awaitable[Sequence[ConfigRunSummary]]
+]
 
 
 @dataclass(slots=True)
@@ -35,7 +38,7 @@ class RunJobManager:
         self._active: dict[UUID, _ActiveJob] = {}
 
     def recover_startup(self) -> list[UUID]:
-        """Mark process-owned queued/running rows interrupted after a restart."""
+        """Mark process-owned running rows interrupted after a restart."""
         return self._repository.interrupt_stale_runs()
 
     def start(
@@ -45,6 +48,7 @@ class RunJobManager:
         executor: OutcomeExecutor,
         *,
         max_concurrency: int,
+        finalize: SummaryFinalizer,
         on_progress: ProgressCallback | None = None,
     ) -> asyncio.Task[EvalRun]:
         if max_concurrency < 1:
@@ -69,6 +73,7 @@ class RunJobManager:
                 executor,
                 max_concurrency=max_concurrency,
                 cancellation_requested=cancellation_requested,
+                finalize=finalize,
                 on_progress=on_progress,
             ),
             name=f"pufferlab-eval-{run_id}",
@@ -102,47 +107,61 @@ class RunJobManager:
         *,
         max_concurrency: int,
         cancellation_requested: asyncio.Event,
+        finalize: SummaryFinalizer,
         on_progress: ProgressCallback | None,
     ) -> EvalRun:
-        inflight: dict[asyncio.Task[QueryOutcome], QueryWorkItem] = {}
+        inflight: dict[asyncio.Task[QueryOutcome], tuple[int, QueryWorkItem]] = {}
         next_index = 0
+        first_failure: BaseException | None = None
         try:
             self._repository.transition_run(run_id, EvalRunStatus.RUNNING)
             while True:
                 while (
-                    not cancellation_requested.is_set()
+                    first_failure is None
+                    and not cancellation_requested.is_set()
                     and len(inflight) < max_concurrency
                     and next_index < len(work_items)
                 ):
+                    item_index = next_index
                     item = work_items[next_index]
                     next_index += 1
-                    inflight[asyncio.create_task(_execute(executor, item))] = item
+                    inflight[asyncio.create_task(_execute(executor, item))] = (item_index, item)
 
                 if not inflight:
                     break
 
                 done, _ = await asyncio.wait(inflight, return_when=asyncio.FIRST_COMPLETED)
-                for task in done:
-                    item = inflight.pop(task)
-                    outcome = task.result()
-                    if outcome.run_id != run_id:
-                        raise PersistenceValidationError(
-                            "executor returned an outcome for another run"
-                        )
-                    if (outcome.config_id, outcome.query_id) != (item.config_id, item.query_id):
-                        raise PersistenceValidationError(
-                            "executor outcome identity does not match its work item"
-                        )
-                    persisted_run = self._repository.record_outcome(outcome)
-                    if on_progress is not None:
-                        await on_progress(persisted_run)
+                for task in sorted(done, key=lambda completed: inflight[completed][0]):
+                    _, item = inflight.pop(task)
+                    try:
+                        outcome = task.result()
+                        if outcome.run_id != run_id:
+                            raise PersistenceValidationError(
+                                "executor returned an outcome for another run"
+                            )
+                        if (outcome.config_id, outcome.query_id) != (
+                            item.config_id,
+                            item.query_id,
+                        ):
+                            raise PersistenceValidationError(
+                                "executor outcome identity does not match its work item"
+                            )
+                        persisted_run = self._repository.record_outcome(outcome)
+                        if on_progress is not None:
+                            await on_progress(persisted_run)
+                    except BaseException as error:
+                        if first_failure is None:
+                            first_failure = error
 
-            target = (
-                EvalRunStatus.CANCELLED
-                if cancellation_requested.is_set()
-                else EvalRunStatus.COMPLETED
-            )
-            return self._repository.transition_run(run_id, target)
+            if first_failure is not None:
+                raise first_failure
+            if cancellation_requested.is_set():
+                return self._repository.transition_run(run_id, EvalRunStatus.CANCELLED)
+
+            durable_run = self._repository.get_run(run_id)
+            durable_outcomes = self._repository.list_outcomes(run_id)
+            summaries = await finalize(durable_run, durable_outcomes)
+            return self._repository.complete_run(run_id, summaries)
         except BaseException:
             for task in inflight:
                 task.cancel()
