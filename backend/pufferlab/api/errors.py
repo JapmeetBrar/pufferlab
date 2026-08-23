@@ -4,6 +4,7 @@ from uuid import uuid4
 
 from fastapi.responses import JSONResponse
 
+from pufferlab.application.view_errors import EvaluationViewError
 from pufferlab.contracts.errors import ApiErrorCode, ApiErrorDetail
 from pufferlab.providers.errors import ProviderError
 from pufferlab.retrieval.errors import SearchError
@@ -42,6 +43,20 @@ def validation_error_response() -> JSONResponse:
         details={"operation": "validate_request"},
     )
     return JSONResponse(status_code=422, content=detail.model_dump(mode="json"))
+
+
+def evaluation_error_response(error: EvaluationViewError) -> JSONResponse:
+    detail = ApiErrorDetail(
+        code=error.code,
+        message=str(error),
+        retryable=error.retryable,
+        trace_id=uuid4(),
+        details={"operation": error.operation},
+    )
+    return JSONResponse(
+        status_code=error.http_status,
+        content=detail.model_dump(mode="json"),
+    )
 
 
 def internal_error_response() -> JSONResponse:

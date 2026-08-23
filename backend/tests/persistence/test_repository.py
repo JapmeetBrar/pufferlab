@@ -121,6 +121,60 @@ def test_revision_selectors_are_deterministic_and_dataset_scoped(
     }
 
 
+def test_read_selectors_are_bounded_ordered_and_run_scoped(
+    repository: PufferLabRepository,
+    sample_graph: SampleGraph,
+) -> None:
+    persist_graph(repository, sample_graph)
+    first = sample_graph.make_run("read-first")
+    second = sample_graph.make_run("read-second")
+    repository.create_run(first)
+    repository.create_run(second)
+
+    assert repository.list_runs(limit=1) == [min((first, second), key=lambda run: str(run.id))]
+    assert repository.list_run_configs(first.id) == list(sample_graph.configs)
+    assert repository.list_query_ids(sample_graph.query_set.id) == [
+        query.id for query in sample_graph.queries
+    ]
+    assert (
+        repository.get_judged_query(
+            sample_graph.query_set.id,
+            sample_graph.queries[0].id,
+        )
+        == sample_graph.queries[0]
+    )
+    with pytest.raises(RecordNotFoundError, match="requested query set"):
+        repository.get_judged_query(
+            sample_graph.query_set.id,
+            stable_uuid("foreign-query"),
+        )
+    with pytest.raises(PersistenceValidationError, match="between 1 and 100"):
+        repository.list_runs(limit=0)
+    with pytest.raises(PersistenceValidationError, match="between 1 and 100"):
+        repository.list_runs(limit=101)
+    with pytest.raises(PersistenceValidationError, match="between 1 and 100"):
+        repository.list_query_ids(sample_graph.query_set.id, limit=101)
+    with pytest.raises(PersistenceValidationError, match="between 1 and 100"):
+        repository.list_dataset_versions(limit=True)
+
+
+def test_strict_read_decoding_rejects_index_payload_divergence(
+    database: Database,
+    repository: PufferLabRepository,
+    sample_graph: SampleGraph,
+) -> None:
+    persist_graph(repository, sample_graph)
+    run = sample_graph.make_run("corrupt-read")
+    repository.create_run(run)
+    with database.session_factory.begin() as session:
+        row = session.get(EvalRunRow, str(run.id))
+        assert row is not None
+        row.status = EvalRunStatus.RUNNING.value
+
+    with pytest.raises(PersistenceValidationError, match="indexed lifecycle state"):
+        repository.get_run(run.id)
+
+
 def test_revision_run_and_outcome_payload_times_are_canonical_utc(
     database: Database,
     repository: PufferLabRepository,

@@ -69,6 +69,108 @@
         "title": "ApiWarning",
         "type": "object"
       },
+      "CancelEvalRunResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "contract_version": {
+            "$ref": "#/components/schemas/ContractVersion",
+            "default": 1
+          },
+          "result": {
+            "$ref": "#/components/schemas/EvalRunView"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "title": "CancelEvalRunResponse",
+        "type": "object"
+      },
+      "CandidateCountEvidenceValue": {
+        "additionalProperties": false,
+        "properties": {
+          "count": {
+            "maximum": 10000.0,
+            "minimum": 0.0,
+            "title": "Count",
+            "type": "integer"
+          },
+          "kind": {
+            "const": "candidate_count",
+            "default": "candidate_count",
+            "title": "Kind",
+            "type": "string"
+          },
+          "stage": {
+            "$ref": "#/components/schemas/RetrievalStage"
+          }
+        },
+        "required": [
+          "stage",
+          "count"
+        ],
+        "title": "CandidateCountEvidenceValue",
+        "type": "object"
+      },
+      "CandidateRelevantRankChanges": {
+        "additionalProperties": false,
+        "properties": {
+          "candidate_config_id": {
+            "format": "uuid",
+            "title": "Candidate Config Id",
+            "type": "string"
+          },
+          "changes": {
+            "items": {
+              "$ref": "#/components/schemas/RelevantRankChange"
+            },
+            "maxItems": 100,
+            "title": "Changes",
+            "type": "array"
+          }
+        },
+        "required": [
+          "candidate_config_id",
+          "changes"
+        ],
+        "title": "CandidateRelevantRankChanges",
+        "type": "object"
+      },
+      "ConfigRunSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "completed_queries": {
+            "minimum": 0.0,
+            "title": "Completed Queries",
+            "type": "integer"
+          },
+          "config_id": {
+            "format": "uuid",
+            "title": "Config Id",
+            "type": "string"
+          },
+          "failed_queries": {
+            "minimum": 0.0,
+            "title": "Failed Queries",
+            "type": "integer"
+          },
+          "metrics": {
+            "items": {
+              "$ref": "#/components/schemas/MetricAggregate"
+            },
+            "title": "Metrics",
+            "type": "array"
+          }
+        },
+        "required": [
+          "config_id",
+          "metrics",
+          "completed_queries",
+          "failed_queries"
+        ],
+        "title": "ConfigRunSummary",
+        "type": "object"
+      },
       "ConfigSearchResult": {
         "additionalProperties": false,
         "properties": {
@@ -124,17 +226,1078 @@
         "const": 1,
         "type": "integer"
       },
-      "FilterLogical": {
+      "CreateEvalRunRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "baseline_config_id": {
+            "format": "uuid",
+            "title": "Baseline Config Id",
+            "type": "string"
+          },
+          "candidate_config_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "maxItems": 3,
+            "minItems": 3,
+            "title": "Candidate Config Ids",
+            "type": "array"
+          },
+          "contract_version": {
+            "$ref": "#/components/schemas/ContractVersion",
+            "default": 1
+          },
+          "max_concurrency": {
+            "default": 4,
+            "maximum": 16.0,
+            "minimum": 1.0,
+            "title": "Max Concurrency",
+            "type": "integer"
+          },
+          "query_set_id": {
+            "format": "uuid",
+            "title": "Query Set Id",
+            "type": "string"
+          },
+          "random_seed": {
+            "default": 20260822,
+            "title": "Random Seed",
+            "type": "integer"
+          },
+          "warmup_query_count": {
+            "default": 5,
+            "maximum": 50.0,
+            "minimum": 0.0,
+            "title": "Warmup Query Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "query_set_id",
+          "baseline_config_id",
+          "candidate_config_ids"
+        ],
+        "title": "CreateEvalRunRequest",
+        "type": "object"
+      },
+      "CreateEvalRunResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "contract_version": {
+            "$ref": "#/components/schemas/ContractVersion",
+            "default": 1
+          },
+          "result": {
+            "$ref": "#/components/schemas/EvalRunView"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "title": "CreateEvalRunResponse",
+        "type": "object"
+      },
+      "DataOrigin": {
+        "description": "Whether persisted catalog data came from provider-backed work or the offline demo.",
+        "enum": [
+          "live",
+          "synthetic_demo"
+        ],
+        "title": "DataOrigin",
+        "type": "string"
+      },
+      "DatasetAttribution": {
+        "additionalProperties": false,
+        "properties": {
+          "license_name": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "License Name"
+          },
+          "license_url": {
+            "anyOf": [
+              {
+                "maxLength": 2048,
+                "pattern": "^https://",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "License Url"
+          },
+          "source_name": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Source Name",
+            "type": "string"
+          },
+          "source_url": {
+            "anyOf": [
+              {
+                "maxLength": 2048,
+                "pattern": "^https://",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Url"
+          }
+        },
+        "required": [
+          "source_name"
+        ],
+        "title": "DatasetAttribution",
+        "type": "object"
+      },
+      "DatasetCatalogItem": {
+        "additionalProperties": false,
+        "properties": {
+          "data_origin": {
+            "$ref": "#/components/schemas/DataOrigin"
+          },
+          "dataset": {
+            "$ref": "#/components/schemas/DatasetVersion"
+          }
+        },
+        "required": [
+          "dataset",
+          "data_origin"
+        ],
+        "title": "DatasetCatalogItem",
+        "type": "object"
+      },
+      "DatasetDetailResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "contract_version": {
+            "$ref": "#/components/schemas/ContractVersion",
+            "default": 1
+          },
+          "data_origin": {
+            "$ref": "#/components/schemas/DataOrigin"
+          },
+          "dataset": {
+            "$ref": "#/components/schemas/DatasetVersion"
+          }
+        },
+        "required": [
+          "dataset",
+          "data_origin"
+        ],
+        "title": "DatasetDetailResponse",
+        "type": "object"
+      },
+      "DatasetListResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "contract_version": {
+            "$ref": "#/components/schemas/ContractVersion",
+            "default": 1
+          },
+          "datasets": {
+            "items": {
+              "$ref": "#/components/schemas/DatasetCatalogItem"
+            },
+            "maxItems": 100,
+            "title": "Datasets",
+            "type": "array"
+          }
+        },
+        "required": [
+          "datasets"
+        ],
+        "title": "DatasetListResponse",
+        "type": "object"
+      },
+      "DatasetStatus": {
+        "enum": [
+          "pending",
+          "ingesting",
+          "indexing",
+          "ready",
+          "failed"
+        ],
+        "title": "DatasetStatus",
+        "type": "string"
+      },
+      "DatasetVersion": {
+        "additionalProperties": false,
+        "properties": {
+          "corpus_hash": {
+            "minLength": 1,
+            "title": "Corpus Hash",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "data_origin": {
+            "$ref": "#/components/schemas/DataOrigin",
+            "default": "live"
+          },
+          "document_count": {
+            "minimum": 0.0,
+            "title": "Document Count",
+            "type": "integer"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "index_profile": {
+            "$ref": "#/components/schemas/IndexProfile"
+          },
+          "namespace": {
+            "title": "Namespace",
+            "type": "string"
+          },
+          "slug": {
+            "minLength": 1,
+            "title": "Slug",
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/DatasetStatus"
+          },
+          "version": {
+            "minLength": 1,
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "slug",
+          "version",
+          "namespace",
+          "index_profile",
+          "document_count",
+          "corpus_hash",
+          "status",
+          "created_at"
+        ],
+        "title": "DatasetVersion",
+        "type": "object"
+      },
+      "EvalFailurePayload": {
+        "additionalProperties": false,
+        "description": "Redacted durable evidence for an expected operational retrieval failure.",
+        "properties": {
+          "code": {
+            "$ref": "#/components/schemas/ApiErrorCode"
+          },
+          "contract_version": {
+            "$ref": "#/components/schemas/ContractVersion",
+            "default": 1
+          },
+          "kind": {
+            "const": "failure",
+            "default": "failure",
+            "title": "Kind",
+            "type": "string"
+          },
+          "message": {
+            "minLength": 1,
+            "title": "Message",
+            "type": "string"
+          },
+          "operation": {
+            "minLength": 1,
+            "title": "Operation",
+            "type": "string"
+          },
+          "retryable": {
+            "title": "Retryable",
+            "type": "boolean"
+          },
+          "total_client_wall_latency_ms": {
+            "minimum": 0.0,
+            "title": "Total Client Wall Latency Ms",
+            "type": "number"
+          },
+          "trace_id": {
+            "format": "uuid",
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message",
+          "retryable",
+          "operation",
+          "trace_id",
+          "total_client_wall_latency_ms"
+        ],
+        "title": "EvalFailurePayload",
+        "type": "object"
+      },
+      "EvalOutcomePayload": {
+        "discriminator": {
+          "mapping": {
+            "failure": "#/components/schemas/EvalFailurePayload",
+            "success": "#/components/schemas/EvalSuccessPayload"
+          },
+          "propertyName": "kind"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/EvalSuccessPayload"
+          },
+          {
+            "$ref": "#/components/schemas/EvalFailurePayload"
+          }
+        ]
+      },
+      "EvalOutcomeRecord": {
+        "additionalProperties": false,
+        "description": "Typed identity envelope around one durable payload.",
+        "properties": {
+          "config_id": {
+            "format": "uuid",
+            "title": "Config Id",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "outcome": {
+            "$ref": "#/components/schemas/EvalOutcomePayload"
+          },
+          "query_id": {
+            "format": "uuid",
+            "title": "Query Id",
+            "type": "string"
+          },
+          "run_id": {
+            "format": "uuid",
+            "title": "Run Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id",
+          "config_id",
+          "query_id",
+          "created_at",
+          "outcome"
+        ],
+        "title": "EvalOutcomeRecord",
+        "type": "object"
+      },
+      "EvalOutcomeWarning": {
+        "additionalProperties": false,
+        "description": "Public-safe warning retained with an evaluated query outcome.",
+        "properties": {
+          "code": {
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[a-z][a-z0-9_]*$",
+            "title": "Code",
+            "type": "string"
+          },
+          "message": {
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "title": "EvalOutcomeWarning",
+        "type": "object"
+      },
+      "EvalRun": {
+        "additionalProperties": false,
+        "properties": {
+          "baseline_config_id": {
+            "format": "uuid",
+            "title": "Baseline Config Id",
+            "type": "string"
+          },
+          "candidate_config_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "title": "Candidate Config Ids",
+            "type": "array"
+          },
+          "completed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completed At"
+          },
+          "completed_queries": {
+            "minimum": 0.0,
+            "title": "Completed Queries",
+            "type": "integer"
+          },
+          "contract_version": {
+            "$ref": "#/components/schemas/ContractVersion",
+            "default": 1
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "environment": {
+            "$ref": "#/components/schemas/RunEnvironment"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ApiErrorDetail"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "query_set": {
+            "$ref": "#/components/schemas/QuerySetSummary"
+          },
+          "random_seed": {
+            "title": "Random Seed",
+            "type": "integer"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "status": {
+            "$ref": "#/components/schemas/EvalRunStatus"
+          },
+          "summaries": {
+            "items": {
+              "$ref": "#/components/schemas/ConfigRunSummary"
+            },
+            "title": "Summaries",
+            "type": "array"
+          },
+          "total_queries": {
+            "minimum": 0.0,
+            "title": "Total Queries",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "status",
+          "query_set",
+          "baseline_config_id",
+          "candidate_config_ids",
+          "summaries",
+          "completed_queries",
+          "total_queries",
+          "random_seed",
+          "environment",
+          "created_at",
+          "started_at",
+          "completed_at",
+          "error"
+        ],
+        "title": "EvalRun",
+        "type": "object"
+      },
+      "EvalRunDetailResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "contract_version": {
+            "$ref": "#/components/schemas/ContractVersion",
+            "default": 1
+          },
+          "result": {
+            "$ref": "#/components/schemas/EvalRunView"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "title": "EvalRunDetailResponse",
+        "type": "object"
+      },
+      "EvalRunExport": {
+        "additionalProperties": false,
+        "description": "Canonical, partial-state-safe JSON export of one run and its durable outcomes.",
+        "properties": {
+          "contract_version": {
+            "$ref": "#/components/schemas/ContractVersion",
+            "default": 1
+          },
+          "outcomes": {
+            "items": {
+              "$ref": "#/components/schemas/EvalOutcomeRecord"
+            },
+            "maxItems": 200,
+            "title": "Outcomes",
+            "type": "array"
+          },
+          "run": {
+            "$ref": "#/components/schemas/EvalRun"
+          }
+        },
+        "required": [
+          "run",
+          "outcomes"
+        ],
+        "title": "EvalRunExport",
+        "type": "object"
+      },
+      "EvalRunExportResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "contract_version": {
+            "$ref": "#/components/schemas/ContractVersion",
+            "default": 1
+          },
+          "data_origin": {
+            "$ref": "#/components/schemas/DataOrigin"
+          },
+          "export": {
+            "$ref": "#/components/schemas/EvalRunExport"
+          }
+        },
+        "required": [
+          "data_origin",
+          "export"
+        ],
+        "title": "EvalRunExportResponse",
+        "type": "object"
+      },
+      "EvalRunListResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "contract_version": {
+            "$ref": "#/components/schemas/ContractVersion",
+            "default": 1
+          },
+          "runs": {
+            "items": {
+              "$ref": "#/components/schemas/EvalRunView"
+            },
+            "maxItems": 100,
+            "title": "Runs",
+            "type": "array"
+          }
+        },
+        "required": [
+          "runs"
+        ],
+        "title": "EvalRunListResponse",
+        "type": "object"
+      },
+      "EvalRunQueryDetailResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "attribution": {
+            "$ref": "#/components/schemas/DatasetAttribution"
+          },
+          "baseline_config_id": {
+            "format": "uuid",
+            "title": "Baseline Config Id",
+            "type": "string"
+          },
+          "candidate_config_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "maxItems": 3,
+            "minItems": 3,
+            "title": "Candidate Config Ids",
+            "type": "array"
+          },
+          "configs": {
+            "items": {
+              "$ref": "#/components/schemas/RetrievalConfigSummary"
+            },
+            "maxItems": 4,
+            "minItems": 4,
+            "title": "Configs",
+            "type": "array"
+          },
+          "contract_version": {
+            "$ref": "#/components/schemas/ContractVersion",
+            "default": 1
+          },
+          "data_origin": {
+            "$ref": "#/components/schemas/DataOrigin"
+          },
+          "live_replay_policy_permitted": {
+            "title": "Live Replay Policy Permitted",
+            "type": "boolean"
+          },
+          "original_stage_evidence_available": {
+            "const": false,
+            "default": false,
+            "title": "Original Stage Evidence Available",
+            "type": "boolean"
+          },
+          "outcomes": {
+            "items": {
+              "$ref": "#/components/schemas/EvalOutcomeRecord"
+            },
+            "maxItems": 4,
+            "title": "Outcomes",
+            "type": "array"
+          },
+          "query": {
+            "$ref": "#/components/schemas/JudgedQuery"
+          },
+          "rank_changes": {
+            "items": {
+              "$ref": "#/components/schemas/CandidateRelevantRankChanges"
+            },
+            "maxItems": 3,
+            "minItems": 3,
+            "title": "Rank Changes",
+            "type": "array"
+          },
+          "run_id": {
+            "format": "uuid",
+            "title": "Run Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id",
+          "data_origin",
+          "query",
+          "baseline_config_id",
+          "candidate_config_ids",
+          "configs",
+          "outcomes",
+          "rank_changes",
+          "attribution",
+          "live_replay_policy_permitted"
+        ],
+        "title": "EvalRunQueryDetailResponse",
+        "type": "object"
+      },
+      "EvalRunQueryReplayRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "config_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "maxItems": 2,
+            "minItems": 2,
+            "title": "Config Ids",
+            "type": "array"
+          },
+          "contract_version": {
+            "$ref": "#/components/schemas/ContractVersion",
+            "default": 1
+          },
+          "include_counterfactual_probe": {
+            "default": false,
+            "title": "Include Counterfactual Probe",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "config_ids"
+        ],
+        "title": "EvalRunQueryReplayRequest",
+        "type": "object"
+      },
+      "EvalRunQueryReplayResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "config_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "maxItems": 2,
+            "minItems": 2,
+            "title": "Config Ids",
+            "type": "array"
+          },
+          "contract_version": {
+            "$ref": "#/components/schemas/ContractVersion",
+            "default": 1
+          },
+          "counterfactual_probes": {
+            "items": {
+              "$ref": "#/components/schemas/ReplayCounterfactualProbe"
+            },
+            "maxItems": 2,
+            "title": "Counterfactual Probes",
+            "type": "array"
+          },
+          "data_origin": {
+            "const": "live",
+            "default": "live",
+            "title": "Data Origin",
+            "type": "string"
+          },
+          "observability_notice": {
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Observability Notice",
+            "type": "string"
+          },
+          "observations": {
+            "items": {
+              "$ref": "#/components/schemas/ForensicObservation"
+            },
+            "maxItems": 200,
+            "title": "Observations",
+            "type": "array"
+          },
+          "original_stage_evidence_available": {
+            "const": false,
+            "default": false,
+            "title": "Original Stage Evidence Available",
+            "type": "boolean"
+          },
+          "primary": {
+            "$ref": "#/components/schemas/SearchCompareResponse"
+          },
+          "primary_observed_at": {
+            "format": "date-time",
+            "title": "Primary Observed At",
+            "type": "string"
+          },
+          "primary_origin": {
+            "const": "live_replay_primary",
+            "default": "live_replay_primary",
+            "title": "Primary Origin",
+            "type": "string"
+          },
+          "query_id": {
+            "format": "uuid",
+            "title": "Query Id",
+            "type": "string"
+          },
+          "run_id": {
+            "format": "uuid",
+            "title": "Run Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id",
+          "query_id",
+          "config_ids",
+          "primary_observed_at",
+          "primary",
+          "counterfactual_probes",
+          "observations",
+          "observability_notice"
+        ],
+        "title": "EvalRunQueryReplayResponse",
+        "type": "object"
+      },
+      "EvalRunStatus": {
+        "enum": [
+          "queued",
+          "running",
+          "completed",
+          "failed",
+          "cancelled",
+          "interrupted"
+        ],
+        "title": "EvalRunStatus",
+        "type": "string"
+      },
+      "EvalRunView": {
+        "additionalProperties": false,
+        "description": "Provider-free projection metadata around one durable run revision.",
+        "properties": {
+          "completed_attempts": {
+            "maximum": 200.0,
+            "minimum": 0.0,
+            "title": "Completed Attempts",
+            "type": "integer"
+          },
+          "configs": {
+            "items": {
+              "$ref": "#/components/schemas/RetrievalConfigSummary"
+            },
+            "maxItems": 4,
+            "minItems": 4,
+            "title": "Configs",
+            "type": "array"
+          },
+          "data_origin": {
+            "$ref": "#/components/schemas/DataOrigin"
+          },
+          "dataset_version_id": {
+            "format": "uuid",
+            "title": "Dataset Version Id",
+            "type": "string"
+          },
+          "live_replay_policy_permitted": {
+            "title": "Live Replay Policy Permitted",
+            "type": "boolean"
+          },
+          "original_stage_evidence_available": {
+            "const": false,
+            "default": false,
+            "title": "Original Stage Evidence Available",
+            "type": "boolean"
+          },
+          "run": {
+            "$ref": "#/components/schemas/EvalRun"
+          },
+          "total_attempts": {
+            "default": 200,
+            "maximum": 200.0,
+            "minimum": 200.0,
+            "title": "Total Attempts",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "run",
+          "dataset_version_id",
+          "data_origin",
+          "configs",
+          "completed_attempts",
+          "live_replay_policy_permitted"
+        ],
+        "title": "EvalRunView",
+        "type": "object"
+      },
+      "EvalSuccessPayload": {
+        "additionalProperties": false,
+        "description": "Versioned durable evidence for one successful config/query attempt.\n\nDeliberately excluded fields include query/document text, vectors, credentials, request headers,\nand raw provider responses.",
+        "properties": {
+          "candidate_counts": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "maxProperties": 10,
+            "title": "Candidate Counts",
+            "type": "object"
+          },
+          "contract_version": {
+            "$ref": "#/components/schemas/ContractVersion",
+            "default": 1
+          },
+          "kind": {
+            "const": "success",
+            "default": "success",
+            "title": "Kind",
+            "type": "string"
+          },
+          "metrics": {
+            "$ref": "#/components/schemas/PerQueryMetrics"
+          },
+          "ranked_document_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "maxItems": 50,
+            "title": "Ranked Document Ids",
+            "type": "array"
+          },
+          "stage_timings": {
+            "items": {
+              "$ref": "#/components/schemas/StageTiming"
+            },
+            "maxItems": 10,
+            "title": "Stage Timings",
+            "type": "array"
+          },
+          "timing_source": {
+            "$ref": "#/components/schemas/TimingSource",
+            "default": "perf_counter"
+          },
+          "total_client_wall_latency_ms": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Client Wall Latency Ms"
+          },
+          "trace_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Trace Id"
+          },
+          "warnings": {
+            "items": {
+              "$ref": "#/components/schemas/EvalOutcomeWarning"
+            },
+            "maxItems": 20,
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "ranked_document_ids",
+          "metrics",
+          "total_client_wall_latency_ms",
+          "stage_timings",
+          "candidate_counts",
+          "warnings",
+          "trace_id"
+        ],
+        "title": "EvalSuccessPayload",
+        "type": "object"
+      },
+      "EvidenceCertainty": {
+        "enum": [
+          "observed",
+          "counterfactual",
+          "insufficient"
+        ],
+        "title": "EvidenceCertainty",
+        "type": "string"
+      },
+      "EvidenceItem": {
+        "additionalProperties": false,
+        "properties": {
+          "label": {
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[a-z][a-z0-9_]*$",
+            "title": "Label",
+            "type": "string"
+          },
+          "observed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Observed At"
+          },
+          "origin": {
+            "$ref": "#/components/schemas/EvidenceOrigin"
+          },
+          "trace_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Trace Id"
+          },
+          "value": {
+            "$ref": "#/components/schemas/ForensicEvidenceValue"
+          }
+        },
+        "required": [
+          "label",
+          "value",
+          "origin",
+          "observed_at",
+          "trace_id"
+        ],
+        "title": "EvidenceItem",
+        "type": "object"
+      },
+      "EvidenceOrigin": {
+        "enum": [
+          "stored_run",
+          "live_replay_primary",
+          "live_replay_counterfactual_probe",
+          "client_computed"
+        ],
+        "title": "EvidenceOrigin",
+        "type": "string"
+      },
+      "ExcludedPairCount": {
+        "additionalProperties": false,
+        "properties": {
+          "count": {
+            "maximum": 50.0,
+            "minimum": 0.0,
+            "title": "Count",
+            "type": "integer"
+          },
+          "status": {
+            "$ref": "#/components/schemas/RegressionPairStatus"
+          }
+        },
+        "required": [
+          "status",
+          "count"
+        ],
+        "title": "ExcludedPairCount",
+        "type": "object"
+      },
+      "FilterLogical-Input": {
         "additionalProperties": false,
         "properties": {
           "children": {
             "items": {
               "anyOf": [
                 {
-                  "$ref": "#/components/schemas/FilterPredicate"
+                  "$ref": "#/components/schemas/FilterPredicate-Input"
                 },
                 {
-                  "$ref": "#/components/schemas/FilterLogical"
+                  "$ref": "#/components/schemas/FilterLogical-Input"
                 }
               ]
             },
@@ -159,24 +1322,76 @@
         "title": "FilterLogical",
         "type": "object"
       },
-      "FilterNode": {
+      "FilterLogical-Output": {
+        "additionalProperties": false,
+        "properties": {
+          "children": {
+            "items": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/FilterPredicate-Output"
+                },
+                {
+                  "$ref": "#/components/schemas/FilterLogical-Output"
+                }
+              ]
+            },
+            "minItems": 1,
+            "title": "Children",
+            "type": "array"
+          },
+          "kind": {
+            "const": "logical",
+            "default": "logical",
+            "title": "Kind",
+            "type": "string"
+          },
+          "op": {
+            "$ref": "#/components/schemas/LogicalOp"
+          }
+        },
+        "required": [
+          "op",
+          "children"
+        ],
+        "title": "FilterLogical",
+        "type": "object"
+      },
+      "FilterNode-Input": {
         "discriminator": {
           "mapping": {
-            "logical": "#/components/schemas/FilterLogical",
-            "predicate": "#/components/schemas/FilterPredicate"
+            "logical": "#/components/schemas/FilterLogical-Input",
+            "predicate": "#/components/schemas/FilterPredicate-Input"
           },
           "propertyName": "kind"
         },
         "oneOf": [
           {
-            "$ref": "#/components/schemas/FilterPredicate"
+            "$ref": "#/components/schemas/FilterPredicate-Input"
           },
           {
-            "$ref": "#/components/schemas/FilterLogical"
+            "$ref": "#/components/schemas/FilterLogical-Input"
           }
         ]
       },
-      "FilterPredicate": {
+      "FilterNode-Output": {
+        "discriminator": {
+          "mapping": {
+            "logical": "#/components/schemas/FilterLogical-Output",
+            "predicate": "#/components/schemas/FilterPredicate-Output"
+          },
+          "propertyName": "kind"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/FilterPredicate-Output"
+          },
+          {
+            "$ref": "#/components/schemas/FilterLogical-Output"
+          }
+        ]
+      },
+      "FilterPredicate-Input": {
         "additionalProperties": false,
         "properties": {
           "field": {
@@ -203,6 +1418,269 @@
           "value"
         ],
         "title": "FilterPredicate",
+        "type": "object"
+      },
+      "FilterPredicate-Output": {
+        "additionalProperties": false,
+        "properties": {
+          "field": {
+            "minLength": 1,
+            "title": "Field",
+            "type": "string"
+          },
+          "kind": {
+            "const": "predicate",
+            "default": "predicate",
+            "title": "Kind",
+            "type": "string"
+          },
+          "op": {
+            "$ref": "#/components/schemas/PredicateOp"
+          },
+          "value": {
+            "$ref": "#/components/schemas/JsonValue-Output"
+          }
+        },
+        "required": [
+          "field",
+          "op",
+          "value"
+        ],
+        "title": "FilterPredicate",
+        "type": "object"
+      },
+      "FilterResultEvidenceValue": {
+        "additionalProperties": false,
+        "properties": {
+          "field": {
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[A-Za-z_][A-Za-z0-9_.-]*$",
+            "title": "Field",
+            "type": "string"
+          },
+          "kind": {
+            "const": "filter_result",
+            "default": "filter_result",
+            "title": "Kind",
+            "type": "string"
+          },
+          "matched": {
+            "title": "Matched",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "field",
+          "matched"
+        ],
+        "title": "FilterResultEvidenceValue",
+        "type": "object"
+      },
+      "ForensicCode": {
+        "enum": [
+          "filter_predicate_failed",
+          "no_lexical_score",
+          "outside_lexical_candidates",
+          "outside_vector_candidates",
+          "outside_fusion_top_k",
+          "reranked_down",
+          "not_observable"
+        ],
+        "title": "ForensicCode",
+        "type": "string"
+      },
+      "ForensicEvidenceValue": {
+        "discriminator": {
+          "mapping": {
+            "candidate_count": "#/components/schemas/CandidateCountEvidenceValue",
+            "filter_result": "#/components/schemas/FilterResultEvidenceValue",
+            "presence": "#/components/schemas/PresenceEvidenceValue",
+            "rank": "#/components/schemas/RankEvidenceValue",
+            "rrf_contribution": "#/components/schemas/RrfContributionEvidenceValue",
+            "score": "#/components/schemas/ScoreEvidenceValue",
+            "warning": "#/components/schemas/WarningEvidenceValue"
+          },
+          "propertyName": "kind"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/RankEvidenceValue"
+          },
+          {
+            "$ref": "#/components/schemas/ScoreEvidenceValue"
+          },
+          {
+            "$ref": "#/components/schemas/CandidateCountEvidenceValue"
+          },
+          {
+            "$ref": "#/components/schemas/PresenceEvidenceValue"
+          },
+          {
+            "$ref": "#/components/schemas/FilterResultEvidenceValue"
+          },
+          {
+            "$ref": "#/components/schemas/RrfContributionEvidenceValue"
+          },
+          {
+            "$ref": "#/components/schemas/WarningEvidenceValue"
+          }
+        ]
+      },
+      "ForensicObservation": {
+        "additionalProperties": false,
+        "properties": {
+          "certainty": {
+            "$ref": "#/components/schemas/EvidenceCertainty"
+          },
+          "code": {
+            "$ref": "#/components/schemas/ForensicCode"
+          },
+          "evidence": {
+            "items": {
+              "$ref": "#/components/schemas/EvidenceItem"
+            },
+            "maxItems": 16,
+            "title": "Evidence",
+            "type": "array"
+          },
+          "observed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Observed At"
+          },
+          "origin": {
+            "$ref": "#/components/schemas/EvidenceOrigin"
+          },
+          "statement": {
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Statement",
+            "type": "string"
+          },
+          "trace_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Trace Id"
+          }
+        },
+        "required": [
+          "code",
+          "statement",
+          "origin",
+          "observed_at",
+          "trace_id",
+          "evidence",
+          "certainty"
+        ],
+        "title": "ForensicObservation",
+        "type": "object"
+      },
+      "ForensicWarning": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "$ref": "#/components/schemas/ForensicWarningCode"
+          },
+          "message": {
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "title": "ForensicWarning",
+        "type": "object"
+      },
+      "ForensicWarningCode": {
+        "enum": [
+          "original_stage_evidence_unavailable",
+          "provenance_probe_failed",
+          "provenance_snapshot_differs",
+          "namespace_unavailable"
+        ],
+        "title": "ForensicWarningCode",
+        "type": "string"
+      },
+      "FtsProfile": {
+        "additionalProperties": false,
+        "properties": {
+          "ascii_folding": {
+            "default": false,
+            "title": "Ascii Folding",
+            "type": "boolean"
+          },
+          "b": {
+            "default": 0.75,
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "B",
+            "type": "number"
+          },
+          "case_sensitive": {
+            "default": false,
+            "title": "Case Sensitive",
+            "type": "boolean"
+          },
+          "k1": {
+            "default": 1.2,
+            "exclusiveMinimum": 0.0,
+            "title": "K1",
+            "type": "number"
+          },
+          "k3": {
+            "default": 8.0,
+            "exclusiveMinimum": 0.0,
+            "title": "K3",
+            "type": "number"
+          },
+          "language": {
+            "default": "english",
+            "title": "Language",
+            "type": "string"
+          },
+          "max_token_length": {
+            "default": 39,
+            "maximum": 255.0,
+            "minimum": 1.0,
+            "title": "Max Token Length",
+            "type": "integer"
+          },
+          "remove_stopwords": {
+            "default": false,
+            "title": "Remove Stopwords",
+            "type": "boolean"
+          },
+          "stemming": {
+            "default": false,
+            "title": "Stemming",
+            "type": "boolean"
+          },
+          "tokenizer": {
+            "default": "word_v4",
+            "title": "Tokenizer",
+            "type": "string"
+          }
+        },
+        "title": "FtsProfile",
         "type": "object"
       },
       "HealthResponse": {
@@ -295,6 +1773,79 @@
         "title": "HighlightOffset",
         "type": "object"
       },
+      "IndexProfile": {
+        "additionalProperties": false,
+        "properties": {
+          "distance_metric": {
+            "enum": [
+              "cosine_distance",
+              "euclidean_squared"
+            ],
+            "title": "Distance Metric",
+            "type": "string"
+          },
+          "embedding_model": {
+            "minLength": 1,
+            "title": "Embedding Model",
+            "type": "string"
+          },
+          "embedding_provider": {
+            "const": "sentence_transformers",
+            "title": "Embedding Provider",
+            "type": "string"
+          },
+          "embedding_revision": {
+            "minLength": 1,
+            "title": "Embedding Revision",
+            "type": "string"
+          },
+          "fts_profile": {
+            "$ref": "#/components/schemas/FtsProfile"
+          },
+          "id": {
+            "minLength": 1,
+            "title": "Id",
+            "type": "string"
+          },
+          "schema_hash": {
+            "minLength": 1,
+            "title": "Schema Hash",
+            "type": "string"
+          },
+          "vector_attribute": {
+            "default": "vector",
+            "title": "Vector Attribute",
+            "type": "string"
+          },
+          "vector_dimensions": {
+            "exclusiveMinimum": 0.0,
+            "title": "Vector Dimensions",
+            "type": "integer"
+          },
+          "vector_dtype": {
+            "enum": [
+              "f16",
+              "f32",
+              "i8"
+            ],
+            "title": "Vector Dtype",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "embedding_provider",
+          "embedding_model",
+          "embedding_revision",
+          "vector_dimensions",
+          "vector_dtype",
+          "distance_metric",
+          "fts_profile",
+          "schema_hash"
+        ],
+        "title": "IndexProfile",
+        "type": "object"
+      },
       "JsonValue-Input": {
         "anyOf": [
           {
@@ -357,6 +1908,57 @@
           }
         ]
       },
+      "JudgedQuery": {
+        "additionalProperties": false,
+        "properties": {
+          "external_id": {
+            "title": "External Id",
+            "type": "string"
+          },
+          "filters": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FilterNode-Output"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "qrels": {
+            "items": {
+              "$ref": "#/components/schemas/Qrel"
+            },
+            "title": "Qrels",
+            "type": "array"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Tags",
+            "type": "array"
+          },
+          "text": {
+            "minLength": 1,
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "external_id",
+          "text",
+          "qrels"
+        ],
+        "title": "JudgedQuery",
+        "type": "object"
+      },
       "LogicalOp": {
         "enum": [
           "and",
@@ -364,6 +1966,49 @@
           "not"
         ],
         "title": "LogicalOp",
+        "type": "string"
+      },
+      "MetricAggregate": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "$ref": "#/components/schemas/MetricName"
+          },
+          "sample_count": {
+            "minimum": 0.0,
+            "title": "Sample Count",
+            "type": "integer"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value"
+          }
+        },
+        "required": [
+          "name",
+          "value",
+          "sample_count"
+        ],
+        "title": "MetricAggregate",
+        "type": "object"
+      },
+      "MetricName": {
+        "enum": [
+          "ndcg@10",
+          "recall@50",
+          "mrr@10",
+          "latency_p50_ms",
+          "latency_p95_ms",
+          "error_rate"
+        ],
+        "title": "MetricName",
         "type": "string"
       },
       "ObservedScore": {
@@ -438,6 +2083,53 @@
         "title": "PairwiseOverlap",
         "type": "object"
       },
+      "PerQueryMetrics": {
+        "additionalProperties": false,
+        "description": "The judged quality values for one successful retrieval attempt.",
+        "properties": {
+          "mrr_at_10": {
+            "anyOf": [
+              {
+                "maximum": 1.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mrr At 10"
+          },
+          "ndcg_at_10": {
+            "anyOf": [
+              {
+                "maximum": 1.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ndcg At 10"
+          },
+          "recall_at_50": {
+            "anyOf": [
+              {
+                "maximum": 1.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recall At 50"
+          }
+        },
+        "title": "PerQueryMetrics",
+        "type": "object"
+      },
       "PredicateOp": {
         "enum": [
           "eq",
@@ -451,6 +2143,241 @@
         ],
         "title": "PredicateOp",
         "type": "string"
+      },
+      "PresenceEvidenceValue": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "presence",
+            "default": "presence",
+            "title": "Kind",
+            "type": "string"
+          },
+          "present": {
+            "title": "Present",
+            "type": "boolean"
+          },
+          "stage": {
+            "$ref": "#/components/schemas/RetrievalStage"
+          }
+        },
+        "required": [
+          "stage",
+          "present"
+        ],
+        "title": "PresenceEvidenceValue",
+        "type": "object"
+      },
+      "ProbeStageMembership": {
+        "additionalProperties": false,
+        "properties": {
+          "rank": {
+            "maximum": 10000.0,
+            "minimum": 1.0,
+            "title": "Rank",
+            "type": "integer"
+          },
+          "score": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ObservedScore"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "stage": {
+            "enum": [
+              "bm25_candidates",
+              "vector_candidates"
+            ],
+            "title": "Stage",
+            "type": "string"
+          }
+        },
+        "required": [
+          "stage",
+          "rank"
+        ],
+        "title": "ProbeStageMembership",
+        "type": "object"
+      },
+      "Qrel": {
+        "additionalProperties": false,
+        "properties": {
+          "document_id": {
+            "format": "uuid",
+            "title": "Document Id",
+            "type": "string"
+          },
+          "relevance_grade": {
+            "minimum": 0.0,
+            "title": "Relevance Grade",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "document_id",
+          "relevance_grade"
+        ],
+        "title": "Qrel",
+        "type": "object"
+      },
+      "QuerySet": {
+        "additionalProperties": false,
+        "properties": {
+          "content_hash": {
+            "title": "Content Hash",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "dataset_version_id": {
+            "format": "uuid",
+            "title": "Dataset Version Id",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "query_count": {
+            "minimum": 0.0,
+            "title": "Query Count",
+            "type": "integer"
+          },
+          "version": {
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "version",
+          "dataset_version_id",
+          "query_count",
+          "content_hash",
+          "created_at"
+        ],
+        "title": "QuerySet",
+        "type": "object"
+      },
+      "QuerySetCatalogItem": {
+        "additionalProperties": false,
+        "properties": {
+          "data_origin": {
+            "$ref": "#/components/schemas/DataOrigin"
+          },
+          "query_set": {
+            "$ref": "#/components/schemas/QuerySet"
+          }
+        },
+        "required": [
+          "query_set",
+          "data_origin"
+        ],
+        "title": "QuerySetCatalogItem",
+        "type": "object"
+      },
+      "QuerySetListResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "contract_version": {
+            "$ref": "#/components/schemas/ContractVersion",
+            "default": 1
+          },
+          "dataset_version_id": {
+            "format": "uuid",
+            "title": "Dataset Version Id",
+            "type": "string"
+          },
+          "query_sets": {
+            "items": {
+              "$ref": "#/components/schemas/QuerySetCatalogItem"
+            },
+            "maxItems": 100,
+            "title": "Query Sets",
+            "type": "array"
+          }
+        },
+        "required": [
+          "dataset_version_id",
+          "query_sets"
+        ],
+        "title": "QuerySetListResponse",
+        "type": "object"
+      },
+      "QuerySetSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "content_hash": {
+            "title": "Content Hash",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "query_count": {
+            "minimum": 0.0,
+            "title": "Query Count",
+            "type": "integer"
+          },
+          "version": {
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "version",
+          "query_count",
+          "content_hash"
+        ],
+        "title": "QuerySetSummary",
+        "type": "object"
+      },
+      "RankEvidenceValue": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "rank",
+            "default": "rank",
+            "title": "Kind",
+            "type": "string"
+          },
+          "rank": {
+            "maximum": 10000.0,
+            "minimum": 1.0,
+            "title": "Rank",
+            "type": "integer"
+          },
+          "stage": {
+            "$ref": "#/components/schemas/RetrievalStage"
+          }
+        },
+        "required": [
+          "stage",
+          "rank"
+        ],
+        "title": "RankEvidenceValue",
+        "type": "object"
       },
       "RankMovement": {
         "additionalProperties": false,
@@ -495,6 +2422,405 @@
           "ranks_by_config"
         ],
         "title": "RankMovement",
+        "type": "object"
+      },
+      "RegressionCoverage": {
+        "additionalProperties": false,
+        "properties": {
+          "excluded": {
+            "items": {
+              "$ref": "#/components/schemas/ExcludedPairCount"
+            },
+            "maxItems": 6,
+            "minItems": 6,
+            "title": "Excluded",
+            "type": "array"
+          },
+          "paired_queries": {
+            "maximum": 50.0,
+            "minimum": 0.0,
+            "title": "Paired Queries",
+            "type": "integer"
+          },
+          "total_queries": {
+            "default": 50,
+            "maximum": 50.0,
+            "minimum": 50.0,
+            "title": "Total Queries",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "paired_queries",
+          "excluded"
+        ],
+        "title": "RegressionCoverage",
+        "type": "object"
+      },
+      "RegressionOrder": {
+        "enum": [
+          "regressions",
+          "gains"
+        ],
+        "title": "RegressionOrder",
+        "type": "string"
+      },
+      "RegressionPairStatus": {
+        "enum": [
+          "paired",
+          "baseline_missing",
+          "candidate_missing",
+          "baseline_failed",
+          "candidate_failed",
+          "both_failed",
+          "no_positive_qrels"
+        ],
+        "title": "RegressionPairStatus",
+        "type": "string"
+      },
+      "RegressionResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "baseline_config_id": {
+            "format": "uuid",
+            "title": "Baseline Config Id",
+            "type": "string"
+          },
+          "candidate_config_id": {
+            "format": "uuid",
+            "title": "Candidate Config Id",
+            "type": "string"
+          },
+          "contract_version": {
+            "$ref": "#/components/schemas/ContractVersion",
+            "default": 1
+          },
+          "coverage": {
+            "$ref": "#/components/schemas/RegressionCoverage"
+          },
+          "data_origin": {
+            "$ref": "#/components/schemas/DataOrigin"
+          },
+          "limit": {
+            "maximum": 50.0,
+            "minimum": 1.0,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "order": {
+            "$ref": "#/components/schemas/RegressionOrder"
+          },
+          "rows": {
+            "items": {
+              "$ref": "#/components/schemas/RegressionRow"
+            },
+            "maxItems": 50,
+            "title": "Rows",
+            "type": "array"
+          },
+          "run_id": {
+            "format": "uuid",
+            "title": "Run Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id",
+          "data_origin",
+          "baseline_config_id",
+          "candidate_config_id",
+          "order",
+          "limit",
+          "rows",
+          "coverage"
+        ],
+        "title": "RegressionResponse",
+        "type": "object"
+      },
+      "RegressionRow": {
+        "additionalProperties": false,
+        "properties": {
+          "baseline_config_id": {
+            "format": "uuid",
+            "title": "Baseline Config Id",
+            "type": "string"
+          },
+          "baseline_latency_ms": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Baseline Latency Ms"
+          },
+          "baseline_ndcg_at_10": {
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Baseline Ndcg At 10",
+            "type": "number"
+          },
+          "candidate_config_id": {
+            "format": "uuid",
+            "title": "Candidate Config Id",
+            "type": "string"
+          },
+          "candidate_latency_ms": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Candidate Latency Ms"
+          },
+          "candidate_ndcg_at_10": {
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Candidate Ndcg At 10",
+            "type": "number"
+          },
+          "mrr_delta": {
+            "maximum": 1.0,
+            "minimum": -1.0,
+            "title": "Mrr Delta",
+            "type": "number"
+          },
+          "ndcg_delta": {
+            "maximum": 1.0,
+            "minimum": -1.0,
+            "title": "Ndcg Delta",
+            "type": "number"
+          },
+          "playground_url": {
+            "maxLength": 2048,
+            "minLength": 1,
+            "pattern": "^/playground(?:\\?|$)",
+            "title": "Playground Url",
+            "type": "string"
+          },
+          "query_id": {
+            "format": "uuid",
+            "title": "Query Id",
+            "type": "string"
+          },
+          "query_text": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "title": "Query Text",
+            "type": "string"
+          },
+          "recall_delta": {
+            "maximum": 1.0,
+            "minimum": -1.0,
+            "title": "Recall Delta",
+            "type": "number"
+          },
+          "relevant_rank_changes": {
+            "items": {
+              "$ref": "#/components/schemas/RelevantRankChange"
+            },
+            "maxItems": 100,
+            "title": "Relevant Rank Changes",
+            "type": "array"
+          }
+        },
+        "required": [
+          "query_id",
+          "query_text",
+          "baseline_config_id",
+          "candidate_config_id",
+          "baseline_ndcg_at_10",
+          "candidate_ndcg_at_10",
+          "ndcg_delta",
+          "recall_delta",
+          "mrr_delta",
+          "relevant_rank_changes",
+          "playground_url"
+        ],
+        "title": "RegressionRow",
+        "type": "object"
+      },
+      "RelevantRankChange": {
+        "additionalProperties": false,
+        "properties": {
+          "baseline_rank": {
+            "anyOf": [
+              {
+                "maximum": 50.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Baseline Rank"
+          },
+          "candidate_rank": {
+            "anyOf": [
+              {
+                "maximum": 50.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Candidate Rank"
+          },
+          "document_id": {
+            "format": "uuid",
+            "title": "Document Id",
+            "type": "string"
+          },
+          "relevance_grade": {
+            "minimum": 0.0,
+            "title": "Relevance Grade",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "document_id",
+          "relevance_grade"
+        ],
+        "title": "RelevantRankChange",
+        "type": "object"
+      },
+      "ReplayCounterfactualProbe": {
+        "additionalProperties": false,
+        "properties": {
+          "bm25_candidate_count": {
+            "maximum": 10000.0,
+            "minimum": 0.0,
+            "title": "Bm25 Candidate Count",
+            "type": "integer"
+          },
+          "candidates": {
+            "items": {
+              "$ref": "#/components/schemas/ReplayProbeCandidate"
+            },
+            "maxItems": 200,
+            "title": "Candidates",
+            "type": "array"
+          },
+          "config_id": {
+            "format": "uuid",
+            "title": "Config Id",
+            "type": "string"
+          },
+          "duration_ms": {
+            "minimum": 0.0,
+            "title": "Duration Ms",
+            "type": "number"
+          },
+          "observed_at": {
+            "format": "date-time",
+            "title": "Observed At",
+            "type": "string"
+          },
+          "origin": {
+            "const": "live_replay_counterfactual_probe",
+            "default": "live_replay_counterfactual_probe",
+            "title": "Origin",
+            "type": "string"
+          },
+          "trace_id": {
+            "format": "uuid",
+            "title": "Trace Id",
+            "type": "string"
+          },
+          "vector_candidate_count": {
+            "maximum": 10000.0,
+            "minimum": 0.0,
+            "title": "Vector Candidate Count",
+            "type": "integer"
+          },
+          "warnings": {
+            "items": {
+              "$ref": "#/components/schemas/ForensicWarning"
+            },
+            "maxItems": 10,
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "config_id",
+          "observed_at",
+          "trace_id",
+          "duration_ms",
+          "bm25_candidate_count",
+          "vector_candidate_count",
+          "candidates",
+          "warnings"
+        ],
+        "title": "ReplayCounterfactualProbe",
+        "type": "object"
+      },
+      "ReplayProbeCandidate": {
+        "additionalProperties": false,
+        "properties": {
+          "document_id": {
+            "format": "uuid",
+            "title": "Document Id",
+            "type": "string"
+          },
+          "stage_membership": {
+            "items": {
+              "$ref": "#/components/schemas/ProbeStageMembership"
+            },
+            "maxItems": 2,
+            "minItems": 1,
+            "title": "Stage Membership",
+            "type": "array"
+          }
+        },
+        "required": [
+          "document_id",
+          "stage_membership"
+        ],
+        "title": "ReplayProbeCandidate",
+        "type": "object"
+      },
+      "RetrievalConfigCatalogResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "configs": {
+            "items": {
+              "$ref": "#/components/schemas/RetrievalConfigSummary"
+            },
+            "maxItems": 4,
+            "minItems": 4,
+            "title": "Configs",
+            "type": "array"
+          },
+          "contract_version": {
+            "$ref": "#/components/schemas/ContractVersion",
+            "default": 1
+          },
+          "data_origin": {
+            "$ref": "#/components/schemas/DataOrigin"
+          },
+          "dataset_version_id": {
+            "format": "uuid",
+            "title": "Dataset Version Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "dataset_version_id",
+          "data_origin",
+          "configs"
+        ],
+        "title": "RetrievalConfigCatalogResponse",
         "type": "object"
       },
       "RetrievalConfigListResponse": {
@@ -575,6 +2901,110 @@
         "title": "RetrievalStage",
         "type": "string"
       },
+      "RrfContributionEvidenceValue": {
+        "additionalProperties": false,
+        "properties": {
+          "contribution": {
+            "exclusiveMinimum": 0.0,
+            "maximum": 100.0,
+            "title": "Contribution",
+            "type": "number"
+          },
+          "kind": {
+            "const": "rrf_contribution",
+            "default": "rrf_contribution",
+            "title": "Kind",
+            "type": "string"
+          },
+          "rank": {
+            "maximum": 10000.0,
+            "minimum": 1.0,
+            "title": "Rank",
+            "type": "integer"
+          },
+          "rank_constant": {
+            "maximum": 10000.0,
+            "minimum": 1.0,
+            "title": "Rank Constant",
+            "type": "integer"
+          },
+          "stage": {
+            "enum": [
+              "bm25_candidates",
+              "vector_candidates"
+            ],
+            "title": "Stage",
+            "type": "string"
+          },
+          "weight": {
+            "exclusiveMinimum": 0.0,
+            "maximum": 100.0,
+            "title": "Weight",
+            "type": "number"
+          }
+        },
+        "required": [
+          "stage",
+          "rank",
+          "weight",
+          "rank_constant",
+          "contribution"
+        ],
+        "title": "RrfContributionEvidenceValue",
+        "type": "object"
+      },
+      "RunEnvironment": {
+        "additionalProperties": false,
+        "properties": {
+          "max_concurrency": {
+            "maximum": 16.0,
+            "minimum": 1.0,
+            "title": "Max Concurrency",
+            "type": "integer"
+          },
+          "platform": {
+            "title": "Platform",
+            "type": "string"
+          },
+          "pufferlab_git_revision": {
+            "title": "Pufferlab Git Revision",
+            "type": "string"
+          },
+          "python_version": {
+            "title": "Python Version",
+            "type": "string"
+          },
+          "query_embedding_cache_enabled": {
+            "title": "Query Embedding Cache Enabled",
+            "type": "boolean"
+          },
+          "timing_source": {
+            "$ref": "#/components/schemas/TimingSource",
+            "default": "perf_counter"
+          },
+          "turbopuffer_region": {
+            "title": "Turbopuffer Region",
+            "type": "string"
+          },
+          "warmup_query_count": {
+            "default": 0,
+            "maximum": 50.0,
+            "minimum": 0.0,
+            "title": "Warmup Query Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "pufferlab_git_revision",
+          "turbopuffer_region",
+          "python_version",
+          "platform",
+          "max_concurrency",
+          "query_embedding_cache_enabled"
+        ],
+        "title": "RunEnvironment",
+        "type": "object"
+      },
       "ScoreDirection": {
         "enum": [
           "higher_is_better",
@@ -582,6 +3012,29 @@
         ],
         "title": "ScoreDirection",
         "type": "string"
+      },
+      "ScoreEvidenceValue": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "score",
+            "default": "score",
+            "title": "Kind",
+            "type": "string"
+          },
+          "score": {
+            "$ref": "#/components/schemas/ObservedScore"
+          },
+          "stage": {
+            "$ref": "#/components/schemas/RetrievalStage"
+          }
+        },
+        "required": [
+          "stage",
+          "score"
+        ],
+        "title": "ScoreEvidenceValue",
+        "type": "object"
       },
       "ScoreKind": {
         "enum": [
@@ -636,7 +3089,7 @@
           "filter_override": {
             "anyOf": [
               {
-                "$ref": "#/components/schemas/FilterNode"
+                "$ref": "#/components/schemas/FilterNode-Input"
               },
               {
                 "type": "null"
@@ -873,6 +3326,14 @@
         "title": "StageTiming",
         "type": "object"
       },
+      "TimingSource": {
+        "enum": [
+          "perf_counter",
+          "synthetic_unavailable"
+        ],
+        "title": "TimingSource",
+        "type": "string"
+      },
       "TimingStage": {
         "enum": [
           "embed",
@@ -884,6 +3345,25 @@
         ],
         "title": "TimingStage",
         "type": "string"
+      },
+      "WarningEvidenceValue": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "$ref": "#/components/schemas/ForensicWarningCode"
+          },
+          "kind": {
+            "const": "warning",
+            "default": "warning",
+            "title": "Kind",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code"
+        ],
+        "title": "WarningEvidenceValue",
+        "type": "object"
       }
     }
   },
@@ -935,6 +3415,966 @@
         ]
       }
     },
+    "/api/v1/datasets": {
+      "get": {
+        "operationId": "list_evaluation_datasets",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DatasetListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "The requested revision was not found."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "The persisted catalog is not canonical."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "The catalog request is invalid."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "The request failed unexpectedly."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "Stored catalog data is unavailable."
+          }
+        },
+        "summary": "List Evaluation Datasets",
+        "tags": [
+          "evaluation catalogs"
+        ]
+      }
+    },
+    "/api/v1/datasets/{dataset_version_id}": {
+      "get": {
+        "operationId": "get_evaluation_dataset",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "dataset_version_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Dataset Version Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DatasetDetailResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "The requested revision was not found."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "The persisted catalog is not canonical."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "The catalog request is invalid."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "The request failed unexpectedly."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "Stored catalog data is unavailable."
+          }
+        },
+        "summary": "Get Evaluation Dataset",
+        "tags": [
+          "evaluation catalogs"
+        ]
+      }
+    },
+    "/api/v1/datasets/{dataset_version_id}/configs": {
+      "get": {
+        "operationId": "list_dataset_evaluation_configs",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "dataset_version_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Dataset Version Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RetrievalConfigCatalogResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "The requested revision was not found."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "The persisted catalog is not canonical."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "The catalog request is invalid."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "The request failed unexpectedly."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "Stored catalog data is unavailable."
+          }
+        },
+        "summary": "List Dataset Evaluation Configs",
+        "tags": [
+          "evaluation catalogs"
+        ]
+      }
+    },
+    "/api/v1/eval-runs": {
+      "get": {
+        "operationId": "list_evaluation_runs",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvalRunListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "The requested evaluation record was not found."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "The requested evaluation action conflicts."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "The evaluation request is invalid."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "The request failed unexpectedly."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "Evaluation data or runtime is unavailable."
+          }
+        },
+        "summary": "List Evaluation Runs",
+        "tags": [
+          "evaluation runs"
+        ]
+      },
+      "post": {
+        "operationId": "create_evaluation_run",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateEvalRunRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateEvalRunResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "The requested evaluation record was not found."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "The requested evaluation action conflicts."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "The evaluation request is invalid."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "The request failed unexpectedly."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "Evaluation data or runtime is unavailable."
+          }
+        },
+        "summary": "Create Evaluation Run",
+        "tags": [
+          "evaluation runs"
+        ]
+      }
+    },
+    "/api/v1/eval-runs/{run_id}": {
+      "get": {
+        "operationId": "get_evaluation_run",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvalRunDetailResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "The requested evaluation record was not found."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "The requested evaluation action conflicts."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "The evaluation request is invalid."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "The request failed unexpectedly."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "Evaluation data or runtime is unavailable."
+          }
+        },
+        "summary": "Get Evaluation Run",
+        "tags": [
+          "evaluation runs"
+        ]
+      }
+    },
+    "/api/v1/eval-runs/{run_id}/cancel": {
+      "post": {
+        "operationId": "cancel_evaluation_run",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CancelEvalRunResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "The requested evaluation record was not found."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "The requested evaluation action conflicts."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "The evaluation request is invalid."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "The request failed unexpectedly."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "Evaluation data or runtime is unavailable."
+          }
+        },
+        "summary": "Cancel Evaluation Run",
+        "tags": [
+          "evaluation runs"
+        ]
+      }
+    },
+    "/api/v1/eval-runs/{run_id}/export": {
+      "get": {
+        "operationId": "export_evaluation_run",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvalRunExportResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "The requested evaluation record was not found."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "The requested evaluation action conflicts."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "The evaluation request is invalid."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "The request failed unexpectedly."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "Evaluation data or runtime is unavailable."
+          }
+        },
+        "summary": "Export Evaluation Run",
+        "tags": [
+          "evaluation runs"
+        ]
+      }
+    },
+    "/api/v1/eval-runs/{run_id}/queries/{query_id}": {
+      "get": {
+        "operationId": "get_evaluation_run_query",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "query_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Query Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvalRunQueryDetailResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "The requested evaluation record was not found."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "The requested evaluation action conflicts."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "The evaluation request is invalid."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "The request failed unexpectedly."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "Evaluation data or runtime is unavailable."
+          }
+        },
+        "summary": "Get Evaluation Run Query",
+        "tags": [
+          "evaluation runs"
+        ]
+      }
+    },
+    "/api/v1/eval-runs/{run_id}/queries/{query_id}/replay": {
+      "post": {
+        "operationId": "replay_evaluation_run_query",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "query_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Query Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EvalRunQueryReplayRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvalRunQueryReplayResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "The requested evaluation record was not found."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "The requested evaluation action conflicts."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "The evaluation request is invalid."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "The request failed unexpectedly."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "Evaluation data or runtime is unavailable."
+          }
+        },
+        "summary": "Replay Evaluation Run Query",
+        "tags": [
+          "evaluation runs"
+        ]
+      }
+    },
+    "/api/v1/eval-runs/{run_id}/regressions": {
+      "get": {
+        "operationId": "get_evaluation_regressions",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "candidate_config_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Candidate Config Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "order",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/RegressionOrder",
+              "default": "regressions"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 10,
+              "maximum": 50,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RegressionResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "The requested evaluation record was not found."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "The requested evaluation action conflicts."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "The evaluation request is invalid."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "The request failed unexpectedly."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "Evaluation data or runtime is unavailable."
+          }
+        },
+        "summary": "Get Evaluation Regressions",
+        "tags": [
+          "evaluation runs"
+        ]
+      }
+    },
     "/api/v1/health": {
       "get": {
         "operationId": "get_health",
@@ -953,6 +4393,89 @@
         "summary": "Get Health",
         "tags": [
           "system"
+        ]
+      }
+    },
+    "/api/v1/query-sets": {
+      "get": {
+        "operationId": "list_evaluation_query_sets",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "dataset_version_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Dataset Version Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QuerySetListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "The requested revision was not found."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "The persisted catalog is not canonical."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "The catalog request is invalid."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "The request failed unexpectedly."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "Stored catalog data is unavailable."
+          }
+        },
+        "summary": "List Evaluation Query Sets",
+        "tags": [
+          "evaluation catalogs"
         ]
       }
     },

@@ -32,10 +32,15 @@ from pufferlab.cli.ingest import (
     TinyIngestionCommandError,
     resolve_owned_namespace,
 )
+from pufferlab.cli.synthetic_demo import (
+    render_synthetic_demo,
+    seed_synthetic_demo_database,
+)
 from pufferlab.config import Settings
 from pufferlab.contracts.common import ContractModel
 from pufferlab.contracts.evals import EvalRun, EvalRunStatus
 from pufferlab.datasets.ingestion import IngestionReport
+from pufferlab.synthetic_demo import SyntheticDemoSeedResult
 
 _UNIX_PREFIX = "pufferlab-unix-"
 _UNIX_DATASET_DIR = Path("datasets/cqadupstack-unix")
@@ -49,6 +54,10 @@ class _IngestRunner(Protocol):
         *,
         emit: Callable[[str], None],
     ) -> IngestionReport: ...
+
+
+class _SyntheticDemoSeedRunner(Protocol):
+    def __call__(self, settings: Settings) -> SyntheticDemoSeedResult: ...
 
 
 class _EvaluationInterrupted(Exception):
@@ -70,6 +79,7 @@ def main(
     *,
     settings_factory: Callable[[], Settings] = Settings,
     ingest_runner: _IngestRunner | None = None,
+    synthetic_demo_seed_runner: _SyntheticDemoSeedRunner | None = None,
     cli_application_factory: CliApplicationFactory | None = None,
     run_id_factory: Callable[[], UUID] = uuid4,
     stdout: TextIO | None = None,
@@ -85,6 +95,14 @@ def main(
             arguments,
             settings_factory=settings_factory,
             ingest_runner=ingest_runner,
+            output=output,
+            error_output=error_output,
+        )
+
+    if arguments.command == "demo" and arguments.demo_command == "seed":
+        return _run_synthetic_demo_seed(
+            settings_factory=settings_factory,
+            seed_runner=synthetic_demo_seed_runner,
             output=output,
             error_output=error_output,
         )
@@ -179,6 +197,25 @@ def main(
         return 1
 
     raise AssertionError("argparse returned an unknown command")
+
+
+def _run_synthetic_demo_seed(
+    *,
+    settings_factory: Callable[[], Settings],
+    seed_runner: _SyntheticDemoSeedRunner | None,
+    output: TextIO,
+    error_output: TextIO,
+) -> int:
+    try:
+        result = (seed_runner or seed_synthetic_demo_database)(settings_factory())
+        render_synthetic_demo(result, emit=lambda message: print(message, file=output))
+    except KeyboardInterrupt:
+        print("error: command cancelled", file=error_output)
+        return 130
+    except Exception:
+        print("error: synthetic demo seed failed", file=error_output)
+        return 1
+    return 0
 
 
 def _run_tiny_ingest(
@@ -396,6 +433,18 @@ def _parser() -> argparse.ArgumentParser:
     evaluation_commands = evaluation.add_subparsers(dest="eval_command", required=True)
     _add_eval_run_parser(evaluation_commands)
     _add_eval_export_parser(evaluation_commands)
+
+    demo = commands.add_parser("demo", help="Manage the provider-free offline dashboard demo.")
+    demo_commands = demo.add_subparsers(dest="demo_command", required=True)
+    demo_commands.add_parser(
+        "seed",
+        help="Seed one deterministic synthetic 50-query evaluation into local SQLite.",
+        description=(
+            "Seed one deterministic, read/export-only synthetic evaluation into the configured "
+            "PUFFERLAB_DATA_DIR. This command requires no API key, model, provider, or network "
+            "access and writes no export artifact. Re-running it verifies the same durable state."
+        ),
+    )
     return parser
 
 
