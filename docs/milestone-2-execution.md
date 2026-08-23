@@ -165,6 +165,7 @@ dependencies are on protected `main`; M2-F is the single goal-finalization PR.
 - **Owner:** root orchestrator plus dedicated reviewer
 - **Branch:** `codex/m2-live-finalization`
 - **Dependencies:** merged M2-E and all protected-main checks green
+- **Runbook:** [`milestone-2-live-verification.md`](milestone-2-live-verification.md)
 - **Acceptance:** a fresh isolated namespace ingests the Unix pack, the 50-query suite completes
   across four configurations, the persisted summary independently recomputes from stored outcomes,
   secrets/raw vectors/corpus data remain outside Git and browser artifacts, exact namespace cleanup
