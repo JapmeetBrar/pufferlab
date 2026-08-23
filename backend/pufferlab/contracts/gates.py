@@ -70,9 +70,9 @@ class GateCandidateErrorRateCheck(_FrozenGateModel):
     @model_validator(mode="after")
     def validate_result(self) -> "GateCandidateErrorRateCheck":
         expected_rate = self.failed_candidate_queries / self.sample_count
-        if abs(self.observed_error_rate - expected_rate) > 1e-12:
+        if self.observed_error_rate != expected_rate:
             raise ValueError("candidate error rate must use all 50 attempts")
-        if self.passed != (self.observed_error_rate <= self.max_error_rate):
+        if self.passed != (expected_rate <= self.max_error_rate):
             raise ValueError("error-rate result must honor the inclusive threshold")
         return self
 

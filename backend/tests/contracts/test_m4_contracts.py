@@ -312,6 +312,27 @@ def test_gate_report_excludes_every_candidate_failure_from_paired_queries() -> N
 
 
 @pytest.mark.parametrize(
+    ("observed_error_rate", "max_error_rate", "passed"),
+    [
+        (0.0199999999995, 0.01999999999975, True),
+        (0.0200000000005, 0.02000000000025, False),
+    ],
+)
+def test_candidate_error_rate_rejects_approximate_false_verdicts(
+    observed_error_rate: float,
+    max_error_rate: float,
+    passed: bool,
+) -> None:
+    with pytest.raises(ValidationError, match="must use all 50 attempts"):
+        GateCandidateErrorRateCheck(
+            passed=passed,
+            failed_candidate_queries=1,
+            observed_error_rate=observed_error_rate,
+            max_error_rate=max_error_rate,
+        )
+
+
+@pytest.mark.parametrize(
     ("model", "payload"),
     [
         (
