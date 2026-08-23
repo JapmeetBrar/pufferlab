@@ -47,9 +47,17 @@ from pufferlab.contracts.retrieval import (
     RrfSpec,
     VectorSpec,
 )
-from pufferlab.jobs.eval_runner import encode_outcome_payload, finalize_durable_outcomes
+from pufferlab.evals.metrics import evaluate_ranking
+from pufferlab.evals.models import Judgment
+from pufferlab.jobs.eval_runner import (
+    decode_outcome_payload,
+    encode_outcome_payload,
+    finalize_durable_outcomes,
+)
 from pufferlab.persistence import Database, PufferLabRepository, QueryOutcome, QueryOutcomeStatus
+from pufferlab.persistence.canonical import canonical_json
 from pufferlab.persistence.models import QueryOutcomeRow
+from sqlalchemy import select
 
 _NAMESPACE = UUID("6c8d76a2-495f-4c12-a2cc-9a632ddff602")
 _NOW = datetime(2026, 8, 23, 16, 0, tzinfo=UTC)
@@ -252,27 +260,31 @@ def _outcome(
     query_index: int,
     config_index: int,
 ) -> QueryOutcome:
-    has_positive_qrels = any(qrel.relevance_grade > 0 for qrel in graph.queries[query_index].qrels)
+    ranked_document_ids = _ranked_ids(query_index, config_index)
+    evaluated = evaluate_ranking(
+        ranked_document_ids,
+        [
+            Judgment(
+                document_id=qrel.document_id,
+                relevance_grade=qrel.relevance_grade,
+            )
+            for qrel in graph.queries[query_index].qrels
+        ],
+    )
     payload = EvalSuccessPayload(
-        ranked_document_ids=_ranked_ids(query_index, config_index),
+        ranked_document_ids=ranked_document_ids,
         metrics=PerQueryMetrics(
-            ndcg_at_10=(0.6, 0.4, 0.8, 0.7)[config_index] if has_positive_qrels else None,
-            recall_at_50=1.0 if has_positive_qrels else None,
-            mrr_at_10=(0.5, 0.3, 1.0, 0.7)[config_index] if has_positive_qrels else None,
+            ndcg_at_10=evaluated.ndcg_at_10,
+            recall_at_50=evaluated.recall_at_50,
+            mrr_at_10=evaluated.mrr_at_10,
         ),
         total_client_wall_latency_ms=10.0 + config_index,
         stage_timings=[],
         candidate_counts={"retrieved": 50},
-        warnings=(
-            []
-            if has_positive_qrels
-            else [
-                EvalOutcomeWarning(
-                    code="no_positive_qrels",
-                    message="quality metrics are undefined because there are no positive qrels",
-                )
-            ]
-        ),
+        warnings=[
+            EvalOutcomeWarning(code=warning.code.value, message=warning.message)
+            for warning in evaluated.warnings
+        ],
         trace_id=_id(f"trace-{run.id}-{query_index}-{config_index}"),
     )
     return QueryOutcome(
@@ -355,9 +367,19 @@ def _persist_six_status_runs(
 def test_catalogs_and_all_six_run_states_are_provider_free(
     repository: PufferLabRepository,
     graph: CanonicalGraph,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runs = _persist_six_status_runs(repository, graph)
     service = EvaluationViewService(repository)
+    original_list_query_ids = repository.list_query_ids
+    query_id_reads = 0
+
+    def counted_list_query_ids(query_set_id: UUID, *, limit: int = 100) -> list[UUID]:
+        nonlocal query_id_reads
+        query_id_reads += 1
+        return original_list_query_ids(query_set_id, limit=limit)
+
+    monkeypatch.setattr(repository, "list_query_ids", counted_list_query_ids)
 
     assert service.list_datasets().datasets[0].dataset == graph.dataset
     assert service.get_dataset(graph.dataset.id).data_origin is DataOrigin.LIVE
@@ -370,6 +392,7 @@ def test_catalogs_and_all_six_run_states_are_provider_free(
     ]
 
     listed = service.list_eval_runs(EvalRunListQuery(limit=6))
+    assert query_id_reads == 1
     assert {item.run.status for item in listed.runs} == set(EvalRunStatus)
     for status, run in runs.items():
         detail = service.get_eval_run(run.id).result
@@ -405,7 +428,7 @@ def test_regressions_use_durable_pairing_and_exact_qrels_through_rank_50(
     assert regression.coverage.paired_queries == 50
     assert sum(item.count for item in regression.coverage.excluded) == 0
     row = next(item for item in regression.rows if item.query_id == graph.queries[0].id)
-    assert row.ndcg_delta == pytest.approx(-0.2)
+    assert row.ndcg_delta == 0.0
     assert row.relevant_rank_changes[0].baseline_rank == 50
     assert row.relevant_rank_changes[0].candidate_rank == 11
     assert "Safe test query" not in row.playground_url
@@ -487,6 +510,86 @@ def test_corrupt_durable_outcome_is_a_redacted_unavailable_error(
         EvaluationViewService(repository).export_eval_run(run.id)
     assert unavailable.value.http_status == 503
     assert str(unavailable.value) == "stored evaluation data is temporarily unavailable"
+
+
+def test_completed_foreign_query_identity_attack_fails_every_run_projection(
+    database: Database,
+    repository: PufferLabRepository,
+    graph: CanonicalGraph,
+) -> None:
+    completed = _persist_six_status_runs(repository, graph)[EvalRunStatus.COMPLETED]
+    original_query_id = graph.queries[0].id
+    foreign_query_id = _id("foreign-durable-query")
+    with database.session_factory.begin() as session:
+        rows = session.scalars(
+            select(QueryOutcomeRow).where(
+                QueryOutcomeRow.run_id == str(completed.id),
+                QueryOutcomeRow.query_id == str(original_query_id),
+            )
+        ).all()
+        assert len(rows) == 4
+        for row in rows:
+            durable = QueryOutcome.model_validate_json(row.payload_json).model_copy(
+                update={"query_id": foreign_query_id}
+            )
+            row.query_id = str(foreign_query_id)
+            row.payload_json = canonical_json(durable)
+
+    service = EvaluationViewService(repository)
+    loaders = (
+        lambda: service.list_eval_runs(EvalRunListQuery(limit=6)),
+        lambda: service.get_eval_run(completed.id),
+        lambda: service.export_eval_run(completed.id),
+    )
+    for loader in loaders:
+        with pytest.raises(EvaluationViewError) as unavailable:
+            loader()
+        assert unavailable.value.http_status == 503
+        assert str(unavailable.value) == "stored evaluation data is temporarily unavailable"
+
+
+def test_valid_shaped_metric_corruption_fails_qrel_bearing_views(
+    database: Database,
+    repository: PufferLabRepository,
+    graph: CanonicalGraph,
+) -> None:
+    completed = _persist_six_status_runs(repository, graph)[EvalRunStatus.COMPLETED]
+    query_id = graph.queries[0].id
+    with database.session_factory.begin() as session:
+        row = session.get(
+            QueryOutcomeRow,
+            (str(completed.id), str(graph.configs[0].id), str(query_id)),
+        )
+        assert row is not None
+        durable = QueryOutcome.model_validate_json(row.payload_json)
+        payload = decode_outcome_payload(durable)
+        assert isinstance(payload, EvalSuccessPayload)
+        corrupted_payload = payload.model_copy(
+            update={
+                "metrics": PerQueryMetrics(
+                    ndcg_at_10=1.0,
+                    recall_at_50=1.0,
+                    mrr_at_10=1.0,
+                )
+            }
+        )
+        row.payload_json = canonical_json(
+            durable.model_copy(update={"payload": encode_outcome_payload(corrupted_payload)})
+        )
+
+    service = EvaluationViewService(repository)
+    loaders = (
+        lambda: service.get_regressions(
+            completed.id,
+            RegressionQuery(candidate_config_id=graph.configs[1].id, limit=50),
+        ),
+        lambda: service.get_query_detail(completed.id, query_id),
+    )
+    for loader in loaders:
+        with pytest.raises(EvaluationViewError) as unavailable:
+            loader()
+        assert unavailable.value.http_status == 503
+        assert str(unavailable.value) == "stored evaluation data is temporarily unavailable"
 
 
 class _OriginViews:

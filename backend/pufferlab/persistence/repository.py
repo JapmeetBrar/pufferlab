@@ -254,6 +254,46 @@ class PufferLabRepository:
                 raise RecordNotFoundError("judged query was not found in the requested query set")
             return self._load_judged_query(session, row)
 
+    def list_query_ids(
+        self,
+        query_set_id: UUID,
+        *,
+        limit: int = _MAX_CATALOG_ROWS,
+    ) -> list[UUID]:
+        """Return only bounded indexed identities for one immutable query-set revision."""
+        self._validate_limit(limit, maximum=_MAX_CATALOG_ROWS)
+        with self._session_factory() as session:
+            query_set_row = session.get(QuerySetRow, str(query_set_id))
+            if query_set_row is None:
+                raise RecordNotFoundError(f"query set {query_set_id} was not found")
+            query_set = self._decode_query_set_row(query_set_row)
+            rows = session.execute(
+                select(JudgedQueryRow.query_id, JudgedQueryRow.ordinal)
+                .where(JudgedQueryRow.query_set_id == str(query_set_id))
+                .order_by(JudgedQueryRow.ordinal)
+                .limit(limit + 1)
+            ).all()
+            if len(rows) > limit:
+                raise PersistenceValidationError(
+                    "judged-query identity selection exceeds its bound"
+                )
+            try:
+                query_ids = [UUID(query_id) for query_id, _ordinal in rows]
+            except ValueError:
+                raise PersistenceValidationError(
+                    "stored judged-query identity is invalid"
+                ) from None
+            ordinals = [ordinal for _query_id, ordinal in rows]
+            if (
+                len(query_ids) != query_set.query_count
+                or len(query_ids) != len(set(query_ids))
+                or ordinals != list(range(len(rows)))
+            ):
+                raise PersistenceValidationError(
+                    "stored judged-query identities do not match the query-set revision"
+                )
+            return query_ids
+
     def list_query_sets(
         self,
         *,

@@ -8,6 +8,7 @@ from pufferlab.application.view_errors import (
     EvaluationViewError,
     evaluation_conflict,
     evaluation_not_found,
+    evaluation_unavailable,
 )
 from pufferlab.contracts.catalog import (
     DatasetCatalogItem,
@@ -408,8 +409,11 @@ def test_evaluation_errors_are_direct_redacted_and_validation_precedes_facade() 
         operation="list_dataset_configs",
     )
     conflict = client.get(f"/api/v1/datasets/{views.dataset.id}/configs")
-    calls_after_missing = list(views.calls)
+    views.failure = evaluation_unavailable(operation="export_eval_run")
+    unavailable = client.get(f"/api/v1/eval-runs/{views.view.run.id}/export")
+    calls_before_invalid = list(views.calls)
     invalid = client.get("/api/v1/eval-runs/not-a-uuid")
+    invalid_limit = client.get("/api/v1/eval-runs?limit=101")
 
     assert missing.status_code == 404
     assert missing.json()["code"] == "not_found"
@@ -421,9 +425,16 @@ def test_evaluation_errors_are_direct_redacted_and_validation_precedes_facade() 
     assert conflict.status_code == 409
     assert conflict.json()["code"] == "run_conflict"
     assert conflict.json()["details"] == {"operation": "list_dataset_configs"}
+    assert unavailable.status_code == 503
+    assert unavailable.json()["code"] == "internal_error"
+    assert unavailable.json()["message"] == "stored evaluation data is temporarily unavailable"
+    assert unavailable.json()["details"] == {"operation": "export_eval_run"}
+    assert "sqlite-provider-secret" not in unavailable.text
     assert invalid.status_code == 422
     assert invalid.json()["message"] == "request validation failed"
-    assert views.calls == calls_after_missing
+    assert invalid_limit.status_code == 422
+    assert invalid_limit.json()["message"] == "request validation failed"
+    assert views.calls == calls_before_invalid
 
 
 def test_openapi_freezes_all_evaluation_routes_and_contract_schemas() -> None:

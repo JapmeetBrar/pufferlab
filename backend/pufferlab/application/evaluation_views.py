@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections import Counter
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -58,9 +59,11 @@ from pufferlab.contracts.retrieval import (
     RetrievalConfigSummary,
     RetrievalMode,
 )
+from pufferlab.evals.metrics import evaluate_ranking
 from pufferlab.evals.models import (
     EvaluationWarning,
     EvaluationWarningCode,
+    Judgment,
     PairStatus,
     QueryMetrics,
 )
@@ -72,6 +75,7 @@ from pufferlab.persistence.repository import PufferLabRepository
 
 _CANONICAL_QUERY_COUNT = 50
 _CANONICAL_CONFIG_COUNT = 4
+_QUALITY_METRIC_TOLERANCE = 1e-12
 _CANONICAL_CONFIG_MODES = (
     RetrievalMode.BM25,
     RetrievalMode.VECTOR,
@@ -144,12 +148,7 @@ class EvaluationViewService:
     def list_eval_runs(self, query: EvalRunListQuery) -> EvalRunListResponse:
         return self._read(
             "list_eval_runs",
-            lambda: EvalRunListResponse(
-                runs=[
-                    self._run_view(self._load_run_context(run))
-                    for run in self._repository.list_runs(limit=query.limit)
-                ]
-            ),
+            lambda: self._run_list(query),
         )
 
     def get_eval_run(self, run_id: UUID) -> EvalRunDetailResponse:
@@ -234,7 +233,26 @@ class EvaluationViewService:
             configs=[self._config_summary(config) for config in ordered],
         )
 
-    def _load_run_context(self, run: EvalRun) -> _RunContext:
+    def _run_list(self, query: EvalRunListQuery) -> EvalRunListResponse:
+        query_ids_by_set: dict[UUID, frozenset[UUID]] = {}
+        return EvalRunListResponse(
+            runs=[
+                self._run_view(
+                    self._load_run_context(
+                        run,
+                        query_ids_by_set=query_ids_by_set,
+                    )
+                )
+                for run in self._repository.list_runs(limit=query.limit)
+            ]
+        )
+
+    def _load_run_context(
+        self,
+        run: EvalRun,
+        *,
+        query_ids_by_set: dict[UUID, frozenset[UUID]] | None = None,
+    ) -> _RunContext:
         query_set = self._repository.get_query_set_revision(run.query_set.id)
         expected_summary = QuerySetSummary(
             id=query_set.id,
@@ -253,7 +271,17 @@ class EvaluationViewService:
             export_outcome_record(outcome)
             for outcome in self._repository.list_outcomes(run.id, limit=200)
         )
-        self._validate_outcome_scope(run, query_set, configs, outcomes)
+        query_ids = None if query_ids_by_set is None else query_ids_by_set.get(query_set.id)
+        if query_ids is None:
+            selected_query_ids = self._repository.list_query_ids(query_set.id, limit=50)
+            query_ids = frozenset(selected_query_ids)
+            if len(selected_query_ids) != _CANONICAL_QUERY_COUNT or len(query_ids) != len(
+                selected_query_ids
+            ):
+                raise ValueError("P0 run views require exactly 50 unique judged-query identities")
+            if query_ids_by_set is not None:
+                query_ids_by_set[query_set.id] = query_ids
+        self._validate_outcome_scope(run, query_set, configs, outcomes, query_ids=query_ids)
         return _RunContext(
             run=run,
             query_set=query_set,
@@ -268,15 +296,20 @@ class EvaluationViewService:
         query_set: QuerySet,
         configs: Sequence[RetrievalConfig],
         outcomes: Sequence[EvalOutcomeRecord],
+        *,
+        query_ids: frozenset[UUID],
     ) -> None:
         config_ids = {config.id for config in configs}
         identities = [(outcome.config_id, outcome.query_id) for outcome in outcomes]
         if len(identities) != len(set(identities)):
             raise ValueError("durable run outcomes contain duplicate identities")
         if any(
-            outcome.run_id != run.id or outcome.config_id not in config_ids for outcome in outcomes
+            outcome.run_id != run.id
+            or outcome.config_id not in config_ids
+            or outcome.query_id not in query_ids
+            for outcome in outcomes
         ):
-            raise ValueError("durable outcome is outside its run/config scope")
+            raise ValueError("durable outcome is outside its run/config/query-set scope")
         if query_set.query_count != _CANONICAL_QUERY_COUNT:
             raise ValueError("P0 run views require exactly 50 judged queries")
 
@@ -527,10 +560,44 @@ class EvaluationViewService:
         payload = record.outcome
         if isinstance(payload, EvalFailurePayload):
             return
-        has_positive_qrels = any(qrel.relevance_grade > 0 for qrel in query.qrels)
-        has_defined_quality = payload.metrics.ndcg_at_10 is not None
-        if has_positive_qrels != has_defined_quality:
-            raise ValueError("durable quality evidence does not match the exact stored qrels")
+        recomputed = evaluate_ranking(
+            payload.ranked_document_ids,
+            [
+                Judgment(
+                    document_id=qrel.document_id,
+                    relevance_grade=qrel.relevance_grade,
+                )
+                for qrel in query.qrels
+            ],
+        )
+        stored_values = (
+            payload.metrics.ndcg_at_10,
+            payload.metrics.recall_at_50,
+            payload.metrics.mrr_at_10,
+        )
+        recomputed_values = (
+            recomputed.ndcg_at_10,
+            recomputed.recall_at_50,
+            recomputed.mrr_at_10,
+        )
+        if any(
+            not EvaluationViewService._quality_metric_matches(stored, expected)
+            for stored, expected in zip(stored_values, recomputed_values, strict=True)
+        ):
+            raise ValueError(
+                "durable quality metrics do not match the ranked IDs and exact stored qrels"
+            )
+
+    @staticmethod
+    def _quality_metric_matches(stored: float | None, expected: float | None) -> bool:
+        if stored is None or expected is None:
+            return stored is expected
+        return math.isclose(
+            stored,
+            expected,
+            rel_tol=_QUALITY_METRIC_TOLERANCE,
+            abs_tol=_QUALITY_METRIC_TOLERANCE,
+        )
 
     @staticmethod
     def _success_payload(record: EvalOutcomeRecord | None) -> EvalSuccessPayload | None:

@@ -133,6 +133,9 @@ def test_read_selectors_are_bounded_ordered_and_run_scoped(
 
     assert repository.list_runs(limit=1) == [min((first, second), key=lambda run: str(run.id))]
     assert repository.list_run_configs(first.id) == list(sample_graph.configs)
+    assert repository.list_query_ids(sample_graph.query_set.id) == [
+        query.id for query in sample_graph.queries
+    ]
     assert (
         repository.get_judged_query(
             sample_graph.query_set.id,
@@ -147,6 +150,10 @@ def test_read_selectors_are_bounded_ordered_and_run_scoped(
         )
     with pytest.raises(PersistenceValidationError, match="between 1 and 100"):
         repository.list_runs(limit=0)
+    with pytest.raises(PersistenceValidationError, match="between 1 and 100"):
+        repository.list_runs(limit=101)
+    with pytest.raises(PersistenceValidationError, match="between 1 and 100"):
+        repository.list_query_ids(sample_graph.query_set.id, limit=101)
     with pytest.raises(PersistenceValidationError, match="between 1 and 100"):
         repository.list_dataset_versions(limit=True)
 
