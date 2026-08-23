@@ -63,7 +63,9 @@ namespace, and immutable configs and returns new evidence labeled `live_replay`.
   never resumed from an uncertain partial execution.
 - A fresh checkout can seed one explicitly synthetic 50-query/four-config completed run into its
   configured SQLite database without a provider, API key, generated database, export, or licensed
-  text in Git. The normal read API serves that run and labels its origin `synthetic_demo`.
+  text in Git. The normal read API serves that run and labels its origin `synthetic_demo`; every
+  cost-bearing create/recovery/replay path rejects that origin before constructing credentials,
+  embedders, retrieval runtimes, or provider clients.
 - Immutable sanitized trace capture for future runs would require a separate reviewed migration and
   versioned codec; it is outside this P0 goal.
 
@@ -155,6 +157,16 @@ POST /api/v1/eval-runs/{run_id}/queries/{query_id}/replay
 - Synthetic identities are content-addressed and immutable. Re-running the command neither creates
   duplicate rows nor changes the canonical export bytes. Catalog/run responses expose
   `data_origin=synthetic_demo`, and the UI never presents the data as a live or CQADupStack run.
+- The synthetic suite is read/export-only. `POST /eval-runs`, queued-run recovery, replay, and any
+  other provider-capable surface reject `synthetic_demo` directly with one redacted typed error
+  before credential, embedder, bound-catalog, search-runtime, or provider factories are called. The
+  browser hides or disables create/replay cost controls for synthetic data and explains why.
+- Checked-in seed evidence contains authored qrels and ranked document IDs, not copied metric or
+  summary values. The seeder derives every per-query quality metric with the normal evaluator and
+  every run summary with the normal aggregator. Seeded success outcomes use
+  `timing_source=synthetic_unavailable`: total/stage latency is `null`, latency summary sample count
+  is zero, and percentile values are `null`; no fake `perf_counter` or observed-client-wall-clock
+  measurement is emitted.
 - A clean temporary data directory must seed and serve the complete run through the same list,
   detail, regression, query, and export paths used by real stored runs. M3-F rehearses and documents
   this already-implemented path; it does not introduce the fallback for the first time.
@@ -244,9 +256,10 @@ PR; its own merge/check record remains canonical in GitHub.
 - **Files:** evaluation/catalog/forensic Pydantic contracts, contract documentation/tests
 - **Acceptance:** freeze versioned catalog, run-list/detail, regression coverage, query-detail,
   cancel, export, and live-replay envelopes; preserve canonical 50-by-four validation; freeze
-  `data_origin`, queued recovery/error transitions, and per-observation evidence origins/certainty;
-  add strict size/shape validation to forensic evidence; correct RunEnvironment documentation; no
-  provider, persistence, FastAPI, or handwritten TypeScript domain models.
+  `data_origin`, `timing_source`, unavailable synthetic latency, queued recovery/error transitions,
+  and per-observation evidence origins/certainty; add strict size/shape validation to forensic
+  evidence; correct RunEnvironment documentation; no provider, persistence, FastAPI, or handwritten
+  TypeScript domain models.
 
 ### M3-B — Durable read models and eval HTTP surface
 
@@ -261,8 +274,10 @@ PR; its own merge/check record remains canonical in GitHub.
   all six run statuses export/read; API errors are direct and redacted; a clean temporary data
   directory seeds exactly 50 synthetic queries, four canonical configs, and 200 successes without
   network/credentials and then serves every read/export path; the seed is idempotent,
-  content-addressed, explicitly `synthetic_demo`, and produces no tracked database/export; generated
-  artifacts do not drift.
+  content-addressed, explicitly `synthetic_demo`, and produces no tracked database/export; quality
+  metrics/summaries are derived from seeded ranks/qrels through the production evaluator/aggregator;
+  synthetic latency is unavailable with zero samples/null percentiles; generated artifacts do not
+  drift.
 
 ### M3-C — Run dashboard
 
@@ -274,7 +289,8 @@ PR; its own merge/check record remains canonical in GitHub.
   states; active-only polling stops correctly; metrics retain value/sample count/null semantics;
   regression ordering and excluded coverage are visible; status is not color-only; semantic tables,
   progress announcements, route focus, 320/390 px layouts, keyboard access, generated types, and
-  production build pass.
+  production build pass. Synthetic data is unmistakably labeled, and provider-costing create/replay
+  controls are hidden or disabled with explanatory copy.
 
 ### M3-D — Dataset-bound execution and control runtime
 
@@ -289,7 +305,9 @@ PR; its own merge/check record remains canonical in GitHub.
   preserves evidence; fatal errors are safe; shutdown drains jobs, closes search runtimes, then
   disposes SQLite; a post-commit/pre-schedule restart reclaims valid queued work oldest-first,
   unreconstructable queued work fails safely without a provider call, stale running work becomes
-  interrupted, and one-worker constraint is enforced/documented.
+  interrupted, and one-worker constraint is enforced/documented. Create and adversarial queued
+  recovery for `synthetic_demo` fail directly before credential/embedder/catalog/runtime/provider
+  factories; zero-call tests cover every factory boundary.
 
 ### M3-E — Regression deep links and observable query forensics
 
@@ -304,7 +322,8 @@ PR; its own merge/check record remains canonical in GitHub.
   degrade to stored evidence plus `NOT_OBSERVABLE`; bounded RRF contribution inputs/math remain
   inspectable with their exact origin; reranker copy is score/rank only; stable deep links restore
   run/query/config/document state; drawer keyboard focus/Escape/return and forbidden-claim goldens
-  pass.
+  pass. A synthetic run/query replay is rejected before every provider-related factory with the same
+  redacted typed error and no network-capable object constructed.
 
 ### M3-F — Interview QA and finalization
 
@@ -337,6 +356,9 @@ PR; its own merge/check record remains canonical in GitHub.
 10. UI explanations map to typed evidence; unsupported causes are `NOT_OBSERVABLE`.
 11. A fresh-checkout demo is SQLite-authoritative and explicitly synthetic; no generated database,
     export, licensed text, or live provider material enters Git.
+12. Synthetic demo identities are read/export-only on backend and browser surfaces, and fail before
+    every provider-related factory; their quality is normally recomputed while timing remains
+    explicitly unavailable.
 
 ## Standard validation
 
