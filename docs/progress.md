@@ -47,7 +47,7 @@ Process details live in [`engineering-loop.md`](engineering-loop.md).
 | M3-C | [Run dashboard](milestone-3-execution.md#m3-c--run-dashboard) | frontend_worker | `codex/m3-run-dashboard` / [PR #20](https://github.com/JapmeetBrar/pufferlab/pull/20) | verified | [Independent review](https://github.com/JapmeetBrar/pufferlab/pull/20#issuecomment-5385563568) approved the exact dashboard head after local gates and root browser QA. PR #20 reviewer-only squash-merged as `ed549df87307e877cbe5da8bb1a463af4ebabc87`; the [canonical record](https://github.com/JapmeetBrar/pufferlab/pull/20#issuecomment-5385569932) confirms protected-main Backend and Frontend passed. |
 | M3-D | [Dataset-bound execution and control runtime](milestone-3-execution.md#m3-d--dataset-bound-execution-and-control-runtime) | root + live_harness + eval_application | `codex/m3-eval-control-runtime` / [PR #21](https://github.com/JapmeetBrar/pufferlab/pull/21) | verified | [Independent re-review](https://github.com/JapmeetBrar/pufferlab/pull/21#issuecomment-5385708016) reproduced all eleven repaired exception-detachment paths and approved the exact head. PR #21 reviewer-only squash-merged as `ef55645bd4edcc2fc739f0219bfb23b4d51a8d3c`; the [canonical record](https://github.com/JapmeetBrar/pufferlab/pull/21#issuecomment-5385713819) confirms protected-main Backend and Frontend passed. |
 | M3-E | [Regression deep links and observable query forensics](milestone-3-execution.md#m3-e--regression-deep-links-and-observable-query-forensics) | live_harness + frontend_worker | `codex/m3-query-forensics` / [PR #22](https://github.com/JapmeetBrar/pufferlab/pull/22) | verified | [Independent re-review](https://github.com/JapmeetBrar/pufferlab/pull/22#issuecomment-5386008445) reproduced the repaired source-authentication, repeated-cancellation, and detached-close paths and approved exact head `1901f3f`. PR #22 reviewer-only squash-merged as `43ee692`; the [canonical record](https://github.com/JapmeetBrar/pufferlab/pull/22#issuecomment-5386015555) confirms protected-main Backend and Frontend passed. |
-| M3-F | [Interview QA and goal finalization](milestone-3-execution.md#m3-f--interview-qa-and-finalization) | root + reviewer | `codex/m3-finalization` | implementing | Root starts from verified protected `main` `43ee692`. Scope is fresh-checkout synthetic rehearsal, one deliberately authorized exact-bound live replay, desktop/mobile regression deep-link navigation, documentation/observability repair, complete privacy/artifact/build gates, and one final independent reviewer-only merge. |
+| M3-F | [Interview QA and goal finalization](milestone-3-execution.md#m3-f--interview-qa-and-finalization) | root + reviewer | `codex/m3-finalization` | review_requested | Fresh and repeat synthetic seeding, one-worker provider-free serving, desktop/mobile run-to-query-to-document navigation, and one deliberately authorized exact-bound live replay pass without tracked evidence or durable mutation. README, demo, contract, and observability guidance now match the delivered product. Complete local/generated/build/privacy/artifact gates pass; one final independent review, reviewer-only merge, and protected-main verification remain. |
 
 ## Review history
 
@@ -138,6 +138,7 @@ Process details live in [`engineering-loop.md`](engineering-loop.md).
 | 2026-08-23 | M3-E / [PR #22](https://github.com/JapmeetBrar/pufferlab/pull/22) | `implementing → review_requested` | Root inspected the full repair diff and independently reran the exact document-only, grade-only, combined-substitution, full-suite mutation, double-cancel, and close-failure paths. `make check` passes with Ruff, format, strict mypy, 476 backend tests plus one opt-in live skip, OpenAPI zero-diff, frontend lint/typecheck, 48 tests, and production build; generated TypeScript is stable. Artifact audit passes at `219/588/19`, and the exact configured-key boundary passes across 219 tracked files, 588 history blobs / 9,524,363 bytes, and 25 browser files. The checked query-set digest reproduces the canonical live query-set UUID, and the existing ignored live database authenticates read-only. Re-review must use the new immutable pushed head and only the dedicated reviewer may merge. |
 | 2026-08-23 | M3-E / [PR #22](https://github.com/JapmeetBrar/pufferlab/pull/22) | `review_requested → approved → merged → verified` | [Independent exact-head re-review](https://github.com/JapmeetBrar/pufferlab/pull/22#issuecomment-5386008445) separately rejected document-only, grade-only, and combined SQLite qrel substitutions before every live factory, drained three cancellations through blocking close while preserving the first cancellation, retained detached close errors, and authenticated both ignored canonical live suites without changing database bytes, mtimes, or sidecars. The reviewer squash-merged PR #22 as `43ee692c9886085a94ca0f9b66a720e53a609067`; the [canonical record](https://github.com/JapmeetBrar/pufferlab/pull/22#issuecomment-5386015555) confirms protected-main Backend and Frontend passed. |
 | 2026-08-23 | M3-F / `codex/m3-finalization` | `planned → assigned → implementing` | Root branched from verified protected `main` `43ee692`. Finalization owns only README/demo/observability/contract documentation, bounded browser-smoke support if needed, this ledger, and sanitized verification evidence. It must prove an empty-directory synthetic 50-by-four dashboard, an explicit credentialed live replay against an exact stored run/query/config pair, refresh/back navigation at desktop and mobile widths, no implicit provider work, exact secret/artifact boundaries, and the complete local gate before one independent final review and reviewer-only merge. |
+| 2026-08-23 | M3-F / `codex/m3-finalization` | `implementing → review_requested` | A new ignored directory seeded the same content-addressed 50-query/four-config/200-outcome synthetic run twice with identical database SHA-256 and mtime; serving it added only the process guard, and all QA traffic was health/run/regression/query-detail GETs. Browser QA at 1280/720/390/320 verifies page containment, internally scrollable tables, UUID-only candidate/order/query/document state, reload and Back/Forward restoration, drawer focus trap/Escape/opener return, no replay control, and a clean console. One explicit credentialed replay against stored live run `8eded793-6337-443a-98f3-623e1ad465a5` returned HTTP 200 with two distinct primary traces, one bounded observation, no optional probes, and `original_stage_evidence_available=false`; the disposable and original databases retained their byte hashes with no sidecars, and the original database mtime was unchanged. An initial redacted 503 identified the locally absent optional model runtime; `uv sync --locked --extra live-search` repaired only the ignored environment before the successful retry. Both disposable directories were moved recoverably to Trash, no namespace was created or deleted, and unrelated user servers were untouched. `make check` passes with 476 backend tests plus one opt-in live skip, OpenAPI zero-diff, frontend lint/typecheck, 48 tests, and production build; frozen installs, generated TypeScript, docs links, diff, full-history artifact, and exact configured-key/browser scans pass. The exact pushed head, PR checks, and dedicated reviewer decision remain. |
 
 ## Milestone 1 acceptance evidence
 
@@ -194,25 +195,29 @@ ranked IDs plus exact qrels and latency percentiles from stored per-query client
 
 ## Milestone 3 acceptance evidence
 
-- [ ] Versioned, generated contracts expose persisted catalogs, run list/detail, cancellation,
+- [x] Versioned, generated contracts expose persisted catalogs, run list/detail, cancellation,
   regressions, query detail, export, and explicitly labeled live replay.
-- [ ] Provider-free dashboard reads work for completed, partial, cancelled, interrupted, and failed
+- [x] Provider-free dashboard reads work for completed, partial, cancelled, interrupted, and failed
   runs without mutating durable state or triggering network calls.
-- [ ] A canonical run can be started at HTTP 202, polled across refresh, cancelled idempotently, and
+- [x] A canonical run can be started at HTTP 202, polled across refresh, cancelled idempotently, and
   remains inspectable with all completed outcomes preserved.
-- [ ] Regression ordering uses candidate-minus-baseline quality deltas, shows sample/coverage state,
+- [x] Regression ordering uses candidate-minus-baseline quality deltas, shows sample/coverage state,
   and deep-links into exact run/query/config context.
-- [ ] Missing original stage evidence is `NOT_OBSERVABLE`; an optional live replay is exact-bound,
+- [x] Missing original stage evidence is `NOT_OBSERVABLE`; an optional live replay is exact-bound,
   cost-bearing, and visibly distinct from recorded evidence; primary and counterfactual-probe
   observations are never conflated.
-- [ ] A clean checkout can idempotently seed and serve an explicitly synthetic 50-query/four-config
+- [x] A clean checkout can idempotently seed and serve an explicitly synthetic 50-query/four-config
   completed run from SQLite without provider access, credentials, licensed text, or tracked database
   and export artifacts; it is read/export-only, has recomputed quality, and reports timing as
   unavailable rather than observed.
-- [ ] The dashboard and forensic drawer pass generated-type, accessibility, responsive, browser,
+- [x] The dashboard and forensic drawer pass generated-type, accessibility, responsive, browser,
   secret/artifact, and production-build gates.
 - [ ] Every Milestone 3 PR receives independent review, reviewer-only merge, and green protected
   `main` checks.
+
+All product acceptance items are satisfied. The final unchecked process item closes only after this
+finalization PR is independently reviewed and reviewer-only merged; its verdict, merge, and
+protected-main checks remain canonical in GitHub without a recursive ledger-only PR.
 
 ## Decision log
 
