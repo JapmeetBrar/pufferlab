@@ -181,6 +181,75 @@ def test_serve_collapses_every_base_exception_to_fixed_failure() -> None:
     assert marker not in stdout.getvalue() + stderr.getvalue()
 
 
+@pytest.mark.parametrize(
+    ("failure_type", "marker"),
+    (
+        (RuntimeError, "runtime-marker-must-not-leak"),
+        (SystemExit, "system-exit-marker-must-not-leak"),
+        (KeyboardInterrupt, "interrupt-marker-must-not-leak"),
+    ),
+)
+def test_signal_flag_cannot_mask_runtime_base_exception(
+    failure_type: type[BaseException],
+    marker: str,
+) -> None:
+    class SignalThenFailureServer:
+        signal_termination_seen = True
+
+        def run(self) -> None:
+            raise failure_type(marker)
+
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    exit_code = main(
+        ["serve", "--port", "43126"],
+        serve_dependencies=ServeDependencies(
+            lambda *args, **kwargs: object(),
+            lambda config: SignalThenFailureServer(),
+        ),
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    combined = stdout.getvalue() + stderr.getvalue()
+    assert exit_code == 1
+    assert stdout.getvalue() == "serve starting host=127.0.0.1 port=43126\n"
+    assert stderr.getvalue() == "error: serve failed\n"
+    assert marker not in combined
+    assert "Traceback" not in combined
+
+
+def test_signal_property_failure_after_clean_run_is_fixed_failure() -> None:
+    marker = "signal-property-marker-must-not-leak"
+
+    class PropertyFailureServer:
+        def run(self) -> None:
+            pass
+
+        @property
+        def signal_termination_seen(self) -> bool:
+            raise RuntimeError(marker)
+
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    exit_code = main(
+        ["serve", "--port", "43127"],
+        serve_dependencies=ServeDependencies(
+            lambda *args, **kwargs: object(),
+            lambda config: PropertyFailureServer(),
+        ),
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    combined = stdout.getvalue() + stderr.getvalue()
+    assert exit_code == 1
+    assert stdout.getvalue() == "serve starting host=127.0.0.1 port=43127\n"
+    assert stderr.getvalue() == "error: serve failed\n"
+    assert marker not in combined
+    assert "Traceback" not in combined
+
+
 @pytest.mark.parametrize("bad_port", [True, False, 0, 65536, 1.0])
 def test_serve_options_reject_non_integer_or_out_of_range_port(bad_port: object) -> None:
     with pytest.raises(ValueError, match="integer"):

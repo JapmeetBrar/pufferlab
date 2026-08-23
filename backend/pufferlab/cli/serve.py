@@ -63,10 +63,15 @@ class ServeExecution:
     """A finite result that cannot carry an exception or runtime configuration value."""
 
     signal_termination_seen: bool
+    synchronous_run_returned: bool
+
+    @property
+    def gracefully_stopped(self) -> bool:
+        return self.signal_termination_seen and self.synchronous_run_returned
 
     @property
     def exit_code(self) -> int:
-        return 0 if self.signal_termination_seen else 1
+        return 0 if self.gracefully_stopped else 1
 
 
 class BoundedUvicornServer(uvicorn.Server):
@@ -184,6 +189,7 @@ def run_serve(
     """Run the fixed server and collapse every completion path to one safe result bit."""
 
     server: _ServeServer | None = None
+    synchronous_run_returned = False
     try:
         resolved = dependencies or default_serve_dependencies()
         config = resolved.config_factory(
@@ -201,6 +207,7 @@ def run_serve(
         )
         server = resolved.server_factory(config)
         server.run()
+        synchronous_run_returned = True
     except BaseException:
         pass
 
@@ -209,8 +216,11 @@ def run_serve(
         try:
             signal_seen = server.signal_termination_seen
         except BaseException:
-            signal_seen = False
-    return ServeExecution(signal_termination_seen=signal_seen)
+            synchronous_run_returned = False
+    return ServeExecution(
+        signal_termination_seen=signal_seen,
+        synchronous_run_returned=synchronous_run_returned,
+    )
 
 
 def render_serve_start(options: ServeOptions) -> str:
@@ -222,6 +232,6 @@ def render_serve_start(options: ServeOptions) -> str:
 def render_serve_finish(execution: ServeExecution) -> tuple[tuple[str, ...], tuple[str, ...]]:
     """Return allowlisted stdout and stderr lines for the finite result."""
 
-    if execution.signal_termination_seen:
+    if execution.gracefully_stopped:
         return (("serve stopped",), ())
     return ((), ("error: serve failed",))

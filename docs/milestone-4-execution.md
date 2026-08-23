@@ -173,8 +173,9 @@ authenticated fixed tiny receipt or SQLite dataset row, never from a raw namespa
 `--live` is an explicit, potentially billable metadata-only check; it makes at most one metadata
 request per selected target through a dedicated pinned turbopuffer 2.9 client. The client pins the
 validated official HTTPS region URL, uses `max_retries=0`, a ten-second timeout, an owned HTTP
-client with environment proxy inheritance and redirects disabled, and a request hook that enforces
-the exact GET target and reconstructs allowlisted headers with exactly one Authorization value.
+client with environment proxy inheritance disabled (`trust_env=False`) and redirects disabled, and
+a request hook that enforces the exact GET target and reconstructs allowlisted headers with exactly
+one Authorization value.
 SDK base-URL/custom-header environment overrides therefore cannot redirect or replace the configured
 credential. No application retry wraps the client, so retryable status, transport, timeout,
 redirect, and close failures still produce exactly one outbound attempt. The check performs no
