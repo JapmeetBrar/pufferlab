@@ -29,9 +29,12 @@ button:focus-visible, select:focus-visible, textarea:focus-visible, a:focus-visi
 .primary-nav { display: flex; gap: 4px; align-items: center; padding: 4px; border: 1px solid rgb(24 33 27 / 12%); border-radius: 10px; background: rgb(255 255 250 / 55%); }
 .primary-nav a { padding: 7px 11px; border-radius: 7px; color: #566059; font-size: 13px; font-weight: 680; text-decoration: none; }
 .primary-nav a[aria-current="page"] { color: #18211b; background: #fffef9; box-shadow: 0 2px 8px rgb(24 33 27 / 10%); }
-.service-status { display: inline-flex; gap: 8px; align-items: center; justify-self: end; color: #566059; font-size: 13px; }
+.status-cluster { display: grid; gap: 5px; justify-self: end; }
+.service-status { display: inline-flex; gap: 8px; align-items: center; justify-content: flex-end; color: #566059; font-size: 12px; text-align: right; }
 .status-dot { width: 7px; height: 7px; border-radius: 50%; background: #858c87; }
-.status-dot.is-ready { background: #467f17; box-shadow: 0 0 0 4px rgb(70 127 23 / 13%); }
+.status-dot.is-alive { background: #467f17; box-shadow: 0 0 0 4px rgb(70 127 23 / 13%); }
+.status-dot.is-local { background: #93751c; box-shadow: 0 0 0 4px rgb(147 117 28 / 13%); }
+.live-search-status { color: #6a5b32; font-size: 11px; }
 
 .playground-hero, .comparison, .error-panel { max-width: 1280px; margin: 0 auto; padding-right: 36px; padding-left: 36px; }
 .playground-hero { display: grid; grid-template-columns: minmax(0, 0.9fr) minmax(460px, 1.1fr); gap: clamp(44px, 7vw, 100px); align-items: center; padding-top: clamp(76px, 9vw, 122px); padding-bottom: 82px; }
@@ -43,6 +46,18 @@ h1:focus-visible { outline: 3px solid #48690f; outline-offset: 7px; }
 .lede { max-width: 600px; margin: 28px 0 0; color: #505b54; font-size: clamp(17px, 1.8vw, 20px); line-height: 1.58; }
 
 .query-console { padding: clamp(22px, 3vw, 32px); border: 1px solid rgb(23 32 26 / 15%); border-radius: 22px; background: rgb(255 255 250 / 82%); box-shadow: 0 24px 70px rgb(42 49 43 / 12%); backdrop-filter: blur(12px); }
+.capability-loading { padding: 12px 14px; margin: 0 0 20px; border: 1px dashed #aeb5ac; border-radius: 9px; color: #566059; background: #f7f7f0; font-size: 13px; }
+.capability-guidance { padding: 18px; margin: 0 0 20px; border: 1px solid #c8a77a; border-radius: 12px; color: #5d3b18; background: #fff3df; }
+.capability-guidance .eyebrow { margin-bottom: 8px; color: #7a501e; }
+.capability-guidance h2 { margin: 0; font-family: Georgia, "Times New Roman", serif; font-size: 24px; font-weight: 400; letter-spacing: -.025em; }
+.capability-guidance p { margin: 9px 0 0; font-size: 13px; line-height: 1.55; }
+.capability-guidance code { display: block; padding: 10px 12px; margin-top: 13px; overflow-x: auto; border: 1px solid rgb(93 59 24 / 22%); border-radius: 7px; color: #392715; background: rgb(255 255 250 / 70%); font-size: 11px; white-space: nowrap; }
+.capability-guidance .requirement-summary { color: #745735; font-size: 11px; }
+.capability-error { display: flex; gap: 14px; align-items: center; justify-content: space-between; }
+.capability-error div { display: grid; gap: 4px; }
+.capability-error span { font-size: 12px; line-height: 1.45; }
+.capability-error button { flex: none; min-height: 40px; padding: 0 10px; border: 1px solid currentcolor; border-radius: 8px; color: inherit; background: transparent; font-weight: 700; cursor: pointer; }
+.capability-ready { display: grid; gap: 4px; padding: 12px 14px; margin: 0 0 20px; border: 1px solid #b5aa78; border-radius: 9px; color: #584c26; background: #fff9df; font-size: 12px; line-height: 1.45; }
 .query-field label, .query-console legend, .config-grid label span { display: block; margin-bottom: 9px; color: #273229; font-size: 12px; font-weight: 750; letter-spacing: 0.03em; text-transform: uppercase; }
 .query-field textarea, .config-grid select { width: 100%; border: 1px solid #aeb5ac; border-radius: 10px; background: #fffef9; }
 .query-field textarea { min-height: 104px; padding: 14px 15px; resize: vertical; font-size: 17px; line-height: 1.5; }
@@ -149,6 +164,7 @@ h1:focus-visible { outline: 3px solid #48690f; outline-offset: 7px; }
 .section-heading-row h2 { font-size: clamp(28px, 4vw, 42px); }
 .section-heading-row > span { color: #68716b; font-size: 12px; }
 .table-scroll { max-width: 100%; overflow-x: auto; border: 1px solid #d3d7cf; border-radius: 13px; background: rgb(255 254 248 / 78%); }
+.table-scroll:focus-visible { outline: 3px solid #48690f; outline-offset: 3px; }
 .run-table, .metrics-table, .regression-table { width: 100%; border-collapse: collapse; text-align: left; }
 .run-table { min-width: 880px; }
 .metrics-table { min-width: 1040px; }
@@ -203,7 +219,7 @@ h1:focus-visible { outline: 3px solid #48690f; outline-offset: 7px; }
 .coverage-summary { display: grid; grid-template-columns: minmax(150px, .35fr) 1.65fr; gap: 20px; padding: 18px; margin-bottom: 14px; border: 1px solid #cfd5c8; border-radius: 10px; background: #edf1e7; }
 .coverage-summary > div { display: flex; gap: 4px; flex-direction: column; }
 .coverage-summary > div strong { font-family: Georgia, "Times New Roman", serif; font-size: 27px; font-weight: 400; }
-.coverage-summary > div span { color: #68716b; font-size: 11px; }
+.coverage-summary > div span { color: #59625c; font-size: 11px; }
 .coverage-summary dl { display: grid; grid-template-columns: repeat(3, 1fr); gap: 9px; margin: 0; }
 .coverage-summary dl div { display: flex; gap: 8px; justify-content: space-between; padding: 7px 9px; border-radius: 6px; background: rgb(255 255 250 / 66%); }
 .coverage-summary dt, .coverage-summary dd { margin: 0; font-size: 10px; }
@@ -302,9 +318,11 @@ h1:focus-visible { outline: 3px solid #48690f; outline-offset: 7px; }
   .topbar { padding-top: 17px; padding-bottom: 17px; }
   .primary-nav { grid-column: 1 / -1; grid-row: 2; justify-content: stretch; order: 3; }
   .primary-nav a { flex: 1; text-align: center; }
-  .service-status { max-width: 145px; justify-content: flex-end; text-align: right; }
+  .status-cluster { max-width: 165px; }
+  .service-status { justify-content: flex-end; text-align: right; }
   .playground-hero { gap: 36px; padding-top: 62px; padding-bottom: 58px; }
   .query-console { padding: 20px; border-radius: 16px; }
+  .capability-error { align-items: stretch; flex-direction: column; }
   .config-grid, .result-grid, .evidence-summary { grid-template-columns: 1fr; }
   .versus { margin: -2px auto; }
   .submit-row, .comparison-heading { align-items: flex-start; flex-direction: column; }

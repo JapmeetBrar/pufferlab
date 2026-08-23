@@ -49,7 +49,7 @@ function configName(detail: QueryDetail, configId: string): string {
 
 function StoredOutcomes({ detail }: { detail: QueryDetail }) {
   return (
-    <div className="table-scroll">
+    <div className="table-scroll" role="region" aria-label="Recorded outcomes table" tabIndex={0}>
       <table className="query-outcome-table">
         <caption className="visually-hidden">Durable outcomes for the recorded query</caption>
         <thead>
@@ -105,7 +105,7 @@ function JudgedDocuments({
   const left = outcomeFor(detail, selection.left);
   const right = outcomeFor(detail, selection.right);
   return (
-    <div className="table-scroll">
+    <div className="table-scroll" role="region" aria-label="Judged documents table" tabIndex={0}>
       <table className="judgment-table">
         <caption className="visually-hidden">Judged documents and durable final ranks</caption>
         <thead>

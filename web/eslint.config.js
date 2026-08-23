@@ -10,6 +10,7 @@ export default tseslint.config(
       "dist",
       "coverage",
       "eslint.config.js",
+      "e2e/run.mjs",
       "src/api/schema.d.ts",
     ],
   },
@@ -19,7 +20,7 @@ export default tseslint.config(
     files: ["**/*.{ts,tsx}"],
     languageOptions: {
       ecmaVersion: 2023,
-      globals: globals.browser,
+      globals: { ...globals.browser, ...globals.node },
       parserOptions: {
         projectService: true,
         tsconfigRootDir: import.meta.dirname,

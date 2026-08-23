@@ -2,6 +2,8 @@ import type { components, paths } from "./schema";
 
 type HealthResponse =
   paths["/api/v1/health"]["get"]["responses"][200]["content"]["application/json"];
+export type CapabilitiesResponse =
+  paths["/api/v1/capabilities"]["get"]["responses"][200]["content"]["application/json"];
 export type RetrievalConfigListResponse =
   paths["/api/v1/configs"]["get"]["responses"][200]["content"]["application/json"];
 export type SearchCompareRequest =
@@ -88,6 +90,11 @@ export async function getHealth(signal?: AbortSignal): Promise<HealthResponse> {
     throw new Error(`Health request failed with status ${response.status}`);
   }
   return (await response.json()) as HealthResponse;
+}
+
+export async function getCapabilities(signal?: AbortSignal): Promise<CapabilitiesResponse> {
+  const response = await fetch(apiUrl("/api/v1/capabilities"), { signal });
+  return readJsonResponse<CapabilitiesResponse>(response);
 }
 
 export async function getRetrievalConfigs(
