@@ -159,7 +159,10 @@ uv run --extra live-search pufferlab dataset ingest-unix \
 Require the final remote readiness observation to bind the exact document count, IDs, schema,
 distance metric, dataset revision, curated query set, and four immutable configuration IDs. Progress
 may contain counts and identifiers only. If the command is interrupted, rerun the same command in
-the same shell: checkpointed UUID upserts resume without a delete or a new namespace.
+the same shell: checkpointed UUID upserts resume without a delete or a new namespace. Exact ID
+readiness uses strong-consistency, ascending-ID keyset pages capped at the provider's 10,000-row
+query limit and collects at most one row beyond the expected corpus size; a duplicate, non-advancing
+cursor, short-page/count mismatch, wrong ID set, or extra row fails closed.
 
 ## 6. Execute, export, and independently verify the durable run
 
