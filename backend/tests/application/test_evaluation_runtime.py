@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import traceback
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -10,9 +12,13 @@ from uuid import UUID, uuid5
 
 import pytest
 from fastapi.testclient import TestClient
+from pufferlab.application import evaluation_runtime as evaluation_runtime_module
 from pufferlab.application.evaluation_runtime import EvaluationApiRuntime
 from pufferlab.application.evaluations import create_evaluation_run
-from pufferlab.application.view_errors import EvaluationViewError
+from pufferlab.application.view_errors import (
+    EvaluationViewError,
+    evaluation_conflict,
+)
 from pufferlab.config import Settings
 from pufferlab.contracts.datasets import DatasetStatus, DatasetVersion, FtsProfile, IndexProfile
 from pufferlab.contracts.evals import (
@@ -28,6 +34,7 @@ from pufferlab.datasets.models import DatasetManifest
 from pufferlab.datasets.schema import compile_namespace_write_spec
 from pufferlab.main import create_app
 from pufferlab.persistence import Database, PufferLabRepository
+from pufferlab.persistence.errors import PersistenceValidationError, RecordNotFoundError
 from pufferlab.retrieval.config import BoundSearchCatalog, derive_bound_retrieval_configs
 from pufferlab.retrieval.errors import provider_failed
 from pufferlab.retrieval.types import SearchExecuteRequest, SearchExecuteResult
@@ -133,6 +140,23 @@ class _TrackingDatabase(Database):
     def dispose(self) -> None:
         self._order.append("database-dispose")
         super().dispose()
+
+
+class _ContextBearingGuard:
+    def __init__(self, marker: str) -> None:
+        self._marker = marker
+
+    def acquire(self) -> None:
+        try:
+            raise RuntimeError(self._marker)
+        except RuntimeError:
+            raise evaluation_conflict(
+                message="evaluation worker guard is unavailable",
+                operation="start_evaluation_runtime",
+            ) from None
+
+    def release(self) -> None:
+        return
 
 
 class _FactoryProbe:
@@ -290,6 +314,8 @@ def _runtime(
     settings: Settings,
     database: Database,
     probe: _FactoryProbe,
+    *,
+    worker_guard_factory: Callable[[Path], Any] | None = None,
 ) -> EvaluationApiRuntime:
     return EvaluationApiRuntime(
         settings,
@@ -301,9 +327,36 @@ def _runtime(
         provider_factory=probe.provider,
         embedder_factory=probe.embedder,
         reranker_factory=probe.reranker,
+        worker_guard_factory=worker_guard_factory,
         git_revision_factory=lambda: "a" * 40,
         now=lambda: datetime.now(UTC),
     )
+
+
+def _assert_detached_error(
+    error: EvaluationViewError,
+    *,
+    marker: str,
+    http_status: int,
+) -> None:
+    assert error.http_status == http_status
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    assert marker not in str(error)
+    assert marker not in repr(error)
+    rendered = "".join(traceback.format_exception(type(error), error, error.__traceback__))
+    assert marker not in rendered
+
+
+async def _assert_detached_async_error(
+    action: Callable[[], Awaitable[object]],
+    *,
+    marker: str,
+    http_status: int,
+) -> None:
+    with pytest.raises(EvaluationViewError) as raised:
+        await action()
+    _assert_detached_error(raised.value, marker=marker, http_status=http_status)
 
 
 async def _wait_for_status(
@@ -628,6 +681,202 @@ async def test_worker_guard_rejects_a_second_runtime_and_start_is_once(tmp_path:
     await second.shutdown_execution()
     second.dispose()
     assert all(value == 0 for value in empty_probe.calls.values())
+
+
+@pytest.mark.asyncio
+async def test_all_runtime_error_translations_detach_private_exception_frames(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    start_marker = "PRIVATE_START_CONTEXT_MARKER"
+    start_settings = _settings(tmp_path / "start")
+    start_database = Database.from_settings(start_settings)
+    start_probe = _FactoryProbe(AUTHORED_SYNTHETIC_DEMO.manifest)
+    start_runtime = _runtime(
+        start_settings,
+        start_database,
+        start_probe,
+        worker_guard_factory=lambda _path: _ContextBearingGuard(start_marker),
+    )
+    await _assert_detached_async_error(
+        start_runtime.start,
+        marker=start_marker,
+        http_status=409,
+    )
+    start_runtime.dispose()
+
+    settings = _settings(tmp_path / "controls")
+    database = Database.from_settings(settings)
+    database.migrate()
+    repository = PufferLabRepository(database.session_factory)
+    suite = _seed_live_suite(repository)
+    probe = _FactoryProbe(suite.manifest)
+    runtime = _runtime(settings, database, probe)
+    await runtime.start()
+
+    binding_failures: tuple[tuple[type[BaseException], str, int], ...] = (
+        (RecordNotFoundError, "PRIVATE_CREATE_MISSING_MARKER", 422),
+        (PersistenceValidationError, "PRIVATE_CREATE_VALIDATION_MARKER", 422),
+        (RuntimeError, "PRIVATE_CREATE_RUNTIME_MARKER", 503),
+    )
+    for exception_type, marker, status in binding_failures:
+
+        def fail_binding(
+            _request: CreateEvalRunRequest,
+            *,
+            failure_type: type[BaseException] = exception_type,
+            failure_marker: str = marker,
+        ) -> None:
+            raise failure_type(failure_marker)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(runtime, "_resolve_request_binding", fail_binding)
+            await _assert_detached_async_error(
+                lambda: runtime.create_eval_run(suite.request()),
+                marker=marker,
+                http_status=status,
+            )
+
+    nested_marker = "PRIVATE_CREATE_VIEW_CONTEXT_MARKER"
+
+    def fail_with_context(_request: CreateEvalRunRequest) -> None:
+        try:
+            raise RuntimeError(nested_marker)
+        except RuntimeError:
+            raise evaluation_conflict(
+                message="evaluation request conflicts with stored state",
+                operation="create_eval_run",
+            ) from None
+
+    with monkeypatch.context() as patch:
+        patch.setattr(runtime, "_resolve_request_binding", fail_with_context)
+        await _assert_detached_async_error(
+            lambda: runtime.create_eval_run(suite.request()),
+            marker=nested_marker,
+            http_status=409,
+        )
+
+    persisted_marker = "PRIVATE_CREATE_PERSIST_MARKER"
+
+    def fail_persist(*_args: object, **_kwargs: object) -> None:
+        raise PersistenceValidationError(persisted_marker)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(evaluation_runtime_module, "create_evaluation_run", fail_persist)
+        await _assert_detached_async_error(
+            lambda: runtime.create_eval_run(suite.request()),
+            marker=persisted_marker,
+            http_status=422,
+        )
+
+    cancel_failures: tuple[tuple[type[BaseException], str, int], ...] = (
+        (RecordNotFoundError, "PRIVATE_CANCEL_MISSING_MARKER", 404),
+        (PersistenceValidationError, "PRIVATE_CANCEL_STORAGE_MARKER", 503),
+    )
+    for exception_type, marker, status in cancel_failures:
+
+        def fail_get_run(
+            _run_id: UUID,
+            *,
+            failure_type: type[BaseException] = exception_type,
+            failure_marker: str = marker,
+        ) -> None:
+            raise failure_type(failure_marker)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(runtime._repository, "get_run", fail_get_run)
+            await _assert_detached_async_error(
+                lambda: runtime.cancel_eval_run(_id("missing-runtime-run")),
+                marker=marker,
+                http_status=status,
+            )
+
+    await runtime.shutdown_execution()
+    runtime.dispose()
+
+
+def test_file_worker_guard_errors_detach_os_and_lock_contexts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    guard_type = evaluation_runtime_module._FileWorkerGuard
+
+    open_marker = "PRIVATE_GUARD_OPEN_MARKER"
+
+    def fail_open(*_args: object, **_kwargs: object) -> None:
+        raise OSError(open_marker)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(evaluation_runtime_module.os, "open", fail_open)
+        with pytest.raises(EvaluationViewError, match="unavailable") as raised:
+            guard_type(tmp_path / "guard-open.lock").acquire()
+    _assert_detached_error(raised.value, marker=open_marker, http_status=503)
+
+    blocked_marker = "PRIVATE_GUARD_BLOCK_MARKER"
+
+    def fail_blocked(*_args: object, **_kwargs: object) -> None:
+        raise BlockingIOError(blocked_marker)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(evaluation_runtime_module.fcntl, "flock", fail_blocked)
+        with pytest.raises(EvaluationViewError, match="another PufferLab API worker") as raised:
+            guard_type(tmp_path / "guard-blocked.lock").acquire()
+    _assert_detached_error(raised.value, marker=blocked_marker, http_status=503)
+
+    lock_marker = "PRIVATE_GUARD_LOCK_MARKER"
+
+    def fail_lock(*_args: object, **_kwargs: object) -> None:
+        raise OSError(lock_marker)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(evaluation_runtime_module.fcntl, "flock", fail_lock)
+        with pytest.raises(EvaluationViewError, match="unavailable") as raised:
+            guard_type(tmp_path / "guard-failed.lock").acquire()
+    _assert_detached_error(raised.value, marker=lock_marker, http_status=503)
+
+
+def test_http_control_errors_never_expose_private_runtime_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings(tmp_path)
+    database = Database.from_settings(settings)
+    database.migrate()
+    repository = PufferLabRepository(database.session_factory)
+    suite = _seed_live_suite(repository)
+    probe = _FactoryProbe(suite.manifest)
+    runtime = _runtime(settings, database, probe)
+    app = create_app(
+        settings,
+        search_backend=_PlaygroundBackend([]),
+        evaluation_runtime=runtime,
+    )
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        create_marker = "PRIVATE_HTTP_CREATE_MARKER"
+
+        def fail_manifest(_path: Path) -> DatasetManifest:
+            raise RuntimeError(create_marker)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(runtime, "_manifest_loader", fail_manifest)
+            response = client.post(
+                "/api/v1/eval-runs",
+                json=suite.request().model_dump(mode="json"),
+            )
+        assert response.status_code == 503
+        assert create_marker not in response.text
+
+        cancel_marker = "PRIVATE_HTTP_CANCEL_MARKER"
+
+        def fail_cancel(_run_id: UUID) -> None:
+            raise PersistenceValidationError(cancel_marker)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(runtime._repository, "get_run", fail_cancel)
+            response = client.post(f"/api/v1/eval-runs/{_id('http-cancel')}/cancel")
+        assert response.status_code == 503
+        assert cancel_marker not in response.text
 
 
 def test_app_lifespan_orders_eval_drain_playground_close_then_database_dispose(

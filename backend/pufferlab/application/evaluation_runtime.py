@@ -183,39 +183,45 @@ class EvaluationApiRuntime:
                 return
             if self._closing or self._disposed:
                 raise evaluation_unavailable(operation="start_evaluation_runtime")
+            error: EvaluationViewError | None = None
             try:
                 self._worker_guard.acquire()
                 self._database.migrate()
                 self._job_manager.recover_startup()
                 self._started = True
                 self._pump_queued_locked()
-            except EvaluationViewError:
-                self._worker_guard.release()
-                raise
+            except EvaluationViewError as caught:
+                error = _copy_view_error(caught)
             except BaseException:
+                error = evaluation_unavailable(operation="start_evaluation_runtime")
+            if error is not None:
+                self._started = False
                 self._worker_guard.release()
-                raise evaluation_unavailable(operation="start_evaluation_runtime") from None
+                raise error
 
     async def create_eval_run(self, request: CreateEvalRunRequest) -> CreateEvalRunResponse:
         async with self._control_lock:
             self._require_started("create_eval_run")
+            error: EvaluationViewError | None = None
             try:
                 binding = self._resolve_request_binding(request)
                 active = self._repository.list_active_runs(limit=_MAX_PERSISTED_ACTIVE_ROWS)
-            except EvaluationViewError:
-                raise
+            except EvaluationViewError as caught:
+                error = _copy_view_error(caught)
             except RecordNotFoundError:
-                raise evaluation_invalid(
+                error = evaluation_invalid(
                     message="evaluation request references an unknown immutable revision",
                     operation="create_eval_run",
-                ) from None
+                )
             except PersistenceValidationError:
-                raise evaluation_invalid(
+                error = evaluation_invalid(
                     message="evaluation request does not match the canonical stored suite",
                     operation="create_eval_run",
-                ) from None
+                )
             except BaseException:
-                raise evaluation_unavailable(operation="create_eval_run") from None
+                error = evaluation_unavailable(operation="create_eval_run")
+            if error is not None:
+                raise error
 
             suite = (
                 request.query_set_id,
@@ -242,6 +248,7 @@ class EvaluationApiRuntime:
                 warmup_query_count=request.warmup_query_count,
                 query_embedding_cache_enabled=False,
             )
+            error = None
             try:
                 run = create_evaluation_run(
                     self._repository,
@@ -250,10 +257,12 @@ class EvaluationApiRuntime:
                     now=self._now,
                 )
             except PersistenceValidationError:
-                raise evaluation_invalid(
+                error = evaluation_invalid(
                     message="evaluation request does not match the canonical stored suite",
                     operation="create_eval_run",
-                ) from None
+                )
+            if error is not None:
+                raise error
             self._schedule_driver_locked(run.id, binding=binding)
             # No await occurs after durable persistence and scheduling, so request cancellation
             # cannot own or cancel the background driver.
@@ -263,16 +272,19 @@ class EvaluationApiRuntime:
         service: EvaluationApplicationService | None = None
         async with self._control_lock:
             self._require_started("cancel_eval_run")
+            error: EvaluationViewError | None = None
             try:
                 run = self._repository.get_run(run_id)
                 dataset = self._dataset_for_run(run)
             except RecordNotFoundError:
-                raise evaluation_not_found(
+                error = evaluation_not_found(
                     message="evaluation run was not found",
                     operation="cancel_eval_run",
-                ) from None
+                )
             except PersistenceError:
-                raise evaluation_unavailable(operation="cancel_eval_run") from None
+                error = evaluation_unavailable(operation="cancel_eval_run")
+            if error is not None:
+                raise error
             if dataset.data_origin is DataOrigin.SYNTHETIC_DEMO:
                 return await self._provider_free_controls.cancel_eval_run(run_id)
             if run.status is EvalRunStatus.QUEUED:
@@ -487,32 +499,22 @@ class _FileWorkerGuard:
         flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_CLOEXEC", 0)
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
-        fd: int | None = None
-        try:
-            fd = os.open(self._path, flags, 0o600)
-            if not stat.S_ISREG(os.fstat(fd).st_mode):
-                raise OSError("evaluation worker guard is not a regular file")
-            os.fchmod(fd, 0o600)
-        except OSError:
-            if fd is not None:
-                with suppress(OSError):
-                    os.close(fd)
-            raise evaluation_unavailable(operation="start_evaluation_runtime") from None
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
+        fd = _open_worker_guard(self._path, flags)
+        if fd is None:
+            raise evaluation_unavailable(operation="start_evaluation_runtime")
+        lock_result = _try_lock_worker_guard(fd)
+        if lock_result != "acquired":
             with suppress(OSError):
                 os.close(fd)
+        if lock_result == "blocked":
             raise EvaluationViewError(
                 code=ApiErrorCode.RUN_CONFLICT,
                 message="another PufferLab API worker owns evaluation execution",
                 http_status=503,
                 operation="start_evaluation_runtime",
-            ) from None
-        except OSError:
-            with suppress(OSError):
-                os.close(fd)
-            raise evaluation_unavailable(operation="start_evaluation_runtime") from None
+            )
+        if lock_result == "failed":
+            raise evaluation_unavailable(operation="start_evaluation_runtime")
         self._fd = fd
 
     def release(self) -> None:
@@ -529,6 +531,41 @@ def _require_live_credential(settings: Settings) -> None:
     api_key = settings.turbopuffer_api_key
     if api_key is None or not api_key.get_secret_value():
         raise RuntimeError("live evaluation credentials are unavailable")
+
+
+def _copy_view_error(error: EvaluationViewError) -> EvaluationViewError:
+    return EvaluationViewError(
+        code=error.code,
+        message=str(error),
+        http_status=error.http_status,
+        operation=error.operation,
+        retryable=error.retryable,
+    )
+
+
+def _open_worker_guard(path: Path, flags: int) -> int | None:
+    fd: int | None = None
+    try:
+        fd = os.open(path, flags, 0o600)
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError("evaluation worker guard is not a regular file")
+        os.fchmod(fd, 0o600)
+        return fd
+    except OSError:
+        if fd is not None:
+            with suppress(OSError):
+                os.close(fd)
+        return None
+
+
+def _try_lock_worker_guard(fd: int) -> str:
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return "blocked"
+    except OSError:
+        return "failed"
+    return "acquired"
 
 
 def _make_bound_catalog(
