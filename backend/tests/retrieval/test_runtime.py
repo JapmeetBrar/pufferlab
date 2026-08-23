@@ -13,6 +13,7 @@ from pufferlab.contracts.datasets import (
     FtsProfile,
     IndexProfile,
 )
+from pufferlab.contracts.errors import ApiErrorCode
 from pufferlab.contracts.filters import FilterLogical, FilterPredicate, LogicalOp, PredicateOp
 from pufferlab.contracts.search import SearchCompareRequest
 from pufferlab.datasets.loader import load_fixture_corpus
@@ -29,6 +30,7 @@ from pufferlab.retrieval.types import (
     QueryEmbedding,
     SearchExecuteRequest,
 )
+from pydantic import SecretStr
 
 ROOT = Path(__file__).resolve().parents[3]
 FIXTURE_DIR = ROOT / "fixtures" / "tiny-corpus"
@@ -163,6 +165,7 @@ def _runtime_without_credentials() -> tuple[
         manifest=corpus.manifest,
         provider_factory=provider_factory,
         embedder_factory=embedder_factory,
+        optional_runtime_available=lambda: True,
     )
     return runtime, provider_factory, embedder_factory
 
@@ -177,6 +180,7 @@ async def test_runtime_uses_exact_manifest_and_lazily_reuses_clients() -> None:
         manifest=corpus.manifest,
         provider_factory=provider_factory,
         embedder_factory=embedder_factory,
+        optional_runtime_available=lambda: True,
     )
     bm25, vector, _, _ = runtime.list_configs()
 
@@ -222,7 +226,7 @@ async def test_runtime_discovers_configs_without_server_credentials() -> None:
     summaries = runtime.list_configs()
 
     assert len(summaries) == 4
-    with pytest.raises(SearchError, match="not configured") as caught:
+    with pytest.raises(SearchError, match="configuration is required") as caught:
         await runtime.compare(
             SearchCompareRequest(
                 query_text="query",
@@ -231,6 +235,7 @@ async def test_runtime_discovers_configs_without_server_credentials() -> None:
         )
     assert caught.value.__cause__ is None
     assert caught.value.__context__ is None
+    assert caught.value.details.code is ApiErrorCode.CONFIGURATION_REQUIRED
 
 
 @pytest.mark.asyncio
@@ -242,6 +247,7 @@ async def test_runtime_executes_one_config_and_rejects_a_different_namespace() -
         manifest=corpus.manifest,
         provider_factory=provider_factory,
         embedder_factory=FakeEmbedderFactory(),
+        optional_runtime_available=lambda: True,
     )
     bm25, _, _, _ = runtime.list_configs()
 
@@ -279,6 +285,7 @@ async def test_runtime_exposes_only_explicit_dataset_bound_hybrid_probe() -> Non
         bound_catalog=bound,
         provider_factory=provider_factory,
         embedder_factory=FakeEmbedderFactory(),
+        optional_runtime_available=lambda: True,
     )
     bm25, _, hybrid, _ = runtime.list_configs()
 
@@ -327,6 +334,7 @@ async def test_runtime_accepts_only_the_complete_bound_evaluation_catalog() -> N
         bound_catalog=bound,
         provider_factory=provider_factory,
         embedder_factory=FakeEmbedderFactory(),
+        optional_runtime_available=lambda: True,
     )
     bm25, _, _, _ = runtime.list_configs()
 
@@ -435,9 +443,100 @@ def test_runtime_api_orders_filter_validation_before_missing_configuration() -> 
     assert "detail" not in invalid_response.json()
     assert "runtime-api-secret-field" not in invalid_response.text
     assert valid_response.status_code == 503
-    assert valid_response.json()["message"] == "search backend is not configured"
+    assert valid_response.json()["code"] == "configuration_required"
+    assert valid_response.json()["message"] == "local search configuration is required"
+    assert valid_response.json()["details"] == {"operation": "search_configuration"}
     assert provider_factory.calls == []
     assert embedder_factory.calls == []
+
+
+class FailIfCalledRerankerFactory:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def __call__(self, *, model: str, revision: str) -> Reranker:
+        del model, revision
+        self.calls += 1
+        raise AssertionError("missing configuration reached the reranker factory")
+
+
+class FailIfUnwrappedSecret(SecretStr):
+    def get_secret_value(self) -> str:
+        raise AssertionError("configuration preflight unwrapped the API key")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("settings_overrides", "runtime_available"),
+    [
+        ({"turbopuffer_api_key": None}, True),
+        ({"turbopuffer_api_key": " \t "}, True),
+        ({"pufferlab_search_namespace": None}, True),
+        ({"pufferlab_search_namespace": " \n "}, True),
+        ({"turbopuffer_region": " "}, True),
+        ({}, False),
+    ],
+)
+async def test_runtime_rejects_each_local_configuration_gap_before_all_factories(
+    settings_overrides: dict[str, object],
+    runtime_available: bool,
+) -> None:
+    corpus = load_fixture_corpus(FIXTURE_DIR)
+    provider_factory = FakeProviderFactory()
+    embedder_factory = FakeEmbedderFactory()
+    reranker_factory = FailIfCalledRerankerFactory()
+    runtime = RuntimeSearchBackend(
+        settings=_settings(**settings_overrides),
+        manifest=corpus.manifest,
+        provider_factory=provider_factory,
+        embedder_factory=embedder_factory,
+        reranker_factory=reranker_factory,
+        optional_runtime_available=lambda: runtime_available,
+    )
+    summaries = runtime.list_configs()
+
+    with pytest.raises(SearchError) as caught:
+        await runtime.compare(
+            SearchCompareRequest(
+                query_text="query",
+                config_ids=[summary.id for summary in summaries],
+            )
+        )
+
+    assert caught.value.details.code is ApiErrorCode.CONFIGURATION_REQUIRED
+    assert caught.value.details.http_status == 503
+    assert caught.value.details.operation == "search_configuration"
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    assert provider_factory.calls == []
+    assert embedder_factory.calls == []
+    assert reranker_factory.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_configuration_preflight_does_not_unwrap_secret_before_rejecting() -> None:
+    corpus = load_fixture_corpus(FIXTURE_DIR)
+    settings = _settings(pufferlab_search_namespace=None)
+    settings.turbopuffer_api_key = FailIfUnwrappedSecret("opaque-test-key")
+    runtime = RuntimeSearchBackend(
+        settings=settings,
+        manifest=corpus.manifest,
+        provider_factory=FakeProviderFactory(),
+        embedder_factory=FakeEmbedderFactory(),
+        reranker_factory=FailIfCalledRerankerFactory(),
+        optional_runtime_available=lambda: True,
+    )
+    summaries = runtime.list_configs()
+
+    with pytest.raises(SearchError) as caught:
+        await runtime.compare(
+            SearchCompareRequest(
+                query_text="query",
+                config_ids=[summary.id for summary in summaries],
+            )
+        )
+
+    assert caught.value.details.code is ApiErrorCode.CONFIGURATION_REQUIRED
 
 
 class SecretProviderFactory(FakeProviderFactory):
@@ -454,6 +553,7 @@ async def test_runtime_factory_failures_are_detached_and_redacted() -> None:
         manifest=corpus.manifest,
         provider_factory=SecretProviderFactory(),
         embedder_factory=FakeEmbedderFactory(),
+        optional_runtime_available=lambda: True,
     )
     summaries = runtime.list_configs()
 
@@ -488,6 +588,7 @@ async def test_runtime_closes_partially_constructed_provider_exactly_once() -> N
         provider_factory=provider_factory,
         embedder_factory=FakeEmbedderFactory(),
         reranker_factory=SecretRerankerFactory(),
+        optional_runtime_available=lambda: True,
     )
     bm25, vector, _, _ = runtime.list_configs()
 

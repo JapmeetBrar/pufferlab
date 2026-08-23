@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from contextlib import suppress
 from typing import Protocol
 
@@ -19,8 +20,17 @@ from pufferlab.providers.rerankers import (
 from pufferlab.providers.turbopuffer import TurbopufferProvider
 from pufferlab.retrieval.config import BoundSearchCatalog, build_search_catalog
 from pufferlab.retrieval.embeddings import SentenceTransformerQueryEmbedder
-from pufferlab.retrieval.errors import SearchError, invalid_search, search_unavailable
+from pufferlab.retrieval.errors import (
+    SearchError,
+    invalid_search,
+    search_configuration_required,
+    search_unavailable,
+)
 from pufferlab.retrieval.filter_validation import FixtureFilterValidator
+from pufferlab.retrieval.preflight import (
+    local_search_requirements,
+    sentence_transformers_available,
+)
 from pufferlab.retrieval.service import SearchCompareService
 from pufferlab.retrieval.types import (
     HybridProbeExecuteRequest,
@@ -62,6 +72,7 @@ class RuntimeSearchBackend:
         provider_factory: _ProviderFactory | None = None,
         embedder_factory: _EmbedderFactory | None = None,
         reranker_factory: _RerankerFactory | None = None,
+        optional_runtime_available: Callable[[], bool] = sentence_transformers_available,
     ) -> None:
         self._settings = settings
         self._manifest = manifest
@@ -89,6 +100,7 @@ class RuntimeSearchBackend:
             embedder_factory or SentenceTransformerQueryEmbedder
         )
         self._reranker_factory: _RerankerFactory = reranker_factory or SentenceTransformersReranker
+        self._optional_runtime_available = optional_runtime_available
         self._service: SearchCompareService | None = None
         self._service_lock = asyncio.Lock()
         self._closed = False
@@ -104,15 +116,16 @@ class RuntimeSearchBackend:
     async def compare(self, request: SearchCompareRequest) -> SearchCompareResponse:
         if request.filter_override is not None:
             self._filter_validator.validate(request.filter_override)
+        self._require_local_configuration()
         service = await self._get_service()
         return await service.compare(request)
 
     async def search_one(self, request: SearchExecuteRequest) -> SearchExecuteResult:
         if request.filter_override is not None:
             self._filter_validator.validate(request.filter_override)
+        self._require_local_configuration()
         configured_namespace = self._settings.pufferlab_search_namespace
-        if configured_namespace is None or not configured_namespace.strip():
-            raise search_unavailable()
+        assert configured_namespace is not None
         if request.namespace != configured_namespace:
             raise invalid_search("execution namespace does not match the configured namespace")
         service = await self._get_service()
@@ -124,9 +137,9 @@ class RuntimeSearchBackend:
     ) -> HybridProbeExecuteResult:
         if request.filter_override is not None:
             self._filter_validator.validate(request.filter_override)
+        self._require_local_configuration()
         configured_namespace = self._settings.pufferlab_search_namespace
-        if configured_namespace is None or not configured_namespace.strip():
-            raise search_unavailable()
+        assert configured_namespace is not None
         if request.namespace != configured_namespace:
             raise invalid_search("execution namespace does not match the configured namespace")
         service = await self._get_service()
@@ -192,3 +205,10 @@ class RuntimeSearchBackend:
             raise failure from None
         assert service is not None
         return service
+
+    def _require_local_configuration(self) -> None:
+        if local_search_requirements(
+            self._settings,
+            runtime_available=self._optional_runtime_available,
+        ):
+            raise search_configuration_required()

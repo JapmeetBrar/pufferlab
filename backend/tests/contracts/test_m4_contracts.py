@@ -512,14 +512,22 @@ def test_m4_contract_schemas_have_no_sensitive_or_free_form_value_fields() -> No
         report.metric = GateMetricName.MRR_AT_10
 
 
-def test_only_reachable_error_enum_changes_openapi_at_contract_freeze() -> None:
+def test_capability_route_is_reachable_while_cli_gate_models_remain_private() -> None:
     schema = create_app().openapi()
     components = schema["components"]["schemas"]
 
-    assert "/api/v1/capabilities" not in schema["paths"]
+    operation = schema["paths"]["/api/v1/capabilities"]["get"]
+    assert operation["operationId"] == "get_local_capabilities"
+    assert operation["responses"]["200"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/CapabilitiesResponse"
+    }
     assert components["ApiErrorCode"]["enum"] == [code.value for code in ApiErrorCode]
     assert "configuration_required" in components["ApiErrorCode"]["enum"]
-    assert not any(
-        name.startswith(("Capability", "Capabilities", "LivePlayground", "Gate"))
-        for name in components
-    )
+    assert {
+        "CapabilitiesResponse",
+        "CapabilityActionCode",
+        "CapabilityRequirementCode",
+        "CapabilityState",
+        "LivePlaygroundCapability",
+    } <= components.keys()
+    assert not any(name.startswith("Gate") for name in components)

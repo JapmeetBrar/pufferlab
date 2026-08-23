@@ -81,6 +81,18 @@ def search_unavailable() -> SearchError:
     )
 
 
+def search_configuration_required() -> SearchError:
+    return SearchError(
+        "local search configuration is required",
+        SearchErrorDetails(
+            code=ApiErrorCode.CONFIGURATION_REQUIRED,
+            retryable=False,
+            http_status=503,
+            operation="search_configuration",
+        ),
+    )
+
+
 def invalid_provider_result() -> SearchError:
     return SearchError(
         "retrieval provider returned an invalid result",

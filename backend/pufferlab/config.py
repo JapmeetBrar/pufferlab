@@ -3,7 +3,7 @@
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import SecretStr
+from pydantic import SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -21,6 +21,16 @@ class Settings(BaseSettings):
     pufferlab_cors_origins: str = "http://localhost:5173"
     turbopuffer_api_key: SecretStr | None = None
     turbopuffer_region: str = "gcp-us-central1"
+
+    @field_validator("turbopuffer_api_key", mode="before")
+    @classmethod
+    def normalize_blank_api_key(cls, value: object) -> object:
+        """Discard blank raw env/config values before Pydantic wraps them as a secret."""
+        if isinstance(value, SecretStr) and not value.get_secret_value().strip():
+            return None
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
 
     @property
     def cors_origins(self) -> list[str]:
