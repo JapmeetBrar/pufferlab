@@ -200,6 +200,16 @@ rejects invalid input with exit `2` before server construction. `SIGINT`/`SIGTER
 graceful shutdown and returns `0`; startup or unexpected runtime failure returns `1`. The existing
 runtime guard remains the authoritative second-process defense.
 
+Uvicorn receives five seconds to drain requests, connections, and tasks before lifespan shutdown;
+that Uvicorn timeout does not bound a blocked lifespan handler. A process-level watchdog bounds the
+complete synchronous runner, including lifespan shutdown and asyncio runner teardown, to ten
+seconds after the first shutdown signal. If cooperative shutdown exceeds that outer bound, the
+watchdog uses `os._exit(0)`: this deliberately skips Python cleanup handlers and buffered-output
+flushing, so in-flight work may remain interrupted and must be reconciled by the existing SQLite
+transaction semantics plus runtime startup migration/recovery on the next launch. The operating
+system releases the process lock and sockets. A second signal requests Uvicorn's immediate
+force-exit path; neither signal is replayed after handlers are restored.
+
 ### Authenticated tiny-namespace ownership
 
 Only `dataset ingest-tiny` with no explicit `--namespace` participates. Before its first provider
