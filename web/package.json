@@ -10,6 +10,7 @@
     "generate:api": "openapi-typescript ../openapi/pufferlab-v1.json -o src/api/schema.d.ts",
     "lint": "eslint .",
     "test": "vitest run",
+    "test:e2e": "node e2e/run.mjs",
     "typecheck": "tsc -b --pretty false"
   },
   "dependencies": {
@@ -18,7 +19,9 @@
     "react-dom": "19.2.8"
   },
   "devDependencies": {
+    "@axe-core/playwright": "4.13.0",
     "@eslint/js": "10.0.1",
+    "@playwright/test": "1.62.1",
     "@testing-library/jest-dom": "7.0.1",
     "@testing-library/react": "16.3.2",
     "@types/node": "26.2.0",

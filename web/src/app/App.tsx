@@ -1,9 +1,10 @@
 import { useQuery } from "@tanstack/react-query";
 
-import { getHealth } from "../api/client";
+import { getCapabilities, getHealth } from "../api/client";
 import { RunDetailPage } from "../features/evals/RunDetailPage";
 import { RunListPage } from "../features/evals/RunListPage";
 import { QueryDetailPage } from "../features/evals/QueryDetailPage";
+import { currentCapabilityReadiness } from "../features/playground/capabilityState";
 import {
   isUuid,
   readPlaygroundForensicIdentity,
@@ -28,6 +29,12 @@ export function App() {
     queryFn: ({ signal }) => getHealth(signal),
     retry: false,
   });
+  const capabilities = useQuery({
+    queryKey: ["capabilities"],
+    queryFn: ({ signal }) => getCapabilities(signal),
+    retry: false,
+  });
+  const liveSearchReadiness = currentCapabilityReadiness(capabilities);
   const queryMatch = /^\/runs\/([^/]+)\/queries\/([^/]+)$/.exec(location.pathname);
   const queryRunId = queryMatch?.[1] === undefined ? null : decodePathId(queryMatch[1]);
   const queryId = queryMatch?.[2] === undefined ? null : decodePathId(queryMatch[2]);
@@ -67,11 +74,24 @@ export function App() {
             Evaluation runs
           </AppLink>
         </nav>
-        <div className="service-status" aria-live="polite">
-          <span className={`status-dot ${health.isSuccess ? "is-ready" : ""}`} aria-hidden="true" />
-          {health.isPending && "Connecting to API"}
-          {health.isSuccess && `API ${health.data.version} ready`}
-          {health.isError && "API unavailable"}
+        <div className="status-cluster" aria-live="polite">
+          <div className="service-status">
+            <span className={`status-dot ${health.isSuccess ? "is-alive" : ""}`} aria-hidden="true" />
+            {health.isPending && "Connecting to API"}
+            {health.isSuccess && `API ${health.data.version} alive`}
+            {health.isError && "API unavailable"}
+          </div>
+          <div className="service-status live-search-status">
+            <span
+              className={`status-dot ${liveSearchReadiness.state === "locally_configured" ? "is-local" : ""}`}
+              aria-hidden="true"
+            />
+            {liveSearchReadiness.state === "checking" && "Checking live-search setup"}
+            {liveSearchReadiness.state === "unavailable" && "Live-search setup unavailable"}
+            {liveSearchReadiness.state === "action_required" && "Live-search setup needed"}
+            {liveSearchReadiness.state === "locally_configured" &&
+              "Live search locally configured · remote unchecked"}
+          </div>
         </div>
       </header>
 
