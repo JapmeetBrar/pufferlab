@@ -70,6 +70,9 @@ class FakeApplication:
         run: EvalRun | None = None,
         export: ContractModel | None = None,
         failure: BaseException | None = None,
+        cancel_result: EvalRun | None = None,
+        cancel_failure: BaseException | None = None,
+        close_failure: BaseException | None = None,
     ) -> None:
         self.seed_result = _seed_result()
         self.result_run = run or _run()
@@ -78,6 +81,9 @@ class FakeApplication:
             outcomes=[{"config_id": str(CONFIG_IDS[0]), "status": "succeeded"}],
         )
         self.failure = failure
+        self.cancel_result = cancel_result
+        self.cancel_failure = cancel_failure
+        self.close_failure = close_failure
         self.ingest_options: UnixIngestOptions | None = None
         self.seed_options: ConfigSeedOptions | None = None
         self.run_options: EvalRunOptions | None = None
@@ -139,6 +145,10 @@ class FakeApplication:
 
     async def cancel_and_drain(self, run_id: UUID) -> EvalRun:
         self.cancelled.append(run_id)
+        if self.cancel_failure is not None:
+            raise self.cancel_failure
+        if self.cancel_result is not None:
+            return self.cancel_result
         return self.result_run.model_copy(update={"status": EvalRunStatus.CANCELLED})
 
     def export(self, run_id: UUID) -> ContractModel:
@@ -149,6 +159,8 @@ class FakeApplication:
 
     async def close(self) -> None:
         self.close_calls += 1
+        if self.close_failure is not None:
+            raise self.close_failure
 
 
 class SeedResultValue:
@@ -545,7 +557,50 @@ def test_keyboard_interrupt_cancels_drains_and_returns_130(tmp_path: Path) -> No
 
     assert exit_code == 130
     assert stdout == ""
-    assert stderr == f"run_id={RUN_ID} status=cancelled\n"
+    assert stderr == f"run_id={RUN_ID} status=cancelled interrupt_requested=true\n"
+    assert application.cancelled == [RUN_ID]
+    assert application.close_calls == 1
+
+
+def test_keyboard_interrupt_reports_confirmed_failed_durable_status(tmp_path: Path) -> None:
+    application = FakeApplication(
+        failure=KeyboardInterrupt(),
+        cancel_result=_run(status=EvalRunStatus.FAILED),
+    )
+
+    exit_code, stdout, stderr = _invoke(
+        ["eval", "run", "--seeded-defaults"],
+        application,
+        tmp_path,
+    )
+
+    assert exit_code == 130
+    assert stdout == ""
+    assert stderr == f"run_id={RUN_ID} status=failed interrupt_requested=true\n"
+    assert "status=cancelled" not in stderr
+    assert application.cancelled == [RUN_ID]
+    assert application.close_calls == 1
+
+
+def test_keyboard_interrupt_surfaces_redacted_cancel_and_close_failures(tmp_path: Path) -> None:
+    private_detail = "provider-secret-from-cleanup"
+    application = FakeApplication(
+        failure=KeyboardInterrupt(),
+        cancel_failure=RuntimeError(private_detail),
+        close_failure=RuntimeError(private_detail),
+    )
+
+    exit_code, stdout, stderr = _invoke(
+        ["eval", "run", "--seeded-defaults"],
+        application,
+        tmp_path,
+    )
+
+    assert exit_code == 130
+    assert stdout == ""
+    assert stderr == f"run_id={RUN_ID} status=interrupt_requested cleanup=failed\n"
+    assert private_detail not in stderr
+    assert "status=cancelled" not in stderr
     assert application.cancelled == [RUN_ID]
     assert application.close_calls == 1
 

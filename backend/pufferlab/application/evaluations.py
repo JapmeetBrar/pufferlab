@@ -378,6 +378,10 @@ def _validate_canonical_seed(
 ) -> None:
     if seed.dataset_version.status is not DatasetStatus.READY:
         raise PersistenceValidationError("evaluation dataset revision must be ready")
+    if seed.query_set.dataset_version_id != seed.dataset_version.id:
+        raise PersistenceValidationError(
+            "evaluation query set must bind to the seeded dataset revision"
+        )
     if seed.query_set.query_count != 50 or len(seed.judged_queries) != 50:
         raise PersistenceValidationError("evaluation seeding requires the curated 50-query set")
     _validate_canonical_configs(seed.dataset_version, configs)

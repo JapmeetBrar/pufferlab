@@ -6,7 +6,6 @@ import argparse
 import asyncio
 import sys
 from collections.abc import Callable, Sequence
-from contextlib import suppress
 from pathlib import Path
 from typing import Protocol, TextIO
 from uuid import UUID, uuid4
@@ -35,7 +34,7 @@ from pufferlab.cli.ingest import (
 )
 from pufferlab.config import Settings
 from pufferlab.contracts.common import ContractModel
-from pufferlab.contracts.evals import EvalRun
+from pufferlab.contracts.evals import EvalRun, EvalRunStatus
 from pufferlab.datasets.ingestion import IngestionReport
 
 _UNIX_PREFIX = "pufferlab-unix-"
@@ -50,6 +49,20 @@ class _IngestRunner(Protocol):
         *,
         emit: Callable[[str], None],
     ) -> IngestionReport: ...
+
+
+class _EvaluationInterrupted(Exception):
+    """Carry only safe, durable interrupt-cleanup state across ``asyncio.run``."""
+
+    def __init__(
+        self,
+        *,
+        durable_status: EvalRunStatus | None,
+        cleanup_failed: bool,
+    ) -> None:
+        super().__init__("evaluation interrupted")
+        self.durable_status = durable_status
+        self.cleanup_failed = cleanup_failed
 
 
 def main(
@@ -132,8 +145,14 @@ def main(
                         on_progress=progress,
                     )
                 )
+            except _EvaluationInterrupted as interrupted:
+                _render_evaluation_interrupt(run_id, interrupted, output=error_output)
+                return 130
             except KeyboardInterrupt:
-                print(f"run_id={run_id} status=cancelled", file=error_output)
+                print(
+                    f"run_id={run_id} status=interrupt_requested cleanup=unknown",
+                    file=error_output,
+                )
                 return 130
             render_run(run, emit=lambda message: print(message, file=output))
             return run_exit_code(run)
@@ -225,23 +244,52 @@ async def _run_evaluation(
 ) -> EvalRun:
     interrupted = False
     try:
+        return await application.run(
+            options,
+            run_id=run_id,
+            on_progress=on_progress,
+        )
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        interrupted = True
+        durable_status: EvalRunStatus | None = None
+        cleanup_failed = False
         try:
-            return await application.run(
-                options,
-                run_id=run_id,
-                on_progress=on_progress,
-            )
-        except (KeyboardInterrupt, asyncio.CancelledError):
-            interrupted = True
-            with suppress(Exception):
-                await asyncio.shield(application.cancel_and_drain(run_id))
-            raise
+            durable = await asyncio.shield(application.cancel_and_drain(run_id))
+            durable_status = durable.status
+        except (Exception, asyncio.CancelledError, KeyboardInterrupt):
+            cleanup_failed = True
+        try:
+            await asyncio.shield(application.close())
+        except (Exception, asyncio.CancelledError, KeyboardInterrupt):
+            cleanup_failed = True
+        raise _EvaluationInterrupted(
+            durable_status=durable_status,
+            cleanup_failed=cleanup_failed,
+        ) from None
     finally:
-        if interrupted:
-            with suppress(Exception):
-                await asyncio.shield(application.close())
-        else:
+        if not interrupted:
             await application.close()
+
+
+def _render_evaluation_interrupt(
+    run_id: UUID,
+    interrupted: _EvaluationInterrupted,
+    *,
+    output: TextIO,
+) -> None:
+    fields = [f"run_id={run_id}"]
+    if interrupted.durable_status is None:
+        fields.append("status=interrupt_requested")
+    else:
+        fields.extend(
+            (
+                f"status={interrupted.durable_status.value}",
+                "interrupt_requested=true",
+            )
+        )
+    if interrupted.cleanup_failed:
+        fields.append("cleanup=failed")
+    print(" ".join(fields), file=output)
 
 
 async def _load_export(application: CliApplication, run_id: UUID) -> ContractModel:

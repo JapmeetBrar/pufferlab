@@ -575,6 +575,35 @@ def test_seed_rejects_noncanonical_candidate_depth_and_reranker_depth(
         service.create_run(request, _environment(request))
 
 
+def test_seed_rejects_cross_dataset_query_set_before_any_seed_write(
+    repository: PufferLabRepository,
+) -> None:
+    seed, configs = _seed()
+    backend = FakeSearchBackend(configs)
+    service = _service(repository, backend)
+    other_dataset = seed.dataset_version.model_copy(
+        update={
+            "id": _id("other-dataset"),
+            "version": "other-v1",
+            "namespace": "pufferlab-test-other-eval",
+            "corpus_hash": "other-corpus-hash",
+        }
+    )
+    repository.put_dataset_version(other_dataset)
+    mismatched_seed = UnixEvaluationSeed(
+        dataset_version=seed.dataset_version,
+        query_set=seed.query_set.model_copy(update={"dataset_version_id": other_dataset.id}),
+        curated_queries=seed.curated_queries,
+    )
+
+    with pytest.raises(PersistenceValidationError, match="must bind to the seeded dataset"):
+        service.seed(mismatched_seed, configs)
+
+    assert repository.list_dataset_versions() == [other_dataset]
+    assert repository.list_retrieval_configs() == []
+    assert repository.list_query_sets() == []
+
+
 def _assert_no_exposed_fields(value: object) -> None:
     forbidden = {
         "api_key",
