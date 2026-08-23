@@ -17,8 +17,10 @@ from pufferlab.datasets.unix_application import (
     UnixDatasetApplicationService,
     UnixEvaluationSeed,
     UnixIngestionResult,
+    authenticate_persisted_unix_query_set,
     build_ready_unix_evaluation_seed,
     load_curated_unix_local_pack,
+    unix_query_set_content_sha256,
 )
 
 __all__ = [
@@ -33,6 +35,7 @@ __all__ = [
     "UnixDatasetApplicationService",
     "UnixEvaluationSeed",
     "UnixIngestionResult",
+    "authenticate_persisted_unix_query_set",
     "build_ready_unix_evaluation_seed",
     "compile_namespace_write_spec",
     "document_uuid",
@@ -41,4 +44,5 @@ __all__ = [
     "load_fixture_corpus",
     "load_unix_dataset_manifest",
     "prepare_unix_pack",
+    "unix_query_set_content_sha256",
 ]

@@ -81,6 +81,9 @@ def test_checked_manifests_and_entire_repository_pass_artifact_audit() -> None:
     )
 
     assert curated.source_lock_sha256 == source_lock_sha256(source_lock)
+    assert curated.query_set_content_sha256 == (
+        "d839e7cb00dad5670f85e8194a63d848c5fb71d820ac25b9fe0be75035460df3"
+    )
     assert processed_pack.source_lock_sha256 == source_lock_sha256(source_lock)
     assert processed_pack.archive_sha256 == source_lock.archive.completed_download_sha256
     assert processed_pack.preprocessing_sha256 == (source_lock.preprocessing.specification_sha256)

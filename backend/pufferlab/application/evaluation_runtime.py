@@ -47,6 +47,7 @@ from pufferlab.contracts.evals import (
     EvalRun,
     EvalRunStatus,
     JudgedQuery,
+    QuerySet,
     QuerySetSummary,
     RunEnvironment,
 )
@@ -62,7 +63,15 @@ from pufferlab.contracts.retrieval import (
 )
 from pufferlab.contracts.search import SearchCompareRequest
 from pufferlab.datasets import load_unix_dataset_manifest
+from pufferlab.datasets.cqadupstack import (
+    CuratedQueryManifest,
+    DatasetPreparationError,
+    SourceLock,
+    load_curated_query_manifest,
+    load_source_lock,
+)
 from pufferlab.datasets.models import DatasetManifest
+from pufferlab.datasets.unix_application import authenticate_persisted_unix_query_set
 from pufferlab.jobs import RunJobManager
 from pufferlab.persistence import Database, PufferLabRepository
 from pufferlab.persistence.errors import (
@@ -89,6 +98,8 @@ from pufferlab.retrieval.types import (
 )
 
 _DEFAULT_UNIX_MANIFEST = Path("datasets/cqadupstack-unix/dataset-manifest.json")
+_DEFAULT_UNIX_CURATED_MANIFEST = Path("datasets/cqadupstack-unix/curated-50.json")
+_DEFAULT_UNIX_SOURCE_LOCK = Path("datasets/cqadupstack-unix/source-lock.json")
 _MAX_ACTIVE_RUNS = 1
 _MAX_PERSISTED_ACTIVE_ROWS = 100
 _REPLAY_NOTICE = (
@@ -142,6 +153,15 @@ class _WorkerGuard(Protocol):
     def release(self) -> None: ...
 
 
+class _QuerySetAuthenticator(Protocol):
+    def __call__(
+        self,
+        dataset: DatasetVersion,
+        query_set: QuerySet,
+        judged_queries: tuple[JudgedQuery, ...],
+    ) -> None: ...
+
+
 @dataclass(frozen=True, slots=True)
 class _RunBinding:
     dataset: DatasetVersion
@@ -168,7 +188,14 @@ class EvaluationApiRuntime:
         *,
         database: Database | None = None,
         unix_manifest_path: Path = _DEFAULT_UNIX_MANIFEST,
+        unix_curated_manifest_path: Path = _DEFAULT_UNIX_CURATED_MANIFEST,
+        unix_source_lock_path: Path = _DEFAULT_UNIX_SOURCE_LOCK,
         manifest_loader: Callable[[Path], DatasetManifest] = load_unix_dataset_manifest,
+        curated_manifest_loader: Callable[[Path], CuratedQueryManifest] = (
+            load_curated_query_manifest
+        ),
+        source_lock_loader: Callable[[Path], SourceLock] = load_source_lock,
+        query_set_authenticator: _QuerySetAuthenticator | None = None,
         credential_check: Callable[[Settings], None] | None = None,
         bound_catalog_factory: _BoundCatalogFactory | None = None,
         search_backend_factory: _SearchBackendFactory | None = None,
@@ -187,7 +214,14 @@ class EvaluationApiRuntime:
         self._provider_free_controls = ProviderFreeEvaluationControls(self._views)
         self._job_manager = RunJobManager(self._repository)
         self._unix_manifest_path = unix_manifest_path
+        self._unix_curated_manifest_path = unix_curated_manifest_path
+        self._unix_source_lock_path = unix_source_lock_path
         self._manifest_loader = manifest_loader
+        self._curated_manifest_loader = curated_manifest_loader
+        self._source_lock_loader = source_lock_loader
+        self._query_set_authenticator = (
+            query_set_authenticator or self._authenticate_persisted_query_set
+        )
         self._credential_check = credential_check or _require_live_credential
         self._bound_catalog_factory = bound_catalog_factory or _make_bound_catalog
         self._search_backend_factory = search_backend_factory or _make_search_backend
@@ -358,7 +392,7 @@ class EvaluationApiRuntime:
                     message="evaluation run or query was not found",
                     operation="replay_eval_query",
                 )
-            except (PersistenceValidationError, ValueError):
+            except (DatasetPreparationError, PersistenceValidationError, ValueError):
                 binding_error = evaluation_invalid(
                     message="replay request does not match the immutable stored run",
                     operation="replay_eval_query",
@@ -529,14 +563,26 @@ class EvaluationApiRuntime:
         except BaseException:
             failure = evaluation_unavailable(operation="replay_eval_query")
 
-        try:
-            await backend.close()
-        except asyncio.CancelledError as caught:
+        close_task = asyncio.create_task(
+            backend.close(),
+            name=f"pufferlab-replay-close-{run_id}",
+        )
+        close_failed = False
+        while not close_task.done():
+            try:
+                await asyncio.shield(close_task)
+            except asyncio.CancelledError as caught:
+                if cancelled is None:
+                    cancelled = caught
+            except BaseException:
+                close_failed = True
+        if close_task.cancelled():
             if cancelled is None:
-                cancelled = caught
-        except BaseException:
-            if failure is None and cancelled is None:
-                failure = evaluation_unavailable(operation="replay_eval_query")
+                cancelled = asyncio.CancelledError()
+        elif close_task.exception() is not None:
+            close_failed = True
+        if close_failed and failure is None and cancelled is None:
+            failure = evaluation_unavailable(operation="replay_eval_query")
 
         if cancelled is not None:
             raise cancelled from None
@@ -614,7 +660,7 @@ class EvaluationApiRuntime:
         request: EvalRunQueryReplayRequest,
     ) -> _ReplayBinding:
         run = self._repository.get_run(run_id)
-        query_set = self._repository.get_query_set_revision(run.query_set.id)
+        query_set, judged_queries = self._repository.get_query_set(run.query_set.id)
         expected_summary = QuerySetSummary(
             id=query_set.id,
             name=query_set.name,
@@ -628,6 +674,7 @@ class EvaluationApiRuntime:
             )
         dataset = self._repository.get_dataset_version(query_set.dataset_version_id)
         self._reject_non_live(dataset, operation="replay_eval_query")
+        self._query_set_authenticator(dataset, query_set, tuple(judged_queries))
         configs = tuple(self._repository.list_run_configs(run.id))
         by_id = {config.id: config for config in configs}
         if len(by_id) != len(configs) or any(
@@ -636,7 +683,13 @@ class EvaluationApiRuntime:
             raise PersistenceValidationError(
                 "replay config IDs must belong to the immutable stored run"
             )
-        query = self._repository.get_judged_query(query_set.id, query_id)
+        query_by_id = {query.id: query for query in judged_queries}
+        try:
+            query = query_by_id[query_id]
+        except KeyError:
+            raise RecordNotFoundError(
+                "judged query was not found in the requested query set"
+            ) from None
         grades = exact_qrel_grades(query.qrels)
 
         # Only immutable, provider-free identities are accepted before loading executable assets.
@@ -658,6 +711,22 @@ class EvaluationApiRuntime:
             selected_configs=selected,
             query=query,
             grades=grades,
+        )
+
+    def _authenticate_persisted_query_set(
+        self,
+        dataset: DatasetVersion,
+        query_set: QuerySet,
+        judged_queries: tuple[JudgedQuery, ...],
+    ) -> None:
+        curated_manifest = self._curated_manifest_loader(self._unix_curated_manifest_path)
+        source_lock = self._source_lock_loader(self._unix_source_lock_path)
+        authenticate_persisted_unix_query_set(
+            dataset,
+            query_set,
+            judged_queries,
+            curated_manifest=curated_manifest,
+            checked_source_lock=source_lock,
         )
 
     def _dataset_for_run(self, run: EvalRun) -> DatasetVersion:

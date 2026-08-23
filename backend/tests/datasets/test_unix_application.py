@@ -10,6 +10,7 @@ from pufferlab.contracts.evals import JudgedQuery, QuerySet
 from pufferlab.datasets.checkpoints import IngestionCheckpointStore
 from pufferlab.datasets.cqadupstack import (
     CuratedQueryManifest,
+    DatasetPreparationError,
     ProcessedPackLock,
     SourceLock,
     curate_query_ids,
@@ -27,6 +28,7 @@ from pufferlab.datasets.ingestion import (
 from pufferlab.datasets.schema import NamespaceWriteSpec
 from pufferlab.datasets.unix_application import (
     UnixDatasetApplicationService,
+    authenticate_persisted_unix_query_set,
     build_ready_unix_evaluation_seed,
     load_curated_unix_local_pack,
 )
@@ -132,6 +134,77 @@ def test_builder_preserves_grades_curation_metadata_and_contract_native_seed(
     assert persisted_queries == list(first.judged_queries)
 
 
+def test_persisted_query_set_authentication_rejects_exact_source_mutations(
+    tmp_path: Path,
+) -> None:
+    processed, curated_path, source_lock, processed_pack_lock = _prepared_curated_pack(tmp_path)
+    local_pack = load_curated_unix_local_pack(
+        processed,
+        source_lock=source_lock,
+        processed_pack_lock=processed_pack_lock,
+        dataset_manifest_path=DATASET_MANIFEST_PATH,
+        curated_manifest_path=curated_path,
+    )
+    seed = build_ready_unix_evaluation_seed(local_pack, namespace="authenticated-unix")
+    anchored_manifest = local_pack.curated_manifest.model_copy(
+        update={"query_set_content_sha256": seed.query_set.content_hash}
+    )
+    queries = seed.judged_queries
+
+    authenticate_persisted_unix_query_set(
+        seed.dataset_version,
+        seed.query_set,
+        queries,
+        curated_manifest=anchored_manifest,
+        checked_source_lock=source_lock,
+    )
+
+    first = queries[0]
+    foreign_document = UUID(int=999_999)
+    mutations = (
+        (
+            first.model_copy(
+                update={
+                    "qrels": [
+                        first.qrels[0].model_copy(
+                            update={
+                                "document_id": foreign_document,
+                                "relevance_grade": 3,
+                            }
+                        ),
+                        *first.qrels[1:],
+                    ]
+                }
+            ),
+            *queries[1:],
+        ),
+        (first.model_copy(update={"text": "authored mutation"}), *queries[1:]),
+        (
+            first.model_copy(update={"tags": ["semantic"]}),
+            *queries[1:],
+        ),
+        (queries[1], queries[0], *queries[2:]),
+    )
+    for mutated in mutations:
+        with pytest.raises(DatasetPreparationError):
+            authenticate_persisted_unix_query_set(
+                seed.dataset_version,
+                seed.query_set,
+                tuple(mutated),
+                curated_manifest=anchored_manifest,
+                checked_source_lock=source_lock,
+            )
+
+    with pytest.raises(DatasetPreparationError, match="source lock"):
+        authenticate_persisted_unix_query_set(
+            seed.dataset_version,
+            seed.query_set,
+            queries,
+            curated_manifest=anchored_manifest,
+            checked_source_lock=source_lock.model_copy(update={"source_dump_date": "2014-09-27"}),
+        )
+
+
 @pytest.mark.asyncio
 async def test_application_service_owns_materialization_checkpoint_resume_and_no_delete(
     tmp_path: Path,
@@ -189,6 +262,7 @@ def _prepared_curated_pack(
         source_lock_sha256=source_lock_sha256(source_lock),
         query_count=50,
         selection_sha256=curated_selection_sha256(entries),
+        query_set_content_sha256=None,
         entries=entries,
     )
     curated_path = tmp_path / "curated.json"

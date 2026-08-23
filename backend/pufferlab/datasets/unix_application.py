@@ -8,7 +8,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from uuid import uuid5
+from uuid import UUID, uuid5
 
 from pufferlab.contracts.datasets import (
     DatasetStatus,
@@ -30,6 +30,7 @@ from pufferlab.datasets.cqadupstack import (
     load_curated_unix_corpus,
     load_processed_pack_lock,
     load_source_lock,
+    source_lock_sha256,
 )
 from pufferlab.datasets.identity import PUFFERLAB_NAMESPACE_UUID, document_uuid
 from pufferlab.datasets.ingestion import (
@@ -83,6 +84,64 @@ class UnixIngestionResult:
 
     report: IngestionReport
     evaluation_seed: UnixEvaluationSeed
+
+
+def authenticate_persisted_unix_query_set(
+    dataset: DatasetVersion,
+    query_set: QuerySet,
+    judged_queries: tuple[JudgedQuery, ...],
+    *,
+    curated_manifest: CuratedQueryManifest,
+    checked_source_lock: SourceLock,
+) -> None:
+    """Authenticate the complete persisted suite against its checked ID-only source."""
+    if curated_manifest.query_set_content_sha256 is None:
+        raise DatasetPreparationError("curated query-set content anchor is missing")
+    if curated_manifest.source_lock_sha256 != source_lock_sha256(checked_source_lock):
+        raise DatasetPreparationError("curated query source lock does not match the checked source")
+    if query_set.dataset_version_id != dataset.id:
+        raise DatasetPreparationError("query set is bound to a different dataset revision")
+    if len(judged_queries) != curated_manifest.query_count:
+        raise DatasetPreparationError("persisted query count does not match the curated source")
+
+    seen_query_ids: set[UUID] = set()
+    for query, selection in zip(judged_queries, curated_manifest.entries, strict=True):
+        expected_query_id = uuid5(
+            PUFFERLAB_NAMESPACE_UUID,
+            f"judged-query:{dataset.version}:{selection.query_id}",
+        )
+        if (
+            query.id != expected_query_id
+            or query.id in seen_query_ids
+            or query.external_id != selection.query_id
+            or tuple(query.tags) != selection.tags
+            or query.filters is not None
+        ):
+            raise DatasetPreparationError(
+                "persisted judged-query identity does not match the curated source"
+            )
+        seen_query_ids.add(query.id)
+        qrel_ids = [qrel.document_id for qrel in query.qrels]
+        if not qrel_ids or len(qrel_ids) != len(set(qrel_ids)):
+            raise DatasetPreparationError("persisted judged-query qrels are not canonical")
+
+    content_hash = unix_query_set_content_sha256(judged_queries, curated_manifest)
+    expected_query_set_id = uuid5(
+        PUFFERLAB_NAMESPACE_UUID,
+        f"query-set:{dataset.id}:{content_hash}",
+    )
+    if (
+        content_hash != curated_manifest.query_set_content_sha256
+        or query_set.content_hash != content_hash
+        or query_set.id != expected_query_set_id
+        or query_set.name != "CQADupStack Unix curated 50"
+        or query_set.version != curated_manifest.selection_version
+        or query_set.query_count != curated_manifest.query_count
+        or query_set.created_at != UNIX_REVISION_CREATED_AT
+    ):
+        raise DatasetPreparationError(
+            "persisted query set does not match the immutable curated source"
+        )
 
 
 def load_curated_unix_local_pack(
@@ -220,22 +279,17 @@ def build_ready_unix_evaluation_seed(
             )
         )
 
-    query_set_content_hash = _canonical_hash(
-        {
-            "curated_queries": [
-                {
-                    "judged_query": item.judged_query.model_dump(mode="json"),
-                    "primary_tag": item.primary_tag,
-                    "reason": item.reason,
-                    "tags": list(item.tags),
-                }
-                for item in curated_queries
-            ],
-            "selection_sha256": local_pack.curated_manifest.selection_sha256,
-            "selection_version": local_pack.curated_manifest.selection_version,
-            "source_lock_sha256": local_pack.curated_manifest.source_lock_sha256,
-        }
+    query_set_content_hash = unix_query_set_content_sha256(
+        tuple(item.judged_query for item in curated_queries),
+        local_pack.curated_manifest,
     )
+    if (
+        local_pack.curated_manifest.query_set_content_sha256 is not None
+        and query_set_content_hash != local_pack.curated_manifest.query_set_content_sha256
+    ):
+        raise DatasetPreparationError(
+            "built query set does not match the checked curated content anchor"
+        )
     query_set = QuerySet(
         id=uuid5(
             PUFFERLAB_NAMESPACE_UUID,
@@ -354,6 +408,35 @@ def _canonical_hash(value: object) -> str:
         sort_keys=True,
     ).encode()
     return hashlib.sha256(encoded).hexdigest()
+
+
+def unix_query_set_content_sha256(
+    judged_queries: tuple[JudgedQuery, ...],
+    curated_manifest: CuratedQueryManifest,
+) -> str:
+    """Rebuild the canonical hash used by the immutable query-set UUID."""
+    if len(judged_queries) != len(curated_manifest.entries):
+        raise DatasetPreparationError("judged queries do not match the curated selection")
+    return _canonical_hash(
+        {
+            "curated_queries": [
+                {
+                    "judged_query": judged_query.model_dump(mode="json"),
+                    "primary_tag": selection.primary_tag,
+                    "reason": selection.reason,
+                    "tags": list(selection.tags),
+                }
+                for judged_query, selection in zip(
+                    judged_queries,
+                    curated_manifest.entries,
+                    strict=True,
+                )
+            ],
+            "selection_sha256": curated_manifest.selection_sha256,
+            "selection_version": curated_manifest.selection_version,
+            "source_lock_sha256": curated_manifest.source_lock_sha256,
+        }
+    )
 
 
 def _source_id_sort_key(value: str) -> tuple[int, int | str]:

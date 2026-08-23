@@ -361,6 +361,9 @@ class CuratedQueryManifest(_StrictModel):
     source_lock_sha256: Sha256
     query_count: Literal[50]
     selection_sha256: Sha256
+    # The exact licensed query/qrel payload stays local. This checked digest anchors the complete
+    # contract-native query set without copying that payload into the repository.
+    query_set_content_sha256: Sha256 | None = None
     entries: tuple[CuratedQuery, ...] = Field(min_length=50, max_length=50)
 
     @model_validator(mode="after")

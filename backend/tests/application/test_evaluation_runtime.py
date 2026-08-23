@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 import threading
 import traceback
 from collections.abc import Awaitable, Callable
@@ -46,8 +47,21 @@ from pufferlab.contracts.search import (
     SearchHit,
     StageMembership,
 )
+from pufferlab.datasets.cqadupstack import (
+    CuratedQuery,
+    CuratedQueryManifest,
+    SourceLock,
+    curated_selection_sha256,
+    load_source_lock,
+    source_lock_sha256,
+)
+from pufferlab.datasets.identity import PUFFERLAB_NAMESPACE_UUID
 from pufferlab.datasets.models import DatasetManifest
 from pufferlab.datasets.schema import compile_namespace_write_spec
+from pufferlab.datasets.unix_application import (
+    UNIX_REVISION_CREATED_AT,
+    unix_query_set_content_sha256,
+)
 from pufferlab.main import create_app
 from pufferlab.persistence import Database, PufferLabRepository
 from pufferlab.persistence.errors import PersistenceValidationError, RecordNotFoundError
@@ -68,6 +82,7 @@ from pufferlab.synthetic_demo.seeder import materialize_synthetic_demo
 
 _TEST_NAMESPACE = UUID("cc1bc5f7-0f4e-4b99-a8ad-8cc647027700")
 _NOW = datetime(2026, 8, 23, 0, 0, tzinfo=UTC)
+_REPOSITORY_ROOT = Path(__file__).parents[3]
 
 
 def _id(name: str) -> UUID:
@@ -290,6 +305,7 @@ class _ReplayBackend:
         fail_compare: bool = False,
         fail_close: bool = False,
         block_compare: bool = False,
+        block_close: bool = False,
         mismatch_probe: bool = False,
         corrupt_primary_binding: bool = False,
         corrupt_probe_binding: bool = False,
@@ -300,12 +316,15 @@ class _ReplayBackend:
         self._fail_compare = fail_compare
         self._fail_close = fail_close
         self._block_compare = block_compare
+        self._block_close = block_close
         self._mismatch_probe = mismatch_probe
         self._corrupt_primary_binding = corrupt_primary_binding
         self._corrupt_probe_binding = corrupt_probe_binding
         self.compare_calls: list[SearchCompareRequest] = []
         self.probe_calls: list[HybridProbeExecuteRequest] = []
         self.compare_started = asyncio.Event()
+        self.close_started = asyncio.Event()
+        self.close_release = asyncio.Event()
         self.closed = False
 
     def list_configs(self) -> tuple[RetrievalConfigSummary, ...]:
@@ -460,6 +479,9 @@ class _ReplayBackend:
         )
 
     async def close(self) -> None:
+        self.close_started.set()
+        if self._block_close:
+            await self.close_release.wait()
         self.closed = True
         if self._fail_close:
             raise RuntimeError("PRIVATE_REPLAY_CLOSE_MARKER")
@@ -507,6 +529,7 @@ def _seed_live_suite(
     repository: PufferLabRepository,
     *,
     judged_queries: list[JudgedQuery] | None = None,
+    curated_manifest: CuratedQueryManifest | None = None,
 ) -> _LiveSuite:
     manifest = AUTHORED_SYNTHETIC_DEMO.manifest
     write_spec = compile_namespace_write_spec(manifest)
@@ -544,15 +567,30 @@ def _seed_live_suite(
         created_at=_NOW,
     )
     configs = derive_bound_retrieval_configs(dataset, manifest)
-    query_set = QuerySet(
-        id=_id("live-query-set"),
-        name="PufferLab-authored runtime test queries",
-        version="v1",
-        dataset_version_id=dataset.id,
-        query_count=50,
-        content_hash="pufferlab-authored-runtime-query-hash",
-        created_at=_NOW,
-    )
+    if curated_manifest is None:
+        query_set = QuerySet(
+            id=_id("live-query-set"),
+            name="PufferLab-authored runtime test queries",
+            version="v1",
+            dataset_version_id=dataset.id,
+            query_count=50,
+            content_hash="pufferlab-authored-runtime-query-hash",
+            created_at=_NOW,
+        )
+    else:
+        assert curated_manifest.query_set_content_sha256 is not None
+        query_set = QuerySet(
+            id=uuid5(
+                PUFFERLAB_NAMESPACE_UUID,
+                (f"query-set:{dataset.id}:{curated_manifest.query_set_content_sha256}"),
+            ),
+            name="CQADupStack Unix curated 50",
+            version=curated_manifest.selection_version,
+            dataset_version_id=dataset.id,
+            query_count=curated_manifest.query_count,
+            content_hash=curated_manifest.query_set_content_sha256,
+            created_at=UNIX_REVISION_CREATED_AT,
+        )
     repository.put_dataset_version(dataset)
     for config in configs:
         repository.put_retrieval_config(config)
@@ -583,11 +621,28 @@ def _runtime(
     probe: _FactoryProbe,
     *,
     worker_guard_factory: Callable[[Path], Any] | None = None,
+    curated_manifest: CuratedQueryManifest | None = None,
+    source_lock: SourceLock | None = None,
 ) -> EvaluationApiRuntime:
+    def load_curated(_path: Path) -> CuratedQueryManifest:
+        assert curated_manifest is not None
+        return curated_manifest
+
+    def load_checked_source(_path: Path) -> SourceLock:
+        assert source_lock is not None
+        return source_lock
+
     return EvaluationApiRuntime(
         settings,
         database=database,
         manifest_loader=probe.load_manifest,
+        curated_manifest_loader=load_curated,
+        source_lock_loader=load_checked_source,
+        query_set_authenticator=(
+            None
+            if curated_manifest is not None and source_lock is not None
+            else lambda _dataset, _query_set, _queries: None
+        ),
         credential_check=probe.check_credential,
         bound_catalog_factory=probe.make_catalog,
         search_backend_factory=probe.make_runtime,
@@ -1219,6 +1274,45 @@ def _replay_queries() -> tuple[list[JudgedQuery], tuple[UUID, UUID, UUID, UUID]]
     )
 
 
+def _authenticated_replay_source(
+    queries: list[JudgedQuery],
+) -> tuple[list[JudgedQuery], CuratedQueryManifest, SourceLock]:
+    source_lock = load_source_lock(_REPOSITORY_ROOT / "datasets/cqadupstack-unix/source-lock.json")
+    tag_order = ("exact_token", "semantic", "hybrid", "reranker")
+    authenticated_queries: list[JudgedQuery] = []
+    entries: list[CuratedQuery] = []
+    for index, query in enumerate(queries):
+        tag = tag_order[index % len(tag_order)]
+        authenticated_queries.append(query.model_copy(update={"tags": [tag]}))
+        entries.append(
+            CuratedQuery(
+                query_id=query.external_id,
+                primary_tag=tag,
+                tags=(tag,),
+                reason="Selected as an authored provider-free authentication fixture.",
+            )
+        )
+    entry_tuple = tuple(entries)
+    unanchored = CuratedQueryManifest(
+        format_version=1,
+        selection_version="pufferlab-curated-50-v1",
+        source_lock_sha256=source_lock_sha256(source_lock),
+        query_count=50,
+        selection_sha256=curated_selection_sha256(entry_tuple),
+        query_set_content_sha256=None,
+        entries=entry_tuple,
+    )
+    content_hash = unix_query_set_content_sha256(
+        tuple(authenticated_queries),
+        unanchored,
+    )
+    return (
+        authenticated_queries,
+        unanchored.model_copy(update={"query_set_content_sha256": content_hash}),
+        source_lock,
+    )
+
+
 def _config_for_mode(suite: _LiveSuite, mode: RetrievalMode) -> RetrievalConfig:
     return next(config for config in suite.configs if config.mode is mode)
 
@@ -1524,6 +1618,130 @@ async def test_replay_cancellation_still_closes_request_backend(tmp_path: Path) 
         await task
 
     assert probe.replay_backends[0].closed is True
+    await runtime.shutdown_execution()
+    runtime.dispose()
+
+
+@pytest.mark.asyncio
+async def test_replay_repeated_cancellation_drains_owned_backend_close(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    database = Database.from_settings(settings)
+    database.migrate()
+    repository = PufferLabRepository(database.session_factory)
+    queries, document_ids = _replay_queries()
+    suite = _seed_live_suite(repository, judged_queries=queries)
+    probe = _ReplayFactoryProbe(
+        suite.manifest,
+        document_ids,
+        block_compare=True,
+        block_close=True,
+    )
+    runtime = _runtime(settings, database, probe)
+    await runtime.start()
+    run = _create_replay_run(repository, suite, "double-cancelled-replay")
+    bm25 = _config_for_mode(suite, RetrievalMode.BM25)
+    vector = _config_for_mode(suite, RetrievalMode.VECTOR)
+
+    task = asyncio.create_task(
+        runtime.replay_eval_query(
+            run.id,
+            queries[0].id,
+            EvalRunQueryReplayRequest(config_ids=[bm25.id, vector.id]),
+        )
+    )
+    for _ in range(500):
+        if probe.replay_backends and probe.replay_backends[0].compare_started.is_set():
+            break
+        await asyncio.sleep(0.002)
+    else:
+        raise AssertionError("replay did not begin")
+    backend = probe.replay_backends[0]
+    task.cancel("first request cancellation")
+    await asyncio.wait_for(backend.close_started.wait(), timeout=1)
+    task.cancel("second request cancellation during close")
+    await asyncio.sleep(0)
+    assert task.done() is False
+    assert backend.closed is False
+
+    backend.close_release.set()
+    with pytest.raises(asyncio.CancelledError, match="first request cancellation"):
+        await task
+    assert backend.closed is True
+    await runtime.shutdown_execution()
+    runtime.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mutation", ["document", "grade", "document_and_grade"])
+async def test_replay_rejects_valid_shaped_sqlite_qrel_substitutions_before_factories(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    settings = _settings(tmp_path)
+    database = Database.from_settings(settings)
+    database.migrate()
+    repository = PufferLabRepository(database.session_factory)
+    replay_queries, document_ids = _replay_queries()
+    queries, curated_manifest, source_lock = _authenticated_replay_source(replay_queries)
+    suite = _seed_live_suite(
+        repository,
+        judged_queries=queries,
+        curated_manifest=curated_manifest,
+    )
+    probe = _ReplayFactoryProbe(suite.manifest, document_ids)
+    runtime = _runtime(
+        settings,
+        database,
+        probe,
+        curated_manifest=curated_manifest,
+        source_lock=source_lock,
+    )
+    await runtime.start()
+    run = _create_replay_run(repository, suite, "sqlite-qrel-substitution")
+    bm25 = _config_for_mode(suite, RetrievalMode.BM25)
+    hybrid = _config_for_mode(suite, RetrievalMode.HYBRID_RRF)
+
+    with sqlite3.connect(database.path) as connection:
+        binding = (str(suite.query_set.id), str(queries[0].id))
+        if mutation == "document":
+            cursor = connection.execute(
+                """
+                UPDATE qrels SET document_id = ?
+                WHERE query_set_id = ? AND query_id = ? AND ordinal = 0
+                """,
+                (str(UUID(int=999_999)), *binding),
+            )
+        elif mutation == "grade":
+            cursor = connection.execute(
+                """
+                UPDATE qrels SET relevance_grade = ?
+                WHERE query_set_id = ? AND query_id = ? AND ordinal = 0
+                """,
+                (3, *binding),
+            )
+        else:
+            assert mutation == "document_and_grade"
+            cursor = connection.execute(
+                """
+                UPDATE qrels SET document_id = ?, relevance_grade = ?
+                WHERE query_set_id = ? AND query_id = ? AND ordinal = 0
+                """,
+                (str(UUID(int=999_999)), 3, *binding),
+            )
+        assert cursor.rowcount == 1
+
+    with pytest.raises(EvaluationViewError) as raised:
+        await runtime.replay_eval_query(
+            run.id,
+            queries[0].id,
+            EvalRunQueryReplayRequest(config_ids=[bm25.id, hybrid.id]),
+        )
+
+    assert raised.value.http_status == 422
+    _assert_no_live_factory_calls(probe)
+    assert probe.replay_backends == []
     await runtime.shutdown_execution()
     runtime.dispose()
 
