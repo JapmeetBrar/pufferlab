@@ -248,10 +248,9 @@ def resolve_owned_namespace(
     namespace: str | None,
     *,
     token_factory: _TokenFactory = _token_hex,
+    generated_prefix: str = _GENERATED_NAMESPACE_PREFIX,
 ) -> str:
-    resolved = (
-        f"{_GENERATED_NAMESPACE_PREFIX}{token_factory(12)}" if namespace is None else namespace
-    )
+    resolved = f"{generated_prefix}{token_factory(12)}" if namespace is None else namespace
     if _OWNED_NAMESPACE_PATTERN.fullmatch(resolved) is None:
         raise TinyIngestionCommandError(
             "namespace must be an owned pufferlab-* name using 1-128 letters, digits, '-', '_', "
