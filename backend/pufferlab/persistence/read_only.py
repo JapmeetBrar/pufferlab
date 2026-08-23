@@ -14,7 +14,7 @@ from typing import NoReturn, cast
 
 from sqlalchemy import Engine, create_engine
 from sqlalchemy.orm import Session, sessionmaker
-from sqlalchemy.pool import NullPool
+from sqlalchemy.pool import StaticPool
 
 from pufferlab.persistence.repository import PufferLabRepository
 
@@ -48,21 +48,46 @@ class _OpenOutcome:
     control: _OpenControl = _OpenControl.NONE
 
 
+class _PinnedConnectionCreator:
+    """Give SQLAlchemy one already-open handle and refuse every attempted reopen."""
+
+    __slots__ = ("_claimed", "_connection")
+
+    def __init__(self, connection: sqlite3.Connection) -> None:
+        self._connection: sqlite3.Connection | None = connection
+        self._claimed = False
+
+    def __call__(self) -> sqlite3.Connection:
+        connection = self._connection
+        if self._claimed or connection is None:
+            raise ReadOnlyCatalogError()
+        self._claimed = True
+        return connection
+
+    def close(self) -> None:
+        connection = self._connection
+        self._connection = None
+        if connection is not None:
+            connection.close()
+
+
 class ExistingReadOnlyCatalog:
     """Own a validated immutable engine and its normal read repositories."""
 
-    __slots__ = ("_closed", "_engine", "_identity", "_path", "repository")
+    __slots__ = ("_closed", "_creator", "_engine", "_identity", "_path", "repository")
 
     def __init__(
         self,
         *,
         path: Path,
         identity: _FileIdentity,
+        creator: _PinnedConnectionCreator,
         engine: Engine,
         repository: PufferLabRepository,
     ) -> None:
         self._path = path
         self._identity = identity
+        self._creator = creator
         self._engine = engine
         self.repository = repository
         self._closed = False
@@ -72,18 +97,26 @@ class ExistingReadOnlyCatalog:
             return
         self._closed = True
         engine = self._engine
+        creator = self._creator
         path = self._path
         identity = self._identity
-        failed, control = _dispose_and_validate(engine, path=path, identity=identity)
+        failed, control = _dispose_and_validate(
+            engine,
+            creator=creator,
+            path=path,
+            identity=identity,
+        )
 
         # A raised exception retains this frame's locals, including ``self``. The catalog is
         # terminal after close, so erase every path/creator-bearing reference before a separate
         # value-free helper raises.
         self._engine = cast(Engine, None)
+        self._creator = cast(_PinnedConnectionCreator, None)
         self._identity = _FileIdentity(0, 0, 0, 0)
         self._path = Path()
         self.repository = cast(PufferLabRepository, None)
         engine = cast(Engine, None)
+        creator = cast(_PinnedConnectionCreator, None)
         path = Path()
         identity = _FileIdentity(0, 0, 0, 0)
         if control is _OpenControl.KEYBOARD_INTERRUPT:
@@ -131,6 +164,7 @@ def _open_existing_read_only_catalog_inner(path: Path) -> _OpenOutcome:
     """Consume all value-bearing failures before the public boundary can raise."""
 
     engine: Engine | None = None
+    creator: _PinnedConnectionCreator | None = None
     resolved: Path | None = None
     identity: _FileIdentity | None = None
     try:
@@ -142,28 +176,18 @@ def _open_existing_read_only_catalog_inner(path: Path) -> _OpenOutcome:
         resolved = path.resolve(strict=True)
         identity = _file_identity(resolved)
         uri = f"{resolved.as_uri()}?mode=ro&immutable=1"
-
-        def connect() -> sqlite3.Connection:
-            connection = sqlite3.connect(
-                uri,
-                uri=True,
-                check_same_thread=False,
-            )
-            try:
-                connection.execute("PRAGMA query_only=ON")
-                connection.execute("PRAGMA temp_store=MEMORY")
-                connection.execute("PRAGMA foreign_keys=ON")
-                connection.execute("PRAGMA trusted_schema=OFF")
-            except BaseException:
-                with suppress(BaseException):
-                    connection.close()
-                raise
-            return connection
+        connection = sqlite3.connect(
+            uri,
+            uri=True,
+            check_same_thread=False,
+        )
+        creator = _PinnedConnectionCreator(connection)
+        _configure_connection(connection)
 
         engine = create_engine(
             "sqlite+pysqlite://",
-            creator=connect,
-            poolclass=NullPool,
+            creator=creator,
+            poolclass=StaticPool,
         )
         session_factory = sessionmaker(
             bind=engine,
@@ -177,27 +201,34 @@ def _open_existing_read_only_catalog_inner(path: Path) -> _OpenOutcome:
             catalog=ExistingReadOnlyCatalog(
                 path=resolved,
                 identity=identity,
+                creator=creator,
                 engine=engine,
                 repository=PufferLabRepository(session_factory),
             )
         )
     except KeyboardInterrupt as error:
         _detach_exception(error)
-        _dispose_failed_open(engine, path=resolved, identity=identity)
+        _dispose_failed_open(engine, creator=creator, path=resolved, identity=identity)
         return _OpenOutcome(control=_OpenControl.KEYBOARD_INTERRUPT)
     except SystemExit as error:
         _detach_exception(error)
-        _dispose_failed_open(engine, path=resolved, identity=identity)
+        _dispose_failed_open(engine, creator=creator, path=resolved, identity=identity)
         return _OpenOutcome(control=_OpenControl.SYSTEM_EXIT)
     except Exception as error:
         _detach_exception(error)
-        control = _dispose_failed_open(engine, path=resolved, identity=identity)
+        control = _dispose_failed_open(
+            engine,
+            creator=creator,
+            path=resolved,
+            identity=identity,
+        )
         return _OpenOutcome(control=control)
 
 
 def _dispose_and_validate(
     engine: Engine,
     *,
+    creator: _PinnedConnectionCreator,
     path: Path,
     identity: _FileIdentity,
 ) -> tuple[bool, _OpenControl]:
@@ -211,6 +242,18 @@ def _dispose_and_validate(
     except SystemExit as error:
         _detach_exception(error)
         control = _OpenControl.SYSTEM_EXIT
+    except Exception:
+        failed = True
+    try:
+        creator.close()
+    except KeyboardInterrupt as error:
+        _detach_exception(error)
+        if control is _OpenControl.NONE:
+            control = _OpenControl.KEYBOARD_INTERRUPT
+    except SystemExit as error:
+        _detach_exception(error)
+        if control is _OpenControl.NONE:
+            control = _OpenControl.SYSTEM_EXIT
     except Exception:
         failed = True
     try:
@@ -233,6 +276,7 @@ def _dispose_and_validate(
 def _dispose_failed_open(
     engine: Engine | None,
     *,
+    creator: _PinnedConnectionCreator | None,
     path: Path | None,
     identity: _FileIdentity | None,
 ) -> _OpenControl:
@@ -246,6 +290,19 @@ def _dispose_failed_open(
         except SystemExit as error:
             _detach_exception(error)
             control = _OpenControl.SYSTEM_EXIT
+        except Exception:
+            pass
+    if creator is not None:
+        try:
+            creator.close()
+        except KeyboardInterrupt as error:
+            _detach_exception(error)
+            if control is _OpenControl.NONE:
+                control = _OpenControl.KEYBOARD_INTERRUPT
+        except SystemExit as error:
+            _detach_exception(error)
+            if control is _OpenControl.NONE:
+                control = _OpenControl.SYSTEM_EXIT
         except Exception:
             pass
     if path is not None and identity is not None:
@@ -295,6 +352,18 @@ def _validate_catalog(engine: Engine) -> None:
         )
         if list(revision) != [_CURRENT_REVISION]:
             raise ReadOnlyCatalogError()
+
+
+def _configure_connection(connection: sqlite3.Connection) -> None:
+    try:
+        connection.execute("PRAGMA query_only=ON")
+        connection.execute("PRAGMA temp_store=MEMORY")
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute("PRAGMA trusted_schema=OFF")
+    except BaseException:
+        with suppress(BaseException):
+            connection.close()
+        raise
 
 
 def _file_identity(path: Path) -> _FileIdentity:

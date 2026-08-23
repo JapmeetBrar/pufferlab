@@ -4,19 +4,39 @@ import hashlib
 import sqlite3
 from pathlib import Path
 from typing import Any, cast
+from uuid import uuid4
 
+import pufferlab.persistence.read_only as read_only_module
 import pytest
-from pufferlab.persistence import Database
+from pufferlab.contracts.datasets import DatasetVersion
+from pufferlab.persistence import Database, PufferLabRepository
 from pufferlab.persistence.read_only import (
     ReadOnlyCatalogError,
     open_existing_read_only_catalog,
 )
+from pufferlab.synthetic_demo.seeder import materialize_synthetic_demo
+
+_READ_ONLY_MODULE_FILE = Path(read_only_module.__file__).resolve()
 
 
 def _database(path: Path) -> Path:
     with Database(path) as database:
         database.migrate()
     return path
+
+
+def _database_with_dataset(
+    path: Path,
+    *,
+    replacement: bool = False,
+) -> tuple[Path, DatasetVersion]:
+    dataset = materialize_synthetic_demo().dataset_version
+    if replacement:
+        dataset = dataset.model_copy(update={"id": uuid4()})
+    with Database(path) as database:
+        database.migrate()
+        PufferLabRepository(database.session_factory).put_dataset_version(dataset)
+    return path, dataset
 
 
 def _snapshot(path: Path) -> tuple[str, tuple[int, int, int, int], tuple[str, ...]]:
@@ -145,6 +165,59 @@ def test_existing_catalog_detects_identity_substitution_before_close(tmp_path: P
         catalog.close()
 
 
+def test_existing_catalog_repository_reads_stay_on_validated_handle_after_path_swap(
+    tmp_path: Path,
+) -> None:
+    path, original_dataset = _database_with_dataset(tmp_path / "catalog.sqlite3")
+    replacement, replacement_dataset = _database_with_dataset(
+        tmp_path / "replacement.sqlite3",
+        replacement=True,
+    )
+    original_before = _snapshot(path)
+    replacement_before = _snapshot(replacement)
+    displaced = tmp_path / "displaced.sqlite3"
+    catalog = open_existing_read_only_catalog(path)
+    path.replace(displaced)
+    replacement.replace(path)
+    try:
+        assert catalog.repository.list_dataset_versions(limit=2) == [original_dataset]
+        assert catalog.repository.list_dataset_versions(limit=2) != [replacement_dataset]
+    finally:
+        path.replace(replacement)
+        displaced.replace(path)
+        catalog.close()
+
+    assert _snapshot(path) == original_before
+    assert _snapshot(replacement) == replacement_before
+
+
+def test_existing_catalog_refuses_reopen_after_pinned_connection_invalidation(
+    tmp_path: Path,
+) -> None:
+    path, _original_dataset = _database_with_dataset(tmp_path / "catalog.sqlite3")
+    replacement, _replacement_dataset = _database_with_dataset(
+        tmp_path / "replacement.sqlite3",
+        replacement=True,
+    )
+    original_before = _snapshot(path)
+    replacement_before = _snapshot(replacement)
+    displaced = tmp_path / "displaced.sqlite3"
+    catalog = open_existing_read_only_catalog(path)
+    path.replace(displaced)
+    replacement.replace(path)
+    try:
+        catalog._engine.dispose()
+        with pytest.raises(ReadOnlyCatalogError):
+            catalog.repository.list_dataset_versions(limit=2)
+    finally:
+        path.replace(replacement)
+        displaced.replace(path)
+        catalog.close()
+
+    assert _snapshot(path) == original_before
+    assert _snapshot(replacement) == replacement_before
+
+
 def test_open_does_not_convert_process_control_exceptions(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -191,11 +264,39 @@ def test_close_dispose_interrupt_is_fresh_and_has_no_catalog_path(tmp_path: Path
     assert "interrupt-hostile-marker" not in _traceback_locals(error.value)
 
 
+def test_traceback_filter_excludes_checkout_named_pufferlab_caller_frames(
+    tmp_path: Path,
+) -> None:
+    marker = "caller-frame-hostile-marker"
+
+    def caller() -> None:
+        caller_marker = marker
+        open_existing_read_only_catalog(tmp_path / "absent.sqlite3")
+        raise AssertionError(caller_marker)
+
+    try:
+        caller()
+    except ReadOnlyCatalogError as error:
+        assert marker in _all_traceback_locals(error)
+        assert marker not in _traceback_locals(error)
+    else:
+        raise AssertionError("read-only catalog unexpectedly opened")
+
+
 def _traceback_locals(error: BaseException) -> str:
     values: list[str] = []
     traceback = error.__traceback__
     while traceback is not None:
-        if "/pufferlab/" in traceback.tb_frame.f_code.co_filename:
+        if Path(traceback.tb_frame.f_code.co_filename).resolve() == _READ_ONLY_MODULE_FILE:
             values.append(repr(traceback.tb_frame.f_locals))
+        traceback = traceback.tb_next
+    return "\n".join(values)
+
+
+def _all_traceback_locals(error: BaseException) -> str:
+    values: list[str] = []
+    traceback = error.__traceback__
+    while traceback is not None:
+        values.append(repr(traceback.tb_frame.f_locals))
         traceback = traceback.tb_next
     return "\n".join(values)

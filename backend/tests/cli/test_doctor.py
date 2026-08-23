@@ -3,12 +3,14 @@ from __future__ import annotations
 import hashlib
 import io
 import sqlite3
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import NoReturn
 from uuid import UUID, uuid4, uuid5
 
+import pufferlab.cli.doctor as doctor_module
 import pytest
 from pufferlab.cli.doctor import (
     DoctorCheck,
@@ -61,6 +63,7 @@ from pydantic import SecretStr
 ROOT = Path(__file__).resolve().parents[3]
 UNIX_MANIFEST = ROOT / "datasets" / "cqadupstack-unix" / "dataset-manifest.json"
 CURATED_MANIFEST = ROOT / "datasets" / "cqadupstack-unix" / "curated-50.json"
+DOCTOR_MODULE_FILE = Path(doctor_module.__file__).resolve()
 
 
 def _settings(
@@ -131,6 +134,12 @@ class FakeProbe:
             raise self.failure
         assert self.state is not None
         return MetadataProbeResult(state=self.state)
+
+
+def asyncio_cancelled_error() -> BaseException:
+    import asyncio
+
+    return asyncio.CancelledError()
 
 
 def _live_tiny_dependencies(
@@ -672,10 +681,139 @@ def test_probe_exception_and_cancellation_are_fixed_and_value_free(tmp_path: Pat
     assert cancelled_probe.failure.__traceback__ is None
 
 
-def asyncio_cancelled_error() -> BaseException:
-    import asyncio
+@pytest.mark.parametrize(
+    "failure_factory",
+    [KeyboardInterrupt, asyncio_cancelled_error],
+    ids=["keyboard-interrupt", "asyncio-cancelled"],
+)
+def test_probe_process_control_after_key_unwrap_is_detached_and_fixed(
+    tmp_path: Path,
+    failure_factory: Callable[[], BaseException],
+) -> None:
+    key = "probe-control-key-hostile-marker"
+    target = "probe-control-target-hostile-marker"
+    failure = failure_factory()
+    probe = FakeProbe(failure=failure)
+    output = io.StringIO()
+    errors = io.StringIO()
 
-    return asyncio.CancelledError()
+    assert (
+        main(
+            ["doctor", "--mode", "live-tiny", "--live"],
+            settings_factory=lambda: _settings(tmp_path / "unused", api_key=key),
+            doctor_dependencies=_live_tiny_dependencies(probe, namespace=target),
+            stdout=output,
+            stderr=errors,
+        )
+        == 130
+    )
+    assert output.getvalue() == ""
+    assert errors.getvalue() == "error: doctor cancelled\n"
+    assert failure.__traceback__ is None
+    assert failure.__context__ is None
+    assert failure.__cause__ is None
+    production_locals = _doctor_traceback_locals(failure)
+    assert key not in production_locals
+    assert target not in production_locals
+
+
+@pytest.mark.parametrize(
+    "failure_factory",
+    [KeyboardInterrupt, asyncio_cancelled_error],
+    ids=["keyboard-interrupt", "asyncio-cancelled"],
+)
+def test_secret_unwrap_process_control_is_detached_before_cancellation(
+    tmp_path: Path,
+    failure_factory: Callable[[], BaseException],
+) -> None:
+    key = "unwrap-control-key-hostile-marker"
+    target = "unwrap-control-target-hostile-marker"
+    failure = failure_factory()
+
+    class InterruptingSecret(SecretStr):
+        def get_secret_value(self) -> str:
+            raise failure
+
+    settings = _settings(tmp_path / "unused").model_copy(
+        update={"turbopuffer_api_key": InterruptingSecret(key)}
+    )
+    probe = FakeProbe()
+    output = io.StringIO()
+    errors = io.StringIO()
+
+    assert (
+        main(
+            ["doctor", "--mode", "live-tiny", "--live"],
+            settings_factory=lambda: settings,
+            doctor_dependencies=_live_tiny_dependencies(probe, namespace=target),
+            stdout=output,
+            stderr=errors,
+        )
+        == 130
+    )
+    assert probe.calls == []
+    assert output.getvalue() == ""
+    assert errors.getvalue() == "error: doctor cancelled\n"
+    assert failure.__traceback__ is None
+    production_locals = _doctor_traceback_locals(failure)
+    assert key not in production_locals
+    assert target not in production_locals
+
+
+@pytest.mark.parametrize("stage", ["secret", "probe"])
+def test_system_exit_in_raw_key_bridge_becomes_fixed_internal_failure(
+    tmp_path: Path,
+    stage: str,
+) -> None:
+    key = "system-exit-key-hostile-marker"
+    target = "system-exit-target-hostile-marker"
+    failure = SystemExit(77)
+
+    class ExitingSecret(SecretStr):
+        def get_secret_value(self) -> str:
+            raise failure
+
+    settings = _settings(tmp_path / "unused", api_key=key)
+    probe = FakeProbe(failure=failure if stage == "probe" else None)
+    if stage == "secret":
+        settings = settings.model_copy(update={"turbopuffer_api_key": ExitingSecret(key)})
+    output = io.StringIO()
+    errors = io.StringIO()
+
+    assert (
+        main(
+            ["doctor", "--mode", "live-tiny", "--live"],
+            settings_factory=lambda: settings,
+            doctor_dependencies=_live_tiny_dependencies(probe, namespace=target),
+            stdout=output,
+            stderr=errors,
+        )
+        == 1
+    )
+    assert probe.calls == ([] if stage == "secret" else [(key, "gcp-us-west1", target)])
+    assert output.getvalue().splitlines() == [
+        "doctor mode=live-tiny",
+        "check=live_tiny state=ready",
+        "check=internal state=internal_error",
+    ]
+    assert errors.getvalue() == ""
+    assert failure.__traceback__ is None
+    assert failure.__context__ is None
+    assert failure.__cause__ is None
+    rendered = output.getvalue() + errors.getvalue() + _doctor_traceback_locals(failure)
+    assert key not in rendered
+    assert target not in rendered
+    assert "77" not in rendered
+
+
+def _doctor_traceback_locals(error: BaseException) -> str:
+    values: list[str] = []
+    traceback = error.__traceback__
+    while traceback is not None:
+        if Path(traceback.tb_frame.f_code.co_filename).resolve() == DOCTOR_MODULE_FILE:
+            values.append(repr(traceback.tb_frame.f_locals))
+        traceback = traceback.tb_next
+    return "\n".join(values)
 
 
 def test_all_mode_order_and_exit_precedence_make_at_most_one_probe(tmp_path: Path) -> None:

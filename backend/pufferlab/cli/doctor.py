@@ -7,7 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, cast
 from uuid import UUID, uuid5
 
 from pufferlab.application.evaluation_views import EvaluationViewService
@@ -210,6 +210,18 @@ class DoctorDependencies:
     metadata_probe: MetadataProbe
 
 
+class _ProbeControl(StrEnum):
+    NONE = "none"
+    CANCELLED = "cancelled"
+    INTERNAL = "internal"
+
+
+@dataclass(frozen=True, slots=True)
+class _ExplicitProbeOutcome:
+    check: DoctorCheck | None = None
+    control: _ProbeControl = _ProbeControl.NONE
+
+
 def default_doctor_dependencies() -> DoctorDependencies:
     return DoctorDependencies(
         capability_inspector_factory=LocalCapabilityInspector,
@@ -289,17 +301,25 @@ async def run_doctor(
     if live and not any(check.state is DoctorCheckState.INTERNAL_ERROR for check in checks):
         target = evaluation_target or live_tiny_target
         if target is not None:
-            probe_check, cancelled = await _probe_explicit_target(
+            probe_outcome = await _probe_explicit_target(
                 settings,
                 target=target,
                 probe=dependencies.metadata_probe,
             )
-            if cancelled:
+            if probe_outcome.control is _ProbeControl.CANCELLED:
                 return DoctorExecution(
                     report=DoctorReport(mode=mode, checks=tuple(checks)),
                     exit_code=130,
                 )
-            checks.append(probe_check)
+            if probe_outcome.control is _ProbeControl.INTERNAL:
+                checks.append(
+                    DoctorCheck(
+                        name=DoctorCheckName.INTERNAL,
+                        state=DoctorCheckState.INTERNAL_ERROR,
+                    )
+                )
+            elif probe_outcome.check is not None:
+                checks.append(probe_outcome.check)
 
     report = DoctorReport(mode=mode, checks=tuple(checks))
     return DoctorExecution(report=report, exit_code=doctor_exit_code(report))
@@ -747,102 +767,95 @@ async def _probe_explicit_target(
     *,
     target: DoctorLiveTarget,
     probe: MetadataProbe,
-) -> tuple[DoctorCheck, bool]:
+) -> _ExplicitProbeOutcome:
     secret = settings.turbopuffer_api_key
-    if secret is None:
-        return (
-            _local_failure(
-                DoctorCheckName.METADATA,
-                DoctorRequirementCode.API_KEY,
-                DoctorActionCode.CONFIGURE_API_KEY,
-            ),
-            False,
-        )
-    try:
-        api_key = secret.get_secret_value()
-    except (KeyboardInterrupt, asyncio.CancelledError) as error:
-        _detach_exception(error)
-        secret = None
-        settings = Settings.model_construct()
-        target = DoctorLiveTarget(namespace="", region="")
-        probe = probe_namespace_metadata
-        return (
-            DoctorCheck(
-                name=DoctorCheckName.METADATA,
-                state=DoctorCheckState.REMOTE_FAILURE,
-            ),
-            True,
-        )
-    except Exception as error:
-        _detach_exception(error)
-        secret = None
-        settings = Settings.model_construct()
-        target = DoctorLiveTarget(namespace="", region="")
-        probe = probe_namespace_metadata
-        return (
-            _local_failure(
-                DoctorCheckName.METADATA,
-                DoctorRequirementCode.API_KEY,
-                DoctorActionCode.CONFIGURE_API_KEY,
-            ),
-            False,
-        )
-    try:
-        result = await probe(
-            api_key=api_key,
-            region=target.region,
-            namespace=target.namespace,
-        )
-    except asyncio.CancelledError as error:
-        _detach_exception(error)
-        result = None
-        cancelled = True
-    except MetadataProbeConfigurationError as error:
-        _detach_exception(error)
-        result = None
-        cancelled = False
-    except Exception as error:
-        _detach_exception(error)
-        result = MetadataProbeResult(state=MetadataProbeState.REMOTE_FAILURE)
-        cancelled = False
-    else:
-        cancelled = False
-
     api_key = ""
-    secret = None
-    settings = Settings.model_construct()
-    target = DoctorLiveTarget(namespace="", region="")
-    probe = probe_namespace_metadata
-
-    if cancelled:
-        return (
-            DoctorCheck(
-                name=DoctorCheckName.METADATA,
-                state=DoctorCheckState.REMOTE_FAILURE,
-            ),
-            True,
+    result: MetadataProbeResult | None = None
+    check: DoctorCheck | None = None
+    control = _ProbeControl.NONE
+    if secret is None:
+        check = _local_failure(
+            DoctorCheckName.METADATA,
+            DoctorRequirementCode.API_KEY,
+            DoctorActionCode.CONFIGURE_API_KEY,
         )
-    if result is None:
-        return (
-            _local_failure(
+    else:
+        try:
+            api_key = secret.get_secret_value()
+        except (KeyboardInterrupt, asyncio.CancelledError) as error:
+            _detach_exception(error)
+            control = _ProbeControl.CANCELLED
+        except SystemExit as error:
+            _detach_exception(error)
+            control = _ProbeControl.INTERNAL
+        except Exception as error:
+            _detach_exception(error)
+            check = _local_failure(
                 DoctorCheckName.METADATA,
-                DoctorRequirementCode.REGION,
-                DoctorActionCode.CONFIGURE_REGION,
-            ),
-            False,
-        )
-    up_to_date = result.state is MetadataProbeState.INDEX_UP_TO_DATE
-    updating = result.state is MetadataProbeState.INDEX_UPDATING
-    return (
-        DoctorCheck(
+                DoctorRequirementCode.API_KEY,
+                DoctorActionCode.CONFIGURE_API_KEY,
+            )
+        except BaseException as error:
+            _detach_exception(error)
+            control = _ProbeControl.INTERNAL
+        else:
+            try:
+                result = await probe(
+                    api_key=api_key,
+                    region=target.region,
+                    namespace=target.namespace,
+                )
+            except (KeyboardInterrupt, asyncio.CancelledError) as error:
+                _detach_exception(error)
+                control = _ProbeControl.CANCELLED
+            except SystemExit as error:
+                _detach_exception(error)
+                control = _ProbeControl.INTERNAL
+            except MetadataProbeConfigurationError as error:
+                _detach_exception(error)
+                check = _local_failure(
+                    DoctorCheckName.METADATA,
+                    DoctorRequirementCode.REGION,
+                    DoctorActionCode.CONFIGURE_REGION,
+                )
+            except Exception as error:
+                _detach_exception(error)
+                result = MetadataProbeResult(state=MetadataProbeState.REMOTE_FAILURE)
+            except BaseException as error:
+                _detach_exception(error)
+                control = _ProbeControl.INTERNAL
+
+    if result is not None:
+        up_to_date = result.state is MetadataProbeState.INDEX_UP_TO_DATE
+        updating = result.state is MetadataProbeState.INDEX_UPDATING
+        check = DoctorCheck(
             name=DoctorCheckName.METADATA,
             state=(DoctorCheckState.READY if up_to_date else DoctorCheckState.REMOTE_FAILURE),
             metadata_reachable=result.metadata_reachable,
             index_up_to_date=up_to_date,
             index_updating=updating,
-        ),
-        False,
-    )
+        )
+
+    # This is the sole raw-key bridge. Every caught outcome converges here before a report or
+    # process-control result can leave the frame.
+    api_key = ""
+    secret = None
+    settings = cast(Settings, None)
+    target = cast(DoctorLiveTarget, None)
+    probe = cast(MetadataProbe, None)
+    result = None
+
+    if control is not _ProbeControl.NONE:
+        return _ExplicitProbeOutcome(control=control)
+    if check is None:
+        return _ExplicitProbeOutcome(
+            check=_local_failure(
+                DoctorCheckName.METADATA,
+                DoctorRequirementCode.API_KEY,
+                DoctorActionCode.CONFIGURE_API_KEY,
+            )
+        )
+    return _ExplicitProbeOutcome(check=check)
 
 
 def _detach_exception(error: BaseException) -> None:
