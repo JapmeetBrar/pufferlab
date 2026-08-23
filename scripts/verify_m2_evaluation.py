@@ -18,6 +18,7 @@ from pufferlab.contracts.evals import (
     ConfigRunSummary,
     EvalRunExport,
     EvalRunStatus,
+    MetricName,
     QuerySetSummary,
 )
 from pufferlab.contracts.retrieval import RetrievalMode
@@ -36,6 +37,14 @@ _CONFIG_MODES = (
     RetrievalMode.HYBRID_RERANK,
 )
 _OUTCOME_COUNT = _QUERY_COUNT * len(_CONFIG_MODES)
+_METRIC_ORDER = (
+    MetricName.NDCG_AT_10,
+    MetricName.RECALL_AT_50,
+    MetricName.MRR_AT_10,
+    MetricName.LATENCY_P50_MS,
+    MetricName.LATENCY_P95_MS,
+    MetricName.ERROR_RATE,
+)
 _FORBIDDEN_EXPORT_FIELDS = frozenset(
     {
         "api_key",
@@ -173,6 +182,16 @@ def _verify_repository(
         ) from None
     if run.summaries != recomputed:
         raise EvaluationVerificationError("persisted summaries do not match durable outcomes")
+    for summary in recomputed:
+        if summary.completed_queries != _QUERY_COUNT or summary.failed_queries != 0:
+            raise EvaluationVerificationError("evaluation must have 200 successful outcomes")
+        if tuple(metric.name for metric in summary.metrics) != _METRIC_ORDER:
+            raise EvaluationVerificationError("evaluation summary metric order is invalid")
+        if any(metric.sample_count != _QUERY_COUNT for metric in summary.metrics):
+            raise EvaluationVerificationError("evaluation summary sample coverage is invalid")
+        error_rate = summary.metrics[-1]
+        if error_rate.name is not MetricName.ERROR_RATE or error_rate.value != 0.0:
+            raise EvaluationVerificationError("evaluation error rate must be zero")
 
     exported = EvalRunExport(
         run=run,
@@ -216,7 +235,8 @@ def verify_evaluation(
 
 def _metric_value(summary: ConfigRunSummary, name: str) -> str:
     metric = next(metric for metric in summary.metrics if metric.name.value == name)
-    return "null" if metric.value is None else format(metric.value, ".12g")
+    value = "null" if metric.value is None else format(metric.value, ".12g")
+    return f"{value}[n={metric.sample_count}]"
 
 
 def render_report(report: VerifiedEvaluation) -> tuple[str, ...]:

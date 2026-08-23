@@ -20,6 +20,7 @@ from pufferlab.contracts.datasets import (
 )
 from pufferlab.contracts.errors import ApiErrorCode
 from pufferlab.contracts.evals import (
+    EvalFailurePayload,
     EvalRun,
     EvalRunStatus,
     EvalSuccessPayload,
@@ -40,6 +41,7 @@ from pufferlab.contracts.retrieval import (
 )
 from pufferlab.jobs import encode_outcome_payload, finalize_durable_outcomes
 from pufferlab.persistence import Database, PufferLabRepository, QueryOutcome, QueryOutcomeStatus
+from pufferlab.persistence.canonical import canonical_json
 from pufferlab.providers.errors import ProviderError, ProviderErrorDetails
 from pufferlab.providers.rerankers import DEFAULT_RERANKER_MODEL, DEFAULT_RERANKER_REVISION
 from pufferlab.providers.types import (
@@ -531,6 +533,65 @@ def test_verifier_rejects_incomplete_outcome_coverage(
     with pytest.raises(
         verify_m2_evaluation.EvaluationVerificationError,
         match="exactly 200 outcomes",
+    ):
+        verify_m2_evaluation.verify_evaluation(run_id, settings=_settings(path.parent))
+
+
+def test_verifier_rejects_self_consistent_completed_run_with_a_failed_outcome(
+    completed_database: tuple[Path, UUID],
+    tmp_path: Path,
+) -> None:
+    path, run_id = _copy_database(completed_database, tmp_path)
+    with sqlite3.connect(path) as connection:
+        row_id, payload_json = connection.execute(
+            "SELECT rowid, payload_json FROM query_outcomes WHERE run_id = ? LIMIT 1",
+            (str(run_id),),
+        ).fetchone()
+        outcome = QueryOutcome.model_validate_json(payload_json)
+        failure = EvalFailurePayload(
+            code=ApiErrorCode.PROVIDER_ERROR,
+            message="redacted provider failure",
+            retryable=False,
+            operation="query",
+            trace_id=_id("failed-outcome-trace"),
+            total_client_wall_latency_ms=1.0,
+        )
+        failed = outcome.model_copy(
+            update={
+                "status": QueryOutcomeStatus.FAILED,
+                "payload": encode_outcome_payload(failure),
+            }
+        )
+        connection.execute(
+            "UPDATE query_outcomes SET status = ?, payload_json = ? WHERE rowid = ?",
+            (QueryOutcomeStatus.FAILED.value, canonical_json(failed), row_id),
+        )
+
+    database = Database(path)
+    repository = PufferLabRepository(database.session_factory)
+    run = repository.get_run(run_id)
+    _, queries = repository.get_query_set(run.query_set.id)
+    recomputed = finalize_durable_outcomes(
+        run,
+        repository.list_outcomes(run_id),
+        query_ids=[query.id for query in queries],
+    )
+    database.dispose()
+    with sqlite3.connect(path) as connection:
+        persisted = json.loads(
+            connection.execute(
+                "SELECT payload_json FROM eval_runs WHERE id = ?", (str(run_id),)
+            ).fetchone()[0]
+        )
+        persisted["summaries"] = [summary.model_dump(mode="json") for summary in recomputed]
+        connection.execute(
+            "UPDATE eval_runs SET payload_json = ? WHERE id = ?",
+            (json.dumps(persisted), str(run_id)),
+        )
+
+    with pytest.raises(
+        verify_m2_evaluation.EvaluationVerificationError,
+        match="200 successful outcomes",
     ):
         verify_m2_evaluation.verify_evaluation(run_id, settings=_settings(path.parent))
 
