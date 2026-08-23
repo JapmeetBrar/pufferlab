@@ -96,11 +96,16 @@ text, credentials, request bodies, or vectors.
 After copying the printed namespace assignment into `.env`, start the API:
 
 ```bash
-uv run uvicorn pufferlab.main:app --app-dir backend --reload
+uv run uvicorn pufferlab.main:app --app-dir backend --workers 1
 ```
 
 The API is served at `http://localhost:8000`; health is available at `GET /api/v1/health` and
 interactive API documentation at `/docs`.
+
+PufferLab's local evaluation controller deliberately supports exactly one Uvicorn worker. Startup
+holds an exclusive guard beside `data/pufferlab.sqlite3`, migrates the database, marks orphaned
+running jobs interrupted, and reclaims valid queued jobs oldest-first. A second API worker fails
+startup instead of executing the same durable run twice.
 
 The config catalog is available without provider credentials. The live BM25-versus-vector compare
 path uses the optional local embedding runtime and ingested namespace configured above. The backend

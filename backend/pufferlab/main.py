@@ -19,6 +19,7 @@ from pufferlab.api.errors import (
 from pufferlab.api.evaluation_facades import EvaluationControlFacade, EvaluationViewFacade
 from pufferlab.api.router import api_router
 from pufferlab.application.evaluation_controls import ProviderFreeEvaluationControls
+from pufferlab.application.evaluation_runtime import EvaluationApiRuntime
 from pufferlab.application.evaluation_views import EvaluationViewService
 from pufferlab.application.view_errors import EvaluationViewError
 from pufferlab.config import Settings, get_settings
@@ -36,6 +37,7 @@ def create_app(
     search_backend: SearchBackend | None = None,
     evaluation_views: EvaluationViewFacade | None = None,
     evaluation_controls: EvaluationControlFacade | None = None,
+    evaluation_runtime: EvaluationApiRuntime | None = None,
 ) -> FastAPI:
     resolved_settings = settings or get_settings()
     resolved_search_backend = (
@@ -43,25 +45,56 @@ def create_app(
         if search_backend is not None
         else RuntimeSearchBackend.from_settings(resolved_settings)
     )
+    if evaluation_runtime is not None and (
+        evaluation_views is not None or evaluation_controls is not None
+    ):
+        raise ValueError("evaluation_runtime cannot be combined with evaluation facades")
+    if (
+        evaluation_runtime is None
+        and search_backend is None
+        and evaluation_views is None
+        and evaluation_controls is None
+    ):
+        evaluation_runtime = EvaluationApiRuntime(resolved_settings)
+
     database: Database | None = None
-    if evaluation_views is None:
+    if evaluation_runtime is not None:
+        evaluation_views = evaluation_runtime.views
+        resolved_evaluation_controls: EvaluationControlFacade = evaluation_runtime
+    elif evaluation_views is None:
         database = Database.from_settings(resolved_settings)
         evaluation_views = EvaluationViewService(PufferLabRepository(database.session_factory))
-    resolved_evaluation_controls = evaluation_controls or ProviderFreeEvaluationControls(
-        evaluation_views
-    )
+        resolved_evaluation_controls = evaluation_controls or ProviderFreeEvaluationControls(
+            evaluation_views
+        )
+    else:
+        resolved_evaluation_controls = evaluation_controls or ProviderFreeEvaluationControls(
+            evaluation_views
+        )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         try:
+            owned_runtime: EvaluationApiRuntime | None = app.state.evaluation_runtime
+            if owned_runtime is not None:
+                await owned_runtime.start()
             yield
         finally:
-            backend: SearchBackend | None = app.state.search_backend
-            if backend is not None:
-                await backend.close()
-            owned_database: Database | None = app.state.database
-            if owned_database is not None:
-                owned_database.dispose()
+            owned_runtime = app.state.evaluation_runtime
+            try:
+                if owned_runtime is not None:
+                    await owned_runtime.shutdown_execution()
+            finally:
+                backend: SearchBackend | None = app.state.search_backend
+                try:
+                    if backend is not None:
+                        await backend.close()
+                finally:
+                    if owned_runtime is not None:
+                        owned_runtime.dispose()
+                    owned_database: Database | None = app.state.database
+                    if owned_database is not None:
+                        owned_database.dispose()
 
     app = FastAPI(
         title="PufferLab API",
@@ -73,6 +106,7 @@ def create_app(
     app.state.search_backend = resolved_search_backend
     app.state.evaluation_views = evaluation_views
     app.state.evaluation_controls = resolved_evaluation_controls
+    app.state.evaluation_runtime = evaluation_runtime
     app.state.database = database
 
     @app.exception_handler(SearchError)
