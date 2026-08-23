@@ -20,24 +20,49 @@ from pufferlab.application.view_errors import (
     evaluation_conflict,
 )
 from pufferlab.config import Settings
+from pufferlab.contracts.common import ObservedScore, ScoreDirection, ScoreKind, ScoreSource
 from pufferlab.contracts.datasets import DatasetStatus, DatasetVersion, FtsProfile, IndexProfile
+from pufferlab.contracts.errors import ApiErrorCode
 from pufferlab.contracts.evals import (
     CreateEvalRunRequest,
     EvalRun,
     EvalRunStatus,
+    JudgedQuery,
+    Qrel,
     QuerySet,
     RunEnvironment,
 )
-from pufferlab.contracts.retrieval import RetrievalConfig, RetrievalConfigSummary
-from pufferlab.contracts.search import SearchCompareRequest, SearchCompareResponse
+from pufferlab.contracts.forensics import EvalRunQueryReplayRequest, ForensicCode
+from pufferlab.contracts.retrieval import (
+    RetrievalConfig,
+    RetrievalConfigSummary,
+    RetrievalMode,
+)
+from pufferlab.contracts.search import (
+    ConfigSearchResult,
+    RetrievalStage,
+    SearchCompareRequest,
+    SearchCompareResponse,
+    SearchHit,
+    StageMembership,
+)
 from pufferlab.datasets.models import DatasetManifest
 from pufferlab.datasets.schema import compile_namespace_write_spec
 from pufferlab.main import create_app
 from pufferlab.persistence import Database, PufferLabRepository
 from pufferlab.persistence.errors import PersistenceValidationError, RecordNotFoundError
+from pufferlab.providers.errors import ProviderError, ProviderErrorDetails
 from pufferlab.retrieval.config import BoundSearchCatalog, derive_bound_retrieval_configs
 from pufferlab.retrieval.errors import provider_failed
-from pufferlab.retrieval.types import SearchExecuteRequest, SearchExecuteResult
+from pufferlab.retrieval.types import (
+    HybridProbeCandidate,
+    HybridProbeExecuteRequest,
+    HybridProbeExecuteResult,
+    HybridProbeStageMembership,
+    ReplaySearchBackend,
+    SearchExecuteRequest,
+    SearchExecuteResult,
+)
 from pufferlab.synthetic_demo import AUTHORED_SYNTHETIC_DEMO
 from pufferlab.synthetic_demo.seeder import materialize_synthetic_demo
 
@@ -101,6 +126,12 @@ class _BlockingBackend:
         while not self.release.is_set():
             await asyncio.sleep(0.001)
         raise provider_failed("evaluation_runtime_test")
+
+    async def probe_hybrid_candidates(
+        self,
+        request: HybridProbeExecuteRequest,
+    ) -> HybridProbeExecuteResult:
+        raise AssertionError(f"unexpected probe request: {request.query_text}")
 
     async def close(self) -> None:
         if self.closed:
@@ -209,7 +240,7 @@ class _FactoryProbe:
         provider_factory: Any,
         embedder_factory: Any,
         reranker_factory: Any,
-    ) -> _BlockingBackend:
+    ) -> ReplaySearchBackend:
         self.calls["runtime"] += 1
         if self.fail_runtime:
             raise RuntimeError("private runtime factory detail")
@@ -234,6 +265,236 @@ class _FactoryProbe:
         raise AssertionError("reranker construction was not expected")
 
 
+def _observed_score(kind: ScoreKind, value: float) -> ObservedScore:
+    return ObservedScore(
+        kind=kind,
+        value=value,
+        direction=(
+            ScoreDirection.LOWER_IS_BETTER
+            if kind is ScoreKind.VECTOR_DISTANCE
+            else ScoreDirection.HIGHER_IS_BETTER
+        ),
+        source=(
+            ScoreSource.RERANKER if kind is ScoreKind.RERANKER else ScoreSource.TURBOPUFFER_DIST
+        ),
+    )
+
+
+class _ReplayBackend:
+    def __init__(
+        self,
+        configs: tuple[RetrievalConfig, ...],
+        document_ids: tuple[UUID, ...],
+        *,
+        fail_probe: bool = False,
+        fail_compare: bool = False,
+        fail_close: bool = False,
+        block_compare: bool = False,
+        mismatch_probe: bool = False,
+        corrupt_primary_binding: bool = False,
+        corrupt_probe_binding: bool = False,
+    ) -> None:
+        self._configs = {config.id: config for config in configs}
+        self._document_ids = document_ids
+        self._fail_probe = fail_probe
+        self._fail_compare = fail_compare
+        self._fail_close = fail_close
+        self._block_compare = block_compare
+        self._mismatch_probe = mismatch_probe
+        self._corrupt_primary_binding = corrupt_primary_binding
+        self._corrupt_probe_binding = corrupt_probe_binding
+        self.compare_calls: list[SearchCompareRequest] = []
+        self.probe_calls: list[HybridProbeExecuteRequest] = []
+        self.compare_started = asyncio.Event()
+        self.closed = False
+
+    def list_configs(self) -> tuple[RetrievalConfigSummary, ...]:
+        return tuple(
+            RetrievalConfigSummary(
+                id=config.id,
+                revision=config.revision,
+                name=config.name,
+                mode=config.mode,
+                config_hash=config.config_hash,
+            )
+            for config in self._configs.values()
+        )
+
+    async def compare(self, request: SearchCompareRequest) -> SearchCompareResponse:
+        self.compare_calls.append(request)
+        self.compare_started.set()
+        if self._block_compare:
+            await asyncio.Event().wait()
+        if self._fail_compare:
+            try:
+                raise RuntimeError("PRIVATE_NAMESPACE_FAILURE_MARKER")
+            except RuntimeError as cause:
+                raise ProviderError(
+                    "turbopuffer namespace was not found",
+                    ProviderErrorDetails(
+                        code=ApiErrorCode.NOT_FOUND,
+                        retryable=False,
+                        operation="query",
+                        status_code=404,
+                    ),
+                ) from cause
+        results: list[ConfigSearchResult] = []
+        for result_index, config_id in enumerate(request.config_ids):
+            config = self._configs[config_id]
+            score_kind = {
+                RetrievalMode.BM25: ScoreKind.BM25,
+                RetrievalMode.VECTOR: ScoreKind.VECTOR_DISTANCE,
+                RetrievalMode.HYBRID_RRF: ScoreKind.RRF,
+                RetrievalMode.HYBRID_RERANK: ScoreKind.RERANKER,
+            }[config.mode]
+            hits: list[SearchHit] = []
+            for rank, document_id in enumerate(self._document_ids, start=1):
+                score = _observed_score(score_kind, float(rank))
+                memberships: list[StageMembership] = []
+                if config.mode in {RetrievalMode.HYBRID_RRF, RetrievalMode.HYBRID_RERANK}:
+                    memberships.append(
+                        StageMembership(
+                            stage=RetrievalStage.RRF,
+                            rank=rank,
+                            score=_observed_score(ScoreKind.RRF, 1.0 / (60 + rank)),
+                        )
+                    )
+                if config.mode is RetrievalMode.HYBRID_RERANK:
+                    memberships.append(
+                        StageMembership(
+                            stage=RetrievalStage.RERANKER,
+                            rank=rank,
+                            score=score,
+                        )
+                    )
+                memberships.append(
+                    StageMembership(stage=RetrievalStage.FINAL, rank=rank, score=score)
+                )
+                hits.append(
+                    SearchHit(
+                        document_id=document_id,
+                        external_id=f"authored-{rank}",
+                        title="Authored replay result",
+                        body_excerpt="Bounded authored replay excerpt.",
+                        relevance_grade=1,
+                        final_rank=rank,
+                        final_score=score,
+                        stage_membership=memberships,
+                    )
+                )
+            results.append(
+                ConfigSearchResult(
+                    config=RetrievalConfigSummary(
+                        id=config.id,
+                        revision=config.revision,
+                        name=config.name,
+                        mode=config.mode,
+                        config_hash=config.config_hash,
+                    ),
+                    hits=hits,
+                    timings=[],
+                    candidate_counts={
+                        (
+                            RetrievalStage.RRF.value
+                            if config.mode
+                            in {RetrievalMode.HYBRID_RRF, RetrievalMode.HYBRID_RERANK}
+                            else RetrievalStage.FINAL.value
+                        ): len(hits)
+                    },
+                    warnings=[],
+                    trace_id=UUID(int=1_000 + result_index),
+                )
+            )
+        return SearchCompareResponse(
+            query_text=(
+                "wrong replay query" if self._corrupt_primary_binding else request.query_text
+            ),
+            query_id=request.query_id,
+            results=results,
+            rank_movements=[],
+            overlap=[],
+            observability_notice="Primary replay fake.",
+        )
+
+    async def search_one(self, request: SearchExecuteRequest) -> SearchExecuteResult:
+        raise AssertionError(f"unexpected search request: {request.query_text}")
+
+    async def probe_hybrid_candidates(
+        self,
+        request: HybridProbeExecuteRequest,
+    ) -> HybridProbeExecuteResult:
+        self.probe_calls.append(request)
+        if self._fail_probe:
+            raise RuntimeError("PRIVATE_PROBE_FAILURE_MARKER")
+        ordered = (
+            tuple(reversed(self._document_ids)) if self._mismatch_probe else self._document_ids
+        )
+        candidates = tuple(
+            HybridProbeCandidate(
+                document_id=document_id,
+                stage_membership=(
+                    HybridProbeStageMembership(
+                        stage=RetrievalStage.BM25_CANDIDATES,
+                        rank=rank,
+                        score=_observed_score(ScoreKind.BM25, float(10 - rank)),
+                    ),
+                    HybridProbeStageMembership(
+                        stage=RetrievalStage.VECTOR_CANDIDATES,
+                        rank=rank,
+                        score=_observed_score(ScoreKind.VECTOR_DISTANCE, rank / 10.0),
+                    ),
+                ),
+            )
+            for rank, document_id in enumerate(ordered, start=1)
+        )
+        return HybridProbeExecuteResult(
+            config_id=request.config_id,
+            query_id=request.query_id,
+            trace_id=UUID(int=request.trace_id.int + 1)
+            if self._corrupt_probe_binding
+            else request.trace_id,
+            duration_ms=2.0,
+            bm25_candidate_count=len(candidates),
+            vector_candidate_count=len(candidates),
+            candidates=candidates,
+        )
+
+    async def close(self) -> None:
+        self.closed = True
+        if self._fail_close:
+            raise RuntimeError("PRIVATE_REPLAY_CLOSE_MARKER")
+
+
+class _ReplayFactoryProbe(_FactoryProbe):
+    def __init__(
+        self,
+        manifest: DatasetManifest,
+        document_ids: tuple[UUID, ...],
+        **behavior: bool,
+    ) -> None:
+        super().__init__(manifest)
+        self.document_ids = document_ids
+        self.behavior = behavior
+        self.replay_backends: list[_ReplayBackend] = []
+
+    def make_runtime(
+        self,
+        _settings: Settings,
+        _manifest: DatasetManifest,
+        bound: BoundSearchCatalog,
+        provider_factory: Any,
+        embedder_factory: Any,
+        reranker_factory: Any,
+    ) -> _ReplayBackend:
+        self.calls["runtime"] += 1
+        assert callable(provider_factory)
+        assert callable(embedder_factory)
+        assert callable(reranker_factory)
+        backend = _ReplayBackend(bound.configs, self.document_ids, **self.behavior)
+        self.replay_backends.append(backend)
+        return backend
+
+
 def _settings(tmp_path: Path) -> Settings:
     return Settings(
         pufferlab_data_dir=tmp_path,
@@ -242,7 +503,11 @@ def _settings(tmp_path: Path) -> Settings:
     )
 
 
-def _seed_live_suite(repository: PufferLabRepository) -> _LiveSuite:
+def _seed_live_suite(
+    repository: PufferLabRepository,
+    *,
+    judged_queries: list[JudgedQuery] | None = None,
+) -> _LiveSuite:
     manifest = AUTHORED_SYNTHETIC_DEMO.manifest
     write_spec = compile_namespace_write_spec(manifest)
     dataset = DatasetVersion(
@@ -293,7 +558,9 @@ def _seed_live_suite(repository: PufferLabRepository) -> _LiveSuite:
         repository.put_retrieval_config(config)
     repository.put_query_set(
         query_set,
-        [item.judged_query for item in AUTHORED_SYNTHETIC_DEMO.queries],
+        judged_queries
+        if judged_queries is not None
+        else [item.judged_query for item in AUTHORED_SYNTHETIC_DEMO.queries],
     )
     return _LiveSuite(dataset, query_set, configs, manifest)
 
@@ -928,3 +1195,527 @@ def test_default_app_starts_migrated_guarded_evaluation_runtime(tmp_path: Path) 
         assert settings.database_path.is_file()
 
     assert (tmp_path / ".pufferlab-api.lock").is_file()
+
+
+def _replay_queries() -> tuple[list[JudgedQuery], tuple[UUID, UUID, UUID, UUID]]:
+    queries = [item.judged_query for item in AUTHORED_SYNTHETIC_DEMO.queries]
+    first = queries[0]
+    zero_grade_document = queries[1].qrels[0].document_id
+    unjudged_document = queries[2].qrels[0].document_id
+    queries[0] = first.model_copy(
+        update={
+            "qrels": [
+                first.qrels[0].model_copy(update={"relevance_grade": 2}),
+                first.qrels[1].model_copy(update={"relevance_grade": 1}),
+                Qrel(document_id=zero_grade_document, relevance_grade=0),
+            ]
+        }
+    )
+    return queries, (
+        first.qrels[0].document_id,
+        first.qrels[1].document_id,
+        zero_grade_document,
+        unjudged_document,
+    )
+
+
+def _config_for_mode(suite: _LiveSuite, mode: RetrievalMode) -> RetrievalConfig:
+    return next(config for config in suite.configs if config.mode is mode)
+
+
+def _create_replay_run(repository: PufferLabRepository, suite: _LiveSuite, name: str) -> EvalRun:
+    return create_evaluation_run(
+        repository,
+        suite.request(),
+        _environment(),
+        run_id=_id(name),
+        now=lambda: _NOW,
+    )
+
+
+@pytest.mark.asyncio
+async def test_replay_uses_exact_stored_binding_distinct_sources_and_preserves_bytes(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    database = Database.from_settings(settings)
+    database.migrate()
+    repository = PufferLabRepository(database.session_factory)
+    queries, document_ids = _replay_queries()
+    suite = _seed_live_suite(repository, judged_queries=queries)
+    probe = _ReplayFactoryProbe(suite.manifest, document_ids)
+    runtime = _runtime(settings, database, probe)
+    await runtime.start()
+    run = _create_replay_run(repository, suite, "exact-replay-run")
+    before_bytes = database.path.read_bytes()
+    before_run = repository.get_run(run.id).model_dump_json()
+    before_query = repository.get_judged_query(suite.query_set.id, queries[0].id).model_dump_json()
+    bm25 = _config_for_mode(suite, RetrievalMode.BM25)
+    hybrid = _config_for_mode(suite, RetrievalMode.HYBRID_RRF)
+
+    response = await runtime.replay_eval_query(
+        run.id,
+        queries[0].id,
+        EvalRunQueryReplayRequest(
+            config_ids=[bm25.id, hybrid.id],
+            include_counterfactual_probe=True,
+        ),
+    )
+
+    backend = probe.replay_backends[0]
+    assert len(backend.compare_calls) == 1
+    primary_request = backend.compare_calls[0]
+    assert primary_request.query_text == queries[0].text
+    assert primary_request.query_id == queries[0].id
+    assert primary_request.config_ids == [bm25.id, hybrid.id]
+    assert primary_request.filter_override == queries[0].filters
+    assert primary_request.expected_document_ids == []
+    assert primary_request.debug_provenance is False
+    assert [result.config.id for result in response.primary.results] == [bm25.id, hybrid.id]
+    assert len({result.trace_id for result in response.primary.results}) == 2
+    for result in response.primary.results:
+        assert [hit.relevance_grade for hit in result.hits] == [2, 1, 0, None]
+        assert all(
+            membership.stage
+            not in {RetrievalStage.BM25_CANDIDATES, RetrievalStage.VECTOR_CANDIDATES}
+            for hit in result.hits
+            for membership in hit.stage_membership
+        )
+        assert all(timing.stage.value != "provenance_probe" for timing in result.timings)
+    assert len(backend.probe_calls) == 1
+    explicit_probe = backend.probe_calls[0]
+    assert explicit_probe.config_id == hybrid.id
+    assert explicit_probe.query_text == queries[0].text
+    assert explicit_probe.query_id == queries[0].id
+    assert explicit_probe.namespace == suite.dataset.namespace
+    assert [item.config_id for item in response.counterfactual_probes] == [hybrid.id]
+    all_traces = {
+        *(result.trace_id for result in response.primary.results),
+        *(item.trace_id for item in response.counterfactual_probes),
+    }
+    assert len(all_traces) == 3
+    assert response.failed_counterfactual_probes == []
+    assert backend.closed is True
+    assert database.path.read_bytes() == before_bytes
+    assert repository.get_run(run.id).model_dump_json() == before_run
+    assert (
+        repository.get_judged_query(suite.query_set.id, queries[0].id).model_dump_json()
+        == before_query
+    )
+    await runtime.shutdown_execution()
+    runtime.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("behavior", "expected_successes", "expected_failures"),
+    [
+        ({"mismatch_probe": True}, 1, 0),
+        ({"fail_probe": True}, 0, 1),
+        ({"corrupt_probe_binding": True}, 0, 1),
+    ],
+)
+async def test_replay_probe_mismatch_and_failure_remain_noncausal_and_safe(
+    tmp_path: Path,
+    behavior: dict[str, bool],
+    expected_successes: int,
+    expected_failures: int,
+) -> None:
+    settings = _settings(tmp_path)
+    database = Database.from_settings(settings)
+    database.migrate()
+    repository = PufferLabRepository(database.session_factory)
+    queries, document_ids = _replay_queries()
+    suite = _seed_live_suite(repository, judged_queries=queries)
+    probe = _ReplayFactoryProbe(suite.manifest, document_ids[:2], **behavior)
+    runtime = _runtime(settings, database, probe)
+    await runtime.start()
+    run = _create_replay_run(repository, suite, f"probe-{next(iter(behavior))}")
+    bm25 = _config_for_mode(suite, RetrievalMode.BM25)
+    hybrid = _config_for_mode(suite, RetrievalMode.HYBRID_RRF)
+
+    response = await runtime.replay_eval_query(
+        run.id,
+        queries[0].id,
+        EvalRunQueryReplayRequest(
+            config_ids=[bm25.id, hybrid.id],
+            include_counterfactual_probe=True,
+        ),
+    )
+
+    assert len(response.counterfactual_probes) == expected_successes
+    assert len(response.failed_counterfactual_probes) == expected_failures
+    serialized = response.model_dump_json()
+    assert "PRIVATE_PROBE_FAILURE_MARKER" not in serialized
+    for forbidden_claim in (
+        "this caused",
+        "the cause is",
+        "provider cache",
+        "query plan",
+        "reranker rationale",
+    ):
+        assert forbidden_claim not in serialized.lower()
+    if expected_failures:
+        assert response.failed_counterfactual_probes[0].config_id == hybrid.id
+        failed_observations = [
+            item for item in response.observations if item.config_id == hybrid.id
+        ]
+        assert failed_observations
+        assert all(item.code is ForensicCode.NOT_OBSERVABLE for item in failed_observations)
+        assert all(item.certainty.value == "insufficient" for item in failed_observations)
+    else:
+        [successful_probe] = response.counterfactual_probes
+        assert [warning.code.value for warning in successful_probe.warnings] == [
+            "provenance_snapshot_differs"
+        ]
+        assert all(item.certainty.value != "observed" for item in response.observations)
+    assert probe.replay_backends[0].closed is True
+    await runtime.shutdown_execution()
+    runtime.dispose()
+
+
+@pytest.mark.asyncio
+async def test_nonhybrid_replay_never_runs_a_counterfactual_probe(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    database = Database.from_settings(settings)
+    database.migrate()
+    repository = PufferLabRepository(database.session_factory)
+    queries, document_ids = _replay_queries()
+    suite = _seed_live_suite(repository, judged_queries=queries)
+    probe = _ReplayFactoryProbe(suite.manifest, document_ids)
+    runtime = _runtime(settings, database, probe)
+    await runtime.start()
+    run = _create_replay_run(repository, suite, "nonhybrid-replay")
+    bm25 = _config_for_mode(suite, RetrievalMode.BM25)
+    vector = _config_for_mode(suite, RetrievalMode.VECTOR)
+
+    response = await runtime.replay_eval_query(
+        run.id,
+        queries[0].id,
+        EvalRunQueryReplayRequest(
+            config_ids=[bm25.id, vector.id],
+            include_counterfactual_probe=True,
+        ),
+    )
+
+    assert response.counterfactual_probes == []
+    assert response.failed_counterfactual_probes == []
+    assert probe.replay_backends[0].probe_calls == []
+    assert probe.replay_backends[0].closed is True
+    await runtime.shutdown_execution()
+    runtime.dispose()
+
+
+@pytest.mark.asyncio
+async def test_replay_fails_closed_on_a_backend_response_with_a_foreign_binding(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    database = Database.from_settings(settings)
+    database.migrate()
+    repository = PufferLabRepository(database.session_factory)
+    queries, document_ids = _replay_queries()
+    suite = _seed_live_suite(repository, judged_queries=queries)
+    probe = _ReplayFactoryProbe(
+        suite.manifest,
+        document_ids,
+        corrupt_primary_binding=True,
+    )
+    runtime = _runtime(settings, database, probe)
+    await runtime.start()
+    run = _create_replay_run(repository, suite, "foreign-primary-binding")
+    before_bytes = database.path.read_bytes()
+    bm25 = _config_for_mode(suite, RetrievalMode.BM25)
+    vector = _config_for_mode(suite, RetrievalMode.VECTOR)
+
+    with pytest.raises(EvaluationViewError) as raised:
+        await runtime.replay_eval_query(
+            run.id,
+            queries[0].id,
+            EvalRunQueryReplayRequest(config_ids=[bm25.id, vector.id]),
+        )
+
+    assert raised.value.http_status == 503
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None
+    assert probe.replay_backends[0].closed is True
+    assert database.path.read_bytes() == before_bytes
+    await runtime.shutdown_execution()
+    runtime.dispose()
+
+
+@pytest.mark.asyncio
+async def test_replay_namespace_error_and_close_failure_are_safe_detached_and_nonpersistent(
+    tmp_path: Path,
+) -> None:
+    for behavior, marker, expected_type in (
+        ({"fail_compare": True}, "PRIVATE_NAMESPACE_FAILURE_MARKER", ProviderError),
+        ({"fail_close": True}, "PRIVATE_REPLAY_CLOSE_MARKER", EvaluationViewError),
+    ):
+        case_path = tmp_path / marker.lower()
+        settings = _settings(case_path)
+        database = Database.from_settings(settings)
+        database.migrate()
+        repository = PufferLabRepository(database.session_factory)
+        queries, document_ids = _replay_queries()
+        suite = _seed_live_suite(repository, judged_queries=queries)
+        probe = _ReplayFactoryProbe(suite.manifest, document_ids, **behavior)
+        runtime = _runtime(settings, database, probe)
+        await runtime.start()
+        run = _create_replay_run(repository, suite, marker)
+        before_bytes = database.path.read_bytes()
+        bm25 = _config_for_mode(suite, RetrievalMode.BM25)
+        vector = _config_for_mode(suite, RetrievalMode.VECTOR)
+
+        with pytest.raises(expected_type) as raised:
+            await runtime.replay_eval_query(
+                run.id,
+                queries[0].id,
+                EvalRunQueryReplayRequest(config_ids=[bm25.id, vector.id]),
+            )
+
+        error = raised.value
+        assert error.__cause__ is None
+        assert error.__context__ is None
+        rendered = "".join(traceback.format_exception(type(error), error, error.__traceback__))
+        assert marker not in rendered
+        if isinstance(error, ProviderError):
+            assert error.details.code is ApiErrorCode.NOT_FOUND
+            assert error.details.status_code == 404
+        else:
+            assert isinstance(error, EvaluationViewError)
+            assert error.http_status == 503
+        assert probe.replay_backends[0].closed is True
+        assert database.path.read_bytes() == before_bytes
+        await runtime.shutdown_execution()
+        runtime.dispose()
+
+
+@pytest.mark.asyncio
+async def test_replay_cancellation_still_closes_request_backend(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    database = Database.from_settings(settings)
+    database.migrate()
+    repository = PufferLabRepository(database.session_factory)
+    queries, document_ids = _replay_queries()
+    suite = _seed_live_suite(repository, judged_queries=queries)
+    probe = _ReplayFactoryProbe(suite.manifest, document_ids, block_compare=True)
+    runtime = _runtime(settings, database, probe)
+    await runtime.start()
+    run = _create_replay_run(repository, suite, "cancelled-replay")
+    bm25 = _config_for_mode(suite, RetrievalMode.BM25)
+    vector = _config_for_mode(suite, RetrievalMode.VECTOR)
+
+    task = asyncio.create_task(
+        runtime.replay_eval_query(
+            run.id,
+            queries[0].id,
+            EvalRunQueryReplayRequest(config_ids=[bm25.id, vector.id]),
+        )
+    )
+    for _ in range(500):
+        if probe.replay_backends and probe.replay_backends[0].compare_started.is_set():
+            break
+        await asyncio.sleep(0.002)
+    else:
+        raise AssertionError("replay did not begin")
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert probe.replay_backends[0].closed is True
+    await runtime.shutdown_execution()
+    runtime.dispose()
+
+
+def _assert_no_live_factory_calls(probe: _FactoryProbe) -> None:
+    assert probe.calls == {
+        "manifest": 0,
+        "credential": 0,
+        "catalog": 0,
+        "runtime": 0,
+        "provider": 0,
+        "embedder": 0,
+        "reranker": 0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_replay_rejects_synthetic_foreign_and_duplicate_qrels_before_all_factories(
+    tmp_path: Path,
+) -> None:
+    synthetic_settings = _settings(tmp_path / "synthetic")
+    synthetic_database = Database.from_settings(synthetic_settings)
+    synthetic_database.migrate()
+    synthetic_repository = PufferLabRepository(synthetic_database.session_factory)
+    synthetic = materialize_synthetic_demo()
+    synthetic_probe = _FactoryProbe(AUTHORED_SYNTHETIC_DEMO.manifest)
+    synthetic_runtime = _runtime(
+        synthetic_settings,
+        synthetic_database,
+        synthetic_probe,
+    )
+    await synthetic_runtime.start()
+    synthetic_repository.put_dataset_version(synthetic.dataset_version)
+    for config in synthetic.configs:
+        synthetic_repository.put_retrieval_config(config)
+    synthetic_repository.put_query_set(
+        synthetic.query_set,
+        [item.judged_query for item in AUTHORED_SYNTHETIC_DEMO.queries],
+    )
+    synthetic_repository.create_run(synthetic.queued_run)
+    with pytest.raises(EvaluationViewError) as synthetic_error:
+        await synthetic_runtime.replay_eval_query(
+            synthetic.queued_run.id,
+            AUTHORED_SYNTHETIC_DEMO.queries[0].judged_query.id,
+            EvalRunQueryReplayRequest(
+                config_ids=[synthetic.configs[0].id, synthetic.configs[2].id]
+            ),
+        )
+    assert synthetic_error.value.http_status == 409
+    _assert_no_live_factory_calls(synthetic_probe)
+    await synthetic_runtime.shutdown_execution()
+    synthetic_runtime.dispose()
+
+    live_settings = _settings(tmp_path / "foreign")
+    live_database = Database.from_settings(live_settings)
+    live_database.migrate()
+    live_repository = PufferLabRepository(live_database.session_factory)
+    queries, document_ids = _replay_queries()
+    suite = _seed_live_suite(live_repository, judged_queries=queries)
+    live_probe = _ReplayFactoryProbe(suite.manifest, document_ids)
+    live_runtime = _runtime(live_settings, live_database, live_probe)
+    await live_runtime.start()
+    run = _create_replay_run(live_repository, suite, "foreign-replay")
+    bm25 = _config_for_mode(suite, RetrievalMode.BM25)
+    hybrid = _config_for_mode(suite, RetrievalMode.HYBRID_RRF)
+
+    with pytest.raises(EvaluationViewError) as foreign_config:
+        await live_runtime.replay_eval_query(
+            run.id,
+            queries[0].id,
+            EvalRunQueryReplayRequest(config_ids=[bm25.id, _id("foreign-config")]),
+        )
+    assert foreign_config.value.http_status == 422
+    _assert_no_live_factory_calls(live_probe)
+    with pytest.raises(EvaluationViewError) as foreign_query:
+        await live_runtime.replay_eval_query(
+            run.id,
+            _id("foreign-query"),
+            EvalRunQueryReplayRequest(config_ids=[bm25.id, hybrid.id]),
+        )
+    assert foreign_query.value.http_status == 404
+    _assert_no_live_factory_calls(live_probe)
+    await live_runtime.shutdown_execution()
+    live_runtime.dispose()
+
+    duplicate_settings = _settings(tmp_path / "duplicate-qrel")
+    duplicate_database = Database.from_settings(duplicate_settings)
+    duplicate_database.migrate()
+    duplicate_repository = PufferLabRepository(duplicate_database.session_factory)
+    duplicate_queries, duplicate_document_ids = _replay_queries()
+    first_query = duplicate_queries[0]
+    duplicate_queries[0] = first_query.model_copy(
+        update={
+            "qrels": [
+                *first_query.qrels,
+                Qrel(
+                    document_id=first_query.qrels[0].document_id,
+                    relevance_grade=0,
+                ),
+            ]
+        }
+    )
+    duplicate_suite = _seed_live_suite(
+        duplicate_repository,
+        judged_queries=duplicate_queries,
+    )
+    duplicate_probe = _ReplayFactoryProbe(
+        duplicate_suite.manifest,
+        duplicate_document_ids,
+    )
+    duplicate_runtime = _runtime(
+        duplicate_settings,
+        duplicate_database,
+        duplicate_probe,
+    )
+    await duplicate_runtime.start()
+    duplicate_run = _create_replay_run(
+        duplicate_repository,
+        duplicate_suite,
+        "duplicate-qrel-replay",
+    )
+    duplicate_bm25 = _config_for_mode(duplicate_suite, RetrievalMode.BM25)
+    duplicate_hybrid = _config_for_mode(duplicate_suite, RetrievalMode.HYBRID_RRF)
+    with pytest.raises(EvaluationViewError) as duplicate_error:
+        await duplicate_runtime.replay_eval_query(
+            duplicate_run.id,
+            duplicate_queries[0].id,
+            EvalRunQueryReplayRequest(config_ids=[duplicate_bm25.id, duplicate_hybrid.id]),
+        )
+    assert duplicate_error.value.http_status == 422
+    _assert_no_live_factory_calls(duplicate_probe)
+    await duplicate_runtime.shutdown_execution()
+    duplicate_runtime.dispose()
+
+
+@pytest.mark.asyncio
+async def test_tampered_run_config_fails_after_manifest_before_provider_capable_factories(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    database = Database.from_settings(settings)
+    database.migrate()
+    repository = PufferLabRepository(database.session_factory)
+    queries, document_ids = _replay_queries()
+    suite = _seed_live_suite(repository, judged_queries=queries)
+    tampered = tuple(
+        config.model_copy(
+            update={
+                "id": _id(f"replay-tampered-{index}"),
+                "name": f"replay tampered {index}",
+                "config_hash": f"replay-tampered-hash-{index}",
+            }
+        )
+        for index, config in enumerate(suite.configs)
+    )
+    for config in tampered:
+        repository.put_retrieval_config(config)
+    request = CreateEvalRunRequest(
+        query_set_id=suite.query_set.id,
+        baseline_config_id=tampered[0].id,
+        candidate_config_ids=[config.id for config in tampered[1:]],
+        max_concurrency=4,
+        warmup_query_count=0,
+    )
+    probe = _ReplayFactoryProbe(suite.manifest, document_ids)
+    runtime = _runtime(settings, database, probe)
+    await runtime.start()
+    run = create_evaluation_run(
+        repository,
+        request,
+        _environment(),
+        run_id=_id("tampered-replay-run"),
+        now=lambda: _NOW,
+    )
+
+    with pytest.raises(EvaluationViewError) as raised:
+        await runtime.replay_eval_query(
+            run.id,
+            queries[0].id,
+            EvalRunQueryReplayRequest(config_ids=[tampered[0].id, tampered[2].id]),
+        )
+
+    assert raised.value.http_status == 422
+    assert probe.calls == {
+        "manifest": 1,
+        "credential": 0,
+        "catalog": 0,
+        "runtime": 0,
+        "provider": 0,
+        "embedder": 0,
+        "reranker": 0,
+    }
+    assert probe.replay_backends == []
+    await runtime.shutdown_execution()
+    runtime.dispose()

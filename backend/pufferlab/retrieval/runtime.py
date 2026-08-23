@@ -23,6 +23,8 @@ from pufferlab.retrieval.errors import SearchError, invalid_search, search_unava
 from pufferlab.retrieval.filter_validation import FixtureFilterValidator
 from pufferlab.retrieval.service import SearchCompareService
 from pufferlab.retrieval.types import (
+    HybridProbeExecuteRequest,
+    HybridProbeExecuteResult,
     QueryEmbedder,
     RetrievalProvider,
     SearchExecuteRequest,
@@ -115,6 +117,20 @@ class RuntimeSearchBackend:
             raise invalid_search("execution namespace does not match the configured namespace")
         service = await self._get_service()
         return await service.search_one(request)
+
+    async def probe_hybrid_candidates(
+        self,
+        request: HybridProbeExecuteRequest,
+    ) -> HybridProbeExecuteResult:
+        if request.filter_override is not None:
+            self._filter_validator.validate(request.filter_override)
+        configured_namespace = self._settings.pufferlab_search_namespace
+        if configured_namespace is None or not configured_namespace.strip():
+            raise search_unavailable()
+        if request.namespace != configured_namespace:
+            raise invalid_search("execution namespace does not match the configured namespace")
+        service = await self._get_service()
+        return await service.probe_hybrid_candidates(request)
 
     async def close(self) -> None:
         if self._closed:

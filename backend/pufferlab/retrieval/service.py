@@ -52,6 +52,10 @@ from pufferlab.retrieval.errors import (
 from pufferlab.retrieval.filter_validation import FixtureFilterValidator
 from pufferlab.retrieval.rrf import RrfEntry, reconstruct_rrf
 from pufferlab.retrieval.types import (
+    HybridProbeCandidate,
+    HybridProbeExecuteRequest,
+    HybridProbeExecuteResult,
+    HybridProbeStageMembership,
     QueryEmbedder,
     QueryEmbedding,
     RetrievalProvider,
@@ -96,9 +100,12 @@ class SearchCompareService:
     async def compare(self, request: SearchCompareRequest) -> SearchCompareResponse:
         configs = self._resolve_configs(request.config_ids)
         self._validate_filter(request.filter_override)
-        trace_id = self._trace_id_factory()
+        trace_ids = tuple(self._trace_id_factory() for _config in configs)
+        if len(set(trace_ids)) != len(trace_ids):
+            raise invalid_search("comparison source traces must be distinct")
         results = [
-            await self._run_config(config, request=request, trace_id=trace_id) for config in configs
+            await self._run_config(config, request=request, trace_id=trace_id)
+            for config, trace_id in zip(configs, trace_ids, strict=True)
         ]
         return SearchCompareResponse(
             query_text=request.query_text,
@@ -125,6 +132,57 @@ class SearchCompareService:
             config_id=config.summary.id,
             query_id=request.query_id,
             result=result,
+        )
+
+    async def probe_hybrid_candidates(
+        self,
+        request: HybridProbeExecuteRequest,
+    ) -> HybridProbeExecuteResult:
+        """Run one explicit raw-list probe without merging it into a primary result."""
+        if request.namespace != self._namespace:
+            raise invalid_search("execution namespace does not match the configured namespace")
+        if not request.query_text:
+            raise invalid_search("query_text must not be empty")
+        self._validate_filter(request.filter_override)
+        config = self._resolve_configs((request.config_id,))[0]
+        if config.mode not in {RetrievalMode.HYBRID_RRF, RetrievalMode.HYBRID_RERANK}:
+            raise invalid_search("counterfactual probes require a hybrid configuration")
+        embedding = await self._embed_query(config, request.query_text)
+        failure: SearchError | None = None
+        probe: ProviderHybridProbeResult | None = None
+        try:
+            probe = await self._probe_hybrid_candidates(
+                config,
+                request,
+                embedding,
+                include_attributes=(),
+            )
+        except ProviderError:
+            raise
+        except Exception:
+            failure = provider_failed("probe_hybrid_candidates")
+        if failure is not None:
+            raise failure from None
+        assert probe is not None
+        _validate_duration(probe.client_duration_ms)
+        _validate_documents(probe.bm25_documents, expected_score_kind=ScoreKind.BM25)
+        _validate_documents(
+            probe.ann_documents,
+            expected_score_kind=ScoreKind.VECTOR_DISTANCE,
+        )
+        if (
+            len(probe.bm25_documents) > config.candidate_k
+            or len(probe.ann_documents) > config.candidate_k
+        ):
+            raise invalid_provider_result()
+        return HybridProbeExecuteResult(
+            config_id=config.summary.id,
+            query_id=request.query_id,
+            trace_id=request.trace_id,
+            duration_ms=probe.client_duration_ms,
+            bm25_candidate_count=len(probe.bm25_documents),
+            vector_candidate_count=len(probe.ann_documents),
+            candidates=_map_hybrid_probe_candidates(probe),
         )
 
     def _validate_filter(self, filter_override: FilterNode | None) -> None:
@@ -411,8 +469,10 @@ class SearchCompareService:
     async def _probe_hybrid_candidates(
         self,
         config: SeededSearchConfig,
-        request: SearchCompareRequest | SearchExecuteRequest,
+        request: SearchCompareRequest | SearchExecuteRequest | HybridProbeExecuteRequest,
         embedding: QueryEmbedding,
+        *,
+        include_attributes: Sequence[str] = _INCLUDE_ATTRIBUTES,
     ) -> ProviderHybridProbeResult:
         lexical_fields, vector_attribute, distance_metric = _required_hybrid_attributes(config)
         return await self._provider.probe_hybrid_candidates(
@@ -422,7 +482,7 @@ class SearchCompareService:
             vector_attribute=vector_attribute,
             query_vector=embedding.vector,
             candidate_k=config.candidate_k,
-            include_attributes=_INCLUDE_ATTRIBUTES,
+            include_attributes=include_attributes,
             filters=request.filter_override,
             consistency=config.consistency,
             distance_metric=distance_metric,
@@ -733,6 +793,38 @@ def _document_rank_index(
             raise ValueError("invalid provider documents")
         indexed[document.id] = (rank, document)
     return indexed
+
+
+def _map_hybrid_probe_candidates(
+    probe: ProviderHybridProbeResult,
+) -> tuple[HybridProbeCandidate, ...]:
+    memberships_by_document: dict[UUID, list[HybridProbeStageMembership]] = {}
+    try:
+        for stage, documents in (
+            (RetrievalStage.BM25_CANDIDATES, probe.bm25_documents),
+            (RetrievalStage.VECTOR_CANDIDATES, probe.ann_documents),
+        ):
+            for rank, document in enumerate(documents, start=1):
+                document_id = UUID(str(document.id))
+                memberships = memberships_by_document.setdefault(document_id, [])
+                if any(membership.stage is stage for membership in memberships):
+                    raise ValueError("duplicate probe document stage")
+                memberships.append(
+                    HybridProbeStageMembership(
+                        stage=stage,
+                        rank=rank,
+                        score=document.score,
+                    )
+                )
+    except (TypeError, ValueError):
+        raise invalid_provider_result() from None
+    return tuple(
+        HybridProbeCandidate(
+            document_id=document_id,
+            stage_membership=tuple(memberships),
+        )
+        for document_id, memberships in memberships_by_document.items()
+    )
 
 
 def _required_hybrid_attributes(

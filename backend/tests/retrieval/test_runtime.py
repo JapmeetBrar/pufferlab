@@ -20,11 +20,15 @@ from pufferlab.datasets.models import DatasetManifest
 from pufferlab.datasets.schema import compile_namespace_write_spec
 from pufferlab.main import create_app
 from pufferlab.providers.rerankers import Reranker
-from pufferlab.providers.types import ProviderQueryResult
+from pufferlab.providers.types import ProviderHybridProbeResult, ProviderQueryResult
 from pufferlab.retrieval.config import bind_retrieval_catalog
 from pufferlab.retrieval.errors import SearchError
 from pufferlab.retrieval.runtime import RuntimeSearchBackend
-from pufferlab.retrieval.types import QueryEmbedding, SearchExecuteRequest
+from pufferlab.retrieval.types import (
+    HybridProbeExecuteRequest,
+    QueryEmbedding,
+    SearchExecuteRequest,
+)
 
 ROOT = Path(__file__).resolve().parents[3]
 FIXTURE_DIR = ROOT / "fixtures" / "tiny-corpus"
@@ -34,6 +38,7 @@ class FakeProvider:
     def __init__(self) -> None:
         self.bm25_calls: list[dict[str, object]] = []
         self.ann_calls: list[dict[str, object]] = []
+        self.probe_calls: list[dict[str, object]] = []
         self.closed = False
         self.close_calls = 0
 
@@ -44,6 +49,14 @@ class FakeProvider:
     async def query_ann(self, **kwargs: object) -> ProviderQueryResult:
         self.ann_calls.append(kwargs)
         return ProviderQueryResult(documents=(), client_duration_ms=2.0)
+
+    async def probe_hybrid_candidates(self, **kwargs: object) -> ProviderHybridProbeResult:
+        self.probe_calls.append(kwargs)
+        return ProviderHybridProbeResult(
+            bm25_documents=(),
+            ann_documents=(),
+            client_duration_ms=3.0,
+        )
 
     async def close(self) -> None:
         self.close_calls += 1
@@ -252,6 +265,54 @@ async def test_runtime_executes_one_config_and_rejects_a_different_namespace() -
             )
         )
     assert len(provider_factory.provider.bm25_calls) == 1
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_runtime_exposes_only_explicit_dataset_bound_hybrid_probe() -> None:
+    manifest, dataset = _bound_dataset_version()
+    bound = bind_retrieval_catalog(dataset, manifest)
+    provider_factory = FakeProviderFactory()
+    runtime = RuntimeSearchBackend(
+        settings=_settings(pufferlab_search_namespace=dataset.namespace),
+        manifest=manifest,
+        bound_catalog=bound,
+        provider_factory=provider_factory,
+        embedder_factory=FakeEmbedderFactory(),
+    )
+    bm25, _, hybrid, _ = runtime.list_configs()
+
+    result = await runtime.probe_hybrid_candidates(
+        HybridProbeExecuteRequest(
+            namespace=dataset.namespace,
+            query_text="query",
+            config_id=hybrid.id,
+            trace_id=UUID(int=700),
+        )
+    )
+
+    assert result.trace_id == UUID(int=700)
+    assert result.candidates == ()
+    assert provider_factory.provider.probe_calls[0]["include_attributes"] == ()
+    with pytest.raises(SearchError, match="namespace"):
+        await runtime.probe_hybrid_candidates(
+            HybridProbeExecuteRequest(
+                namespace="foreign-namespace",
+                query_text="query",
+                config_id=hybrid.id,
+                trace_id=UUID(int=701),
+            )
+        )
+    with pytest.raises(SearchError, match="hybrid configuration"):
+        await runtime.probe_hybrid_candidates(
+            HybridProbeExecuteRequest(
+                namespace=dataset.namespace,
+                query_text="query",
+                config_id=bm25.id,
+                trace_id=UUID(int=702),
+            )
+        )
+    assert len(provider_factory.provider.probe_calls) == 1
     await runtime.close()
 
 
