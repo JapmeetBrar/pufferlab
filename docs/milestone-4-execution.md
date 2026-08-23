@@ -191,6 +191,8 @@ Exit codes are frozen as:
 - `2`: local configuration, dependency, catalog, or evidence is missing/invalid;
 - `3`: an explicitly requested metadata request failed/not-found or reported `index_updating`;
 - `1`: unexpected internal failure.
+- `130`: the command was interrupted; output is one fixed cancellation line and contains no
+  partial target or provider detail.
 
 Add `pufferlab serve --host 127.0.0.1 --port 8000`. It accepts only exact loopback hosts
 `127.0.0.1`, `::1`, or `localhost` and integer ports 1–65535, always starts exactly one worker, and

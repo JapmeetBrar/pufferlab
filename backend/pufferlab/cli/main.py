@@ -7,7 +7,7 @@ import asyncio
 import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Protocol, TextIO
+from typing import TYPE_CHECKING, Protocol, TextIO
 from uuid import UUID, uuid4
 
 from pufferlab.cli.evaluation import (
@@ -41,6 +41,9 @@ from pufferlab.contracts.common import ContractModel
 from pufferlab.contracts.evals import EvalRun, EvalRunStatus
 from pufferlab.datasets.ingestion import IngestionReport
 from pufferlab.synthetic_demo import SyntheticDemoSeedResult
+
+if TYPE_CHECKING:
+    from pufferlab.cli.doctor import DoctorDependencies
 
 _UNIX_PREFIX = "pufferlab-unix-"
 _UNIX_DATASET_DIR = Path("datasets/cqadupstack-unix")
@@ -80,6 +83,7 @@ def main(
     settings_factory: Callable[[], Settings] = Settings,
     ingest_runner: _IngestRunner | None = None,
     synthetic_demo_seed_runner: _SyntheticDemoSeedRunner | None = None,
+    doctor_dependencies: DoctorDependencies | None = None,
     cli_application_factory: CliApplicationFactory | None = None,
     run_id_factory: Callable[[], UUID] = uuid4,
     stdout: TextIO | None = None,
@@ -89,6 +93,19 @@ def main(
     error_output = stderr or sys.stderr
     parser = _parser()
     arguments = parser.parse_args(argv)
+
+    if arguments.command == "doctor":
+        if arguments.dataset_version is not None and arguments.mode not in {"evaluation", "all"}:
+            parser.error("--dataset-version is accepted only for doctor evaluation or all")
+        if arguments.live and arguments.mode == "demo":
+            parser.error("--live is accepted only for doctor live-tiny, evaluation, or all")
+        return _run_doctor_command(
+            arguments,
+            settings_factory=settings_factory,
+            dependencies=doctor_dependencies,
+            output=output,
+            error_output=error_output,
+        )
 
     if arguments.command == "dataset" and arguments.dataset_command == "ingest-tiny":
         return _run_tiny_ingest(
@@ -216,6 +233,40 @@ def _run_synthetic_demo_seed(
         print("error: synthetic demo seed failed", file=error_output)
         return 1
     return 0
+
+
+def _run_doctor_command(
+    arguments: argparse.Namespace,
+    *,
+    settings_factory: Callable[[], Settings],
+    dependencies: DoctorDependencies | None,
+    output: TextIO,
+    error_output: TextIO,
+) -> int:
+    from pufferlab.cli.doctor import DoctorMode, render_doctor, run_doctor
+
+    try:
+        execution = asyncio.run(
+            run_doctor(
+                settings_factory(),
+                mode=DoctorMode(arguments.mode),
+                dataset_version_id=arguments.dataset_version,
+                live=arguments.live,
+                dependencies=dependencies,
+            )
+        )
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        print("error: doctor cancelled", file=error_output)
+        return 130
+    except Exception:
+        print("error: doctor failed", file=error_output)
+        return 1
+    if execution.exit_code == 130:
+        print("error: doctor cancelled", file=error_output)
+        return 130
+    for line in render_doctor(execution.report):
+        print(line, file=output)
+    return execution.exit_code
 
 
 def _run_tiny_ingest(
@@ -407,6 +458,8 @@ def _parser() -> argparse.ArgumentParser:
     )
     commands = parser.add_subparsers(dest="command", required=True)
 
+    _add_doctor_parser(commands)
+
     dataset = commands.add_parser("dataset", help="Prepare and ingest evaluation datasets.")
     dataset_commands = dataset.add_subparsers(dest="dataset_command", required=True)
     _add_tiny_ingest_parser(dataset_commands)
@@ -446,6 +499,32 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     return parser
+
+
+def _add_doctor_parser(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    doctor = commands.add_parser(
+        "doctor",
+        help="Inspect local PufferLab readiness without changing durable state.",
+        description=(
+            "Inspect provider-free local readiness. --live explicitly adds at most one "
+            "metadata-only turbopuffer request; no search, write, create, or delete is issued."
+        ),
+    )
+    doctor.add_argument(
+        "--mode",
+        choices=("demo", "live-tiny", "evaluation", "all"),
+        required=True,
+    )
+    doctor.add_argument(
+        "--dataset-version",
+        type=_uuid,
+        help="Exact persisted evaluation dataset UUID (evaluation/all only).",
+    )
+    doctor.add_argument(
+        "--live",
+        action="store_true",
+        help="Explicitly perform one metadata-only check for the resolved live target.",
+    )
 
 
 def _add_tiny_ingest_parser(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
