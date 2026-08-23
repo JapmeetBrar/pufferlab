@@ -2,6 +2,7 @@ import json
 from datetime import timedelta, timezone
 
 import pytest
+from pufferlab.contracts.errors import ApiErrorCode, ApiErrorDetail
 from pufferlab.contracts.evals import ConfigRunSummary, EvalRunStatus
 from pufferlab.persistence import (
     Database,
@@ -24,6 +25,16 @@ from .helpers import (
     stable_uuid,
     summarize_outcomes,
 )
+
+
+def _safe_run_error(name: str = "run-error") -> ApiErrorDetail:
+    return ApiErrorDetail(
+        code=ApiErrorCode.INTERNAL_ERROR,
+        message="evaluation execution failed safely",
+        retryable=False,
+        trace_id=stable_uuid(name),
+        details={"operation": "execute_evaluation"},
+    )
 
 
 def test_immutable_revision_graph_round_trips_exactly(
@@ -156,6 +167,77 @@ def test_read_selectors_are_bounded_ordered_and_run_scoped(
         repository.list_query_ids(sample_graph.query_set.id, limit=101)
     with pytest.raises(PersistenceValidationError, match="between 1 and 100"):
         repository.list_dataset_versions(limit=True)
+
+
+def test_active_run_selector_is_oldest_first_bounded_and_read_only(
+    repository: PufferLabRepository,
+    sample_graph: SampleGraph,
+) -> None:
+    persist_graph(repository, sample_graph)
+    oldest = sample_graph.make_run("active-oldest").model_copy(
+        update={"created_at": FIXED_TIME - timedelta(minutes=2)}
+    )
+    tied_queued = sample_graph.make_run("active-tied-queued").model_copy(
+        update={"created_at": FIXED_TIME - timedelta(minutes=1)}
+    )
+    tied_running = sample_graph.make_run("active-tied-running").model_copy(
+        update={"created_at": FIXED_TIME - timedelta(minutes=1)}
+    )
+    terminal = sample_graph.make_run("inactive-terminal").model_copy(
+        update={"created_at": FIXED_TIME - timedelta(minutes=3)}
+    )
+    for run in (oldest, tied_queued, tied_running, terminal):
+        repository.create_run(run)
+    repository.claim_queued_run(tied_running.id, at=FIXED_TIME)
+    repository.transition_run(terminal.id, EvalRunStatus.CANCELLED, at=FIXED_TIME)
+
+    expected = [
+        oldest,
+        *sorted((tied_queued, repository.get_run(tied_running.id)), key=lambda run: str(run.id)),
+    ]
+    selected = repository.list_active_runs(limit=3)
+
+    assert selected == expected
+    assert [run.status for run in selected] == [run.status for run in expected]
+    assert repository.get_run(terminal.id).status is EvalRunStatus.CANCELLED
+    with pytest.raises(PersistenceValidationError, match="active run selection exceeds its bound"):
+        repository.list_active_runs(limit=2)
+    with pytest.raises(PersistenceValidationError, match="between 1 and 100"):
+        repository.list_active_runs(limit=0)
+    with pytest.raises(PersistenceValidationError, match="between 1 and 100"):
+        repository.list_active_runs(limit=101)
+
+
+def test_active_run_selector_strictly_decodes_the_overflow_probe(
+    database: Database,
+    repository: PufferLabRepository,
+    sample_graph: SampleGraph,
+) -> None:
+    persist_graph(repository, sample_graph)
+    runs = [
+        sample_graph.make_run(f"active-overflow-{index}").model_copy(
+            update={"created_at": FIXED_TIME + timedelta(minutes=index)}
+        )
+        for index in range(3)
+    ]
+    for run in runs:
+        repository.create_run(run)
+    with database.session_factory.begin() as session:
+        row = session.get(EvalRunRow, str(runs[-1].id))
+        assert row is not None
+        row.status = EvalRunStatus.RUNNING.value
+    with database.session_factory() as session:
+        corrupted = session.get(EvalRunRow, str(runs[-1].id))
+        assert corrupted is not None
+        before = (corrupted.status, corrupted.started_at, corrupted.payload_json)
+
+    with pytest.raises(PersistenceValidationError, match="indexed lifecycle state"):
+        repository.list_active_runs(limit=2)
+
+    with database.session_factory() as session:
+        unchanged = session.get(EvalRunRow, str(runs[-1].id))
+        assert unchanged is not None
+        assert (unchanged.status, unchanged.started_at, unchanged.payload_json) == before
 
 
 def test_strict_read_decoding_rejects_index_payload_divergence(
@@ -295,7 +377,7 @@ def test_outcomes_drive_progress_and_completed_runs_are_immutable(
         (EvalRunStatus.QUEUED, EvalRunStatus.CANCELLED, True),
         (EvalRunStatus.QUEUED, EvalRunStatus.INTERRUPTED, False),
         (EvalRunStatus.QUEUED, EvalRunStatus.COMPLETED, False),
-        (EvalRunStatus.QUEUED, EvalRunStatus.FAILED, False),
+        (EvalRunStatus.QUEUED, EvalRunStatus.FAILED, True),
         (EvalRunStatus.RUNNING, EvalRunStatus.CANCELLED, True),
         (EvalRunStatus.RUNNING, EvalRunStatus.INTERRUPTED, True),
         (EvalRunStatus.RUNNING, EvalRunStatus.FAILED, True),
@@ -316,10 +398,128 @@ def test_run_transition_graph(
         repository.transition_run(run.id, EvalRunStatus.RUNNING)
 
     if allowed:
-        assert repository.transition_run(run.id, target).status is target
+        error = _safe_run_error(f"transition-{start}-{target}")
+        assert (
+            repository.transition_run(
+                run.id,
+                target,
+                error=error if target is EvalRunStatus.FAILED else None,
+            ).status
+            is target
+        )
     else:
         with pytest.raises(InvalidRunTransitionError):
             repository.transition_run(run.id, target)
+
+
+def test_queued_and_running_failures_require_contract_valid_safe_errors(
+    repository: PufferLabRepository,
+    sample_graph: SampleGraph,
+) -> None:
+    persist_graph(repository, sample_graph)
+    queued = sample_graph.make_run("queued-reconstruction-failure")
+    running = sample_graph.make_run("running-execution-failure")
+    repository.create_run(queued)
+    repository.create_run(running)
+    started = repository.claim_queued_run(running.id, at=FIXED_TIME + timedelta(seconds=1))
+
+    for run_id in (queued.id, running.id):
+        before = repository.get_run(run_id)
+        with pytest.raises(PersistenceValidationError, match="safe run-level error"):
+            repository.transition_run(run_id, EvalRunStatus.FAILED)
+        assert repository.get_run(run_id) == before
+
+    with pytest.raises(PersistenceValidationError, match="contract-valid safe run-level error"):
+        repository.transition_run(
+            queued.id,
+            EvalRunStatus.FAILED,
+            error=object(),  # type: ignore[arg-type]
+        )
+    assert repository.get_run(queued.id) == queued
+
+    queued_error = _safe_run_error("queued-failure")
+    queued_failed = repository.transition_run(
+        queued.id,
+        EvalRunStatus.FAILED,
+        at=FIXED_TIME + timedelta(seconds=2),
+        error=queued_error,
+    )
+    running_error = _safe_run_error("running-failure")
+    running_failed = repository.transition_run(
+        running.id,
+        EvalRunStatus.FAILED,
+        at=FIXED_TIME + timedelta(seconds=3),
+        error=running_error,
+    )
+
+    assert queued_failed.started_at is None
+    assert queued_failed.completed_at == FIXED_TIME + timedelta(seconds=2)
+    assert queued_failed.error == queued_error
+    assert running_failed.started_at == started.started_at
+    assert running_failed.completed_at == FIXED_TIME + timedelta(seconds=3)
+    assert running_failed.error == running_error
+    assert repository.list_active_runs() == []
+
+
+def test_claim_queued_run_is_exact_and_rejects_nonqueued_without_mutation(
+    repository: PufferLabRepository,
+    sample_graph: SampleGraph,
+) -> None:
+    persist_graph(repository, sample_graph)
+    claimed_source = sample_graph.make_run("claim-source")
+    untouched = sample_graph.make_run("claim-untouched")
+    terminal = sample_graph.make_run("claim-terminal")
+    stale = sample_graph.make_run("claim-stale")
+    for run in (claimed_source, untouched, terminal, stale):
+        repository.create_run(run)
+    repository.transition_run(terminal.id, EvalRunStatus.CANCELLED, at=FIXED_TIME)
+    repository.claim_queued_run(stale.id, at=FIXED_TIME)
+    repository.transition_run(stale.id, EvalRunStatus.INTERRUPTED, at=FIXED_TIME)
+
+    claim_time = FIXED_TIME + timedelta(seconds=1)
+    claimed = repository.claim_queued_run(claimed_source.id, at=claim_time)
+
+    assert claimed.status is EvalRunStatus.RUNNING
+    assert claimed.started_at == claim_time
+    assert claimed.completed_at is None
+    assert claimed.error is None
+    assert repository.get_run(claimed.id) == claimed
+    assert repository.get_run(untouched.id) == untouched
+
+    for run_id in (claimed.id, terminal.id, stale.id):
+        before = repository.get_run(run_id)
+        with pytest.raises(InvalidRunTransitionError, match="only queued runs may be claimed"):
+            repository.claim_queued_run(run_id, at=claim_time + timedelta(seconds=1))
+        assert repository.get_run(run_id) == before
+    with pytest.raises(RecordNotFoundError, match="was not found"):
+        repository.claim_queued_run(stable_uuid("missing-claim"))
+    assert repository.get_run(untouched.id) == untouched
+
+
+def test_claim_queued_run_rejects_invalid_index_payload_without_rewriting_it(
+    database: Database,
+    repository: PufferLabRepository,
+    sample_graph: SampleGraph,
+) -> None:
+    persist_graph(repository, sample_graph)
+    run = sample_graph.make_run("invalid-claim-payload")
+    repository.create_run(run)
+    with database.session_factory.begin() as session:
+        row = session.get(EvalRunRow, str(run.id))
+        assert row is not None
+        row.status = EvalRunStatus.RUNNING.value
+    with database.session_factory() as session:
+        corrupted = session.get(EvalRunRow, str(run.id))
+        assert corrupted is not None
+        before = (corrupted.status, corrupted.started_at, corrupted.payload_json)
+
+    with pytest.raises(PersistenceValidationError, match="indexed lifecycle state"):
+        repository.claim_queued_run(run.id, at=FIXED_TIME + timedelta(seconds=1))
+
+    with database.session_factory() as session:
+        unchanged = session.get(EvalRunRow, str(run.id))
+        assert unchanged is not None
+        assert (unchanged.status, unchanged.started_at, unchanged.payload_json) == before
 
 
 def test_startup_recovery_interrupts_running_and_preserves_queued(
