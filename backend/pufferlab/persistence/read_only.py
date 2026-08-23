@@ -20,6 +20,8 @@ from pufferlab.persistence.repository import PufferLabRepository
 
 _CURRENT_REVISION = "20260822_0001"
 _DESCRIPTOR_ROOT = Path("/dev/fd")
+_OPEN_SUPPORTS_DIR_FD = os.open in os.supports_dir_fd
+_STAT_SUPPORTS_DIR_FD = os.stat in os.supports_dir_fd
 
 
 class ReadOnlyCatalogError(RuntimeError):
@@ -37,6 +39,12 @@ class _FileIdentity:
     modified_ns: int
 
 
+@dataclass(frozen=True, slots=True)
+class _DirectoryIdentity:
+    device: int
+    inode: int
+
+
 class _OpenControl(StrEnum):
     NONE = "none"
     KEYBOARD_INTERRUPT = "keyboard_interrupt"
@@ -50,12 +58,32 @@ class _OpenOutcome:
 
 
 class _GuardedDatabaseFile:
-    """Own the exact no-follow file description selected for this catalog."""
+    """Own exact parent and leaf descriptions selected without following the leaf."""
 
-    __slots__ = ("_fd", "identity")
+    __slots__ = (
+        "_fd",
+        "_leaf_name",
+        "_parent_fd",
+        "_parent_identity",
+        "_parent_path",
+        "identity",
+    )
 
-    def __init__(self, fd: int, identity: _FileIdentity) -> None:
+    def __init__(
+        self,
+        *,
+        fd: int,
+        identity: _FileIdentity,
+        parent_fd: int,
+        parent_identity: _DirectoryIdentity,
+        parent_path: Path,
+        leaf_name: str,
+    ) -> None:
         self._fd: int | None = fd
+        self._parent_fd: int | None = parent_fd
+        self._parent_identity = parent_identity
+        self._parent_path = parent_path
+        self._leaf_name = leaf_name
         self.identity = identity
 
     @classmethod
@@ -64,25 +92,69 @@ class _GuardedDatabaseFile:
             raise ReadOnlyCatalogError()
         no_follow = getattr(os, "O_NOFOLLOW", None)
         close_on_exec = getattr(os, "O_CLOEXEC", None)
+        nonblocking = getattr(os, "O_NONBLOCK", None)
+        directory = getattr(os, "O_DIRECTORY", None)
         if (
             not isinstance(no_follow, int)
             or no_follow == 0
             or not isinstance(close_on_exec, int)
             or close_on_exec == 0
+            or not isinstance(nonblocking, int)
+            or nonblocking == 0
+            or not isinstance(directory, int)
+            or directory == 0
+            or not _OPEN_SUPPORTS_DIR_FD
+            or not _STAT_SUPPORTS_DIR_FD
         ):
             raise ReadOnlyCatalogError()
+        leaf_name = path.name
+        if not leaf_name or leaf_name in {".", ".."}:
+            raise ReadOnlyCatalogError()
+        # Parent symlinks are deliberately supported, but the caller's leaf is never resolved.
+        # Holding the concrete parent directory open lets the leaf acquisition and every later
+        # location check use one directory identity even if an attacker renames a path component.
+        parent_path = path.parent.resolve(strict=True)
+        parent_fd: int | None = None
         fd: int | None = None
         try:
-            fd = os.open(path, os.O_RDONLY | no_follow | close_on_exec)
+            parent_fd = os.open(
+                parent_path,
+                os.O_RDONLY | directory | no_follow | close_on_exec,
+            )
+            parent_identity = _directory_identity_from_metadata(os.fstat(parent_fd))
+            if _directory_identity(parent_path) != parent_identity:
+                raise ReadOnlyCatalogError()
+            # O_NONBLOCK makes FIFO/device rejection bounded. It is removed only after fstat has
+            # established that the exact no-follow leaf description is a regular file.
+            fd = os.open(
+                leaf_name,
+                os.O_RDONLY | nonblocking | no_follow | close_on_exec,
+                dir_fd=parent_fd,
+            )
             identity = _identity_from_metadata(os.fstat(fd))
-            guard = cls(fd, identity)
+            _clear_nonblocking(fd, nonblocking=nonblocking)
+            guard = cls(
+                fd=fd,
+                identity=identity,
+                parent_fd=parent_fd,
+                parent_identity=parent_identity,
+                parent_path=parent_path,
+                leaf_name=leaf_name,
+            )
             guard.verify()
             return guard
         except BaseException:
             if fd is not None:
                 with suppress(BaseException):
                     os.close(fd)
+            if parent_fd is not None:
+                with suppress(BaseException):
+                    os.close(parent_fd)
             raise
+
+    @property
+    def path(self) -> Path:
+        return self._parent_path / self._leaf_name
 
     @property
     def descriptor_path(self) -> Path:
@@ -106,19 +178,59 @@ class _GuardedDatabaseFile:
             raise ReadOnlyCatalogError()
         return descriptor
 
+    def validate_descriptor_alias(self, alias: str) -> None:
+        """Accept only SQLite's evidenced names for this exact process-local descriptor."""
+
+        fd = self._fd
+        if fd is None or alias not in {f"/dev/fd/{fd}", f"/proc/self/fd/{fd}"}:
+            raise ReadOnlyCatalogError()
+        try:
+            close_on_exec = getattr(os, "O_CLOEXEC", None)
+            if not isinstance(close_on_exec, int) or close_on_exec == 0:
+                raise ReadOnlyCatalogError()
+            descriptor_fd = os.open(alias, os.O_RDONLY | close_on_exec)
+            try:
+                descriptor_identity = _identity_from_metadata(os.fstat(descriptor_fd))
+            finally:
+                os.close(descriptor_fd)
+        except Exception as error:
+            _detach_exception(error)
+            raise ReadOnlyCatalogError() from None
+        if descriptor_identity != self.identity:
+            raise ReadOnlyCatalogError()
+
     def sqlite_uri(self) -> str:
         return f"{self.descriptor_path.as_uri()}?mode=ro&immutable=1"
 
     def verify(self) -> None:
         fd = self._fd
-        if fd is None or _identity_from_metadata(os.fstat(fd)) != self.identity:
+        parent_fd = self._parent_fd
+        if (
+            fd is None
+            or parent_fd is None
+            or _identity_from_metadata(os.fstat(fd)) != self.identity
+            or _directory_identity_from_metadata(os.fstat(parent_fd)) != self._parent_identity
+            or _directory_identity(self._parent_path) != self._parent_identity
+            or _file_identity_at(parent_fd, self._leaf_name) != self.identity
+            or _sidecars_exist_at(parent_fd, self._leaf_name)
+        ):
             raise ReadOnlyCatalogError()
 
     def close(self) -> None:
         fd = self._fd
+        parent_fd = self._parent_fd
         self._fd = None
-        if fd is not None:
-            os.close(fd)
+        self._parent_fd = None
+        failure: BaseException | None = None
+        for owned_fd in (fd, parent_fd):
+            if owned_fd is not None:
+                try:
+                    os.close(owned_fd)
+                except BaseException as error:
+                    if failure is None:
+                        failure = error
+        if failure is not None:
+            raise failure
 
 
 class _PinnedConnectionCreator:
@@ -263,16 +375,9 @@ def _open_existing_read_only_catalog_inner(path: Path) -> _OpenOutcome:
     resolved: Path | None = None
     identity: _FileIdentity | None = None
     try:
-        if path.is_symlink() or _sidecars_exist(path):
-            raise ReadOnlyCatalogError()
-        # Parent symlinks are resolved once to a concrete absolute file. The exact file is
-        # rejected when symbolic, and device/inode/size/mtime plus sidecars are rechecked after
-        # validation and disposal to detect replacement around the SQLite open.
-        resolved = path.resolve(strict=True)
-        guard = _GuardedDatabaseFile.acquire(resolved)
+        guard = _GuardedDatabaseFile.acquire(path)
+        resolved = guard.path
         identity = guard.identity
-        if _sidecars_exist(resolved) or _file_identity(resolved) != identity:
-            raise ReadOnlyCatalogError()
         connection = sqlite3.connect(
             guard.sqlite_uri(),
             uri=True,
@@ -291,7 +396,7 @@ def _open_existing_read_only_catalog_inner(path: Path) -> _OpenOutcome:
             class_=Session,
             expire_on_commit=False,
         )
-        _validate_database_binding(engine, expected_path=guard.descriptor_path)
+        _validate_database_binding(engine, guard=guard)
         guard.verify()
         _validate_catalog(engine)
         guard.verify()
@@ -540,11 +645,15 @@ def _validate_catalog(engine: Engine) -> None:
             raise ReadOnlyCatalogError()
 
 
-def _validate_database_binding(engine: Engine, *, expected_path: Path) -> None:
+def _validate_database_binding(engine: Engine, *, guard: _GuardedDatabaseFile) -> None:
     with engine.connect() as connection:
         databases = connection.exec_driver_sql("PRAGMA database_list").all()
-        if [(row[1], row[2]) for row in databases] != [("main", str(expected_path))]:
+        if len(databases) != 1 or databases[0][1] != "main":
             raise ReadOnlyCatalogError()
+        alias = databases[0][2]
+        if not isinstance(alias, str):
+            raise ReadOnlyCatalogError()
+        guard.validate_descriptor_alias(alias)
 
 
 def _configure_connection(connection: sqlite3.Connection) -> None:
@@ -558,6 +667,10 @@ def _file_identity(path: Path) -> _FileIdentity:
     return _identity_from_metadata(path.stat(follow_symlinks=False))
 
 
+def _file_identity_at(parent_fd: int, leaf_name: str) -> _FileIdentity:
+    return _identity_from_metadata(os.stat(leaf_name, dir_fd=parent_fd, follow_symlinks=False))
+
+
 def _identity_from_metadata(metadata: os.stat_result) -> _FileIdentity:
     if not stat.S_ISREG(metadata.st_mode):
         raise ReadOnlyCatalogError()
@@ -569,5 +682,41 @@ def _identity_from_metadata(metadata: os.stat_result) -> _FileIdentity:
     )
 
 
+def _directory_identity(path: Path) -> _DirectoryIdentity:
+    return _directory_identity_from_metadata(path.stat(follow_symlinks=False))
+
+
+def _directory_identity_from_metadata(metadata: os.stat_result) -> _DirectoryIdentity:
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise ReadOnlyCatalogError()
+    return _DirectoryIdentity(
+        device=metadata.st_dev,
+        inode=metadata.st_ino,
+    )
+
+
+def _clear_nonblocking(fd: int, *, nonblocking: int) -> None:
+    try:
+        import fcntl
+
+        flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+        fcntl.fcntl(fd, fcntl.F_SETFL, flags & ~nonblocking)
+        if fcntl.fcntl(fd, fcntl.F_GETFL) & nonblocking:
+            raise ReadOnlyCatalogError()
+    except Exception as error:
+        _detach_exception(error)
+        raise ReadOnlyCatalogError() from None
+
+
 def _sidecars_exist(path: Path) -> bool:
     return any(os.path.lexists(f"{path}{suffix}") for suffix in ("-journal", "-wal", "-shm"))
+
+
+def _sidecars_exist_at(parent_fd: int, leaf_name: str) -> bool:
+    for suffix in ("-journal", "-wal", "-shm"):
+        try:
+            os.stat(f"{leaf_name}{suffix}", dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            continue
+        return True
+    return False
