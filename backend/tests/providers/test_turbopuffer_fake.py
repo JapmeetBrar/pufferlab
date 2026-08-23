@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import traceback
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -17,6 +18,7 @@ from pufferlab.providers.types import ProviderSchema, WriteDocument
 from turbopuffer import (
     APIError,
     APIResponseValidationError,
+    AsyncTurbopuffer,
     AuthenticationError,
     NotFoundError,
     RateLimitError,
@@ -43,11 +45,22 @@ class FakeResponse:
     aggregations: dict[str, object] | None = None
 
 
+@dataclass
+class FakeMultiResult:
+    rows: list[dict[str, object]] | None = None
+
+
+@dataclass
+class FakeMultiResponse:
+    results: list[FakeMultiResult]
+
+
 class FakeNamespace:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, object]]] = []
         self.query_response = FakeResponse()
         self.query_responses: list[FakeResponse] = []
+        self.multi_query_response = FakeMultiResponse(results=[])
         self.write_response = FakeResponse(rows_affected=0)
         self.metadata_response = FakeMetadata(
             approx_row_count=0,
@@ -56,6 +69,7 @@ class FakeNamespace:
         )
         self.write_error: APIError | None = None
         self.query_error: APIError | None = None
+        self.multi_query_error: APIError | None = None
         self.metadata_error: APIError | None = None
         self.delete_error: APIError | None = None
 
@@ -72,6 +86,12 @@ class FakeNamespace:
         if self.query_responses:
             return self.query_responses.pop(0)
         return self.query_response
+
+    async def multi_query(self, **kwargs: object) -> object:
+        self.calls.append(("multi_query", kwargs))
+        if self.multi_query_error is not None:
+            raise self.multi_query_error
+        return self.multi_query_response
 
     async def metadata(self, **kwargs: object) -> object:
         self.calls.append(("metadata", kwargs))
@@ -249,7 +269,7 @@ async def test_bm25_query_shape_and_score_semantics() -> None:
 
     result = await provider.query_bm25(
         namespace="fixture",
-        text_attribute="body",
+        lexical_fields=(("title", 2.0), ("body", 1.0)),
         query_text="pufferfish",
         top_k=5,
         include_attributes=("title", "published_at"),
@@ -260,7 +280,13 @@ async def test_bm25_query_shape_and_score_semantics() -> None:
         (
             "query",
             {
-                "rank_by": ("body", "BM25", "pufferfish"),
+                "rank_by": (
+                    "Sum",
+                    [
+                        ("Product", 2.0, ("title", "BM25", "pufferfish")),
+                        ("Product", 1.0, ("body", "BM25", "pufferfish")),
+                    ],
+                ),
                 "top_k": 5,
                 "include_attributes": ["title", "published_at"],
                 "consistency": {"level": "strong"},
@@ -278,6 +304,50 @@ async def test_bm25_query_shape_and_score_semantics() -> None:
     assert score.direction is ScoreDirection.HIGHER_IS_BETTER
     assert score.source is ScoreSource.TURBOPUFFER_DIST
     assert score.value == 3.75
+
+
+@pytest.mark.asyncio
+async def test_weighted_bm25_shape_serializes_through_real_sdk() -> None:
+    captured: dict[str, object] = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads((await request.aread()).decode()))
+        return httpx.Response(200, json={"rows": []}, request=request)
+
+    http_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://sdk.test",
+    )
+    sdk = AsyncTurbopuffer(
+        api_key="not-a-real-key",
+        base_url="https://sdk.test",
+        http_client=http_client,
+        max_retries=0,
+    )
+    provider = TurbopufferProvider(
+        api_key="not-a-real-key",
+        region="gcp-us-central1",
+        client=sdk,
+    )
+
+    try:
+        await provider.query_bm25(
+            namespace="fixture",
+            lexical_fields=(("title", 2.0), ("body", 1.0)),
+            query_text="pufferfish",
+            top_k=5,
+            include_attributes=("title",),
+        )
+    finally:
+        await provider.close()
+
+    assert captured["rank_by"] == [
+        "Sum",
+        [
+            ["Product", 2.0, ["title", "BM25", "pufferfish"]],
+            ["Product", 1.0, ["body", "BM25", "pufferfish"]],
+        ],
+    ]
 
 
 @pytest.mark.asyncio
@@ -316,6 +386,175 @@ async def test_ann_query_shape_and_distance_score_semantics() -> None:
     assert score.kind is ScoreKind.VECTOR_DISTANCE
     assert score.direction is ScoreDirection.LOWER_IS_BETTER
     assert score.value == 0.125
+
+
+@pytest.mark.asyncio
+async def test_hybrid_rrf_uses_one_weighted_same_snapshot_multi_query() -> None:
+    namespace = FakeNamespace()
+    query_vector = unit_vector(2, 1)
+    namespace.multi_query_response = FakeMultiResponse(
+        results=[
+            FakeMultiResult(
+                rows=[
+                    {
+                        "id": "doc-2",
+                        "$dist": 0.0315,
+                        "title": "Fused",
+                        "vector": query_vector,
+                    }
+                ]
+            )
+        ]
+    )
+    provider, _ = make_provider(namespace, timer=clock(2.0, 2.007))
+    filter_node = FilterPredicate(field="source", op=PredicateOp.EQ, value="unix")
+
+    result = await provider.query_hybrid_rrf(
+        namespace="fixture",
+        lexical_fields=(("title", 2.0), ("body", 1.0)),
+        query_text="shell pipe",
+        vector_attribute="vector",
+        query_vector=query_vector,
+        candidate_k=50,
+        result_k=10,
+        include_attributes=("title",),
+        rank_constant=60,
+        weights=(1.5, 0.75),
+        filters=filter_node,
+        consistency="strong",
+        distance_metric="cosine_distance",
+    )
+
+    assert namespace.calls == [
+        (
+            "multi_query",
+            {
+                "queries": [
+                    {
+                        "limit": 50,
+                        "include_attributes": ["title"],
+                        "filters": ("source", "Eq", "unix"),
+                        "rank_by": (
+                            "Sum",
+                            [
+                                ("Product", 2.0, ("title", "BM25", "shell pipe")),
+                                ("Product", 1.0, ("body", "BM25", "shell pipe")),
+                            ],
+                        ),
+                    },
+                    {
+                        "limit": 50,
+                        "include_attributes": ["title"],
+                        "filters": ("source", "Eq", "unix"),
+                        "rank_by": ("vector", "ANN", query_vector),
+                        "distance_metric": "cosine_distance",
+                    },
+                ],
+                "consistency": {"level": "strong"},
+                "limit": {"total": 10},
+                "rerank_by": (
+                    "RRF",
+                    {"rank_constant": 60, "weights": [1.5, 0.75]},
+                ),
+            },
+        )
+    ]
+    assert result.client_duration_ms == pytest.approx(7.0)
+    assert result.documents[0].attributes == {"title": "Fused"}
+    score = result.documents[0].score
+    assert score.kind is ScoreKind.RRF
+    assert score.direction is ScoreDirection.HIGHER_IS_BETTER
+    assert score.source is ScoreSource.TURBOPUFFER_DIST
+    assert score.value == 0.0315
+
+
+@pytest.mark.asyncio
+async def test_debug_hybrid_probe_is_separate_and_preserves_raw_score_semantics() -> None:
+    namespace = FakeNamespace()
+    query_vector = unit_vector(2, 0)
+    namespace.multi_query_response = FakeMultiResponse(
+        results=[
+            FakeMultiResult(rows=[{"id": "lexical", "$dist": 8.0, "title": "Lexical"}]),
+            FakeMultiResult(
+                rows=[
+                    {
+                        "id": "semantic",
+                        "$dist": 0.125,
+                        "title": "Semantic",
+                        "vector": query_vector,
+                    }
+                ]
+            ),
+        ]
+    )
+    provider, _ = make_provider(namespace, timer=clock(4.0, 4.003))
+
+    result = await provider.probe_hybrid_candidates(
+        namespace="fixture",
+        lexical_fields=(("title", 2.0), ("body", 1.0)),
+        query_text="chmod command",
+        vector_attribute="vector",
+        query_vector=query_vector,
+        candidate_k=25,
+        include_attributes=("title",),
+        consistency="eventual",
+        distance_metric="cosine_distance",
+    )
+
+    assert namespace.calls == [
+        (
+            "multi_query",
+            {
+                "queries": [
+                    {
+                        "limit": 25,
+                        "include_attributes": ["title"],
+                        "rank_by": (
+                            "Sum",
+                            [
+                                ("Product", 2.0, ("title", "BM25", "chmod command")),
+                                ("Product", 1.0, ("body", "BM25", "chmod command")),
+                            ],
+                        ),
+                    },
+                    {
+                        "limit": 25,
+                        "include_attributes": ["title"],
+                        "rank_by": ("vector", "ANN", query_vector),
+                        "distance_metric": "cosine_distance",
+                    },
+                ],
+                "consistency": {"level": "eventual"},
+            },
+        )
+    ]
+    assert result.client_duration_ms == pytest.approx(3.0)
+    assert result.bm25_documents[0].score.kind is ScoreKind.BM25
+    assert result.ann_documents[0].score.kind is ScoreKind.VECTOR_DISTANCE
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("result_count", [0, 2])
+async def test_hybrid_rrf_rejects_unexpected_server_result_shapes(result_count: int) -> None:
+    namespace = FakeNamespace()
+    namespace.multi_query_response = FakeMultiResponse(
+        results=[FakeMultiResult(rows=[]) for _ in range(result_count)]
+    )
+    provider, _ = make_provider(namespace)
+
+    with pytest.raises(ValueError, match="unexpected result count"):
+        await provider.query_hybrid_rrf(
+            namespace="fixture",
+            lexical_fields=(("title", 2.0), ("body", 1.0)),
+            query_text="query",
+            vector_attribute="vector",
+            query_vector=unit_vector(2, 0),
+            candidate_k=10,
+            result_k=5,
+            include_attributes=(),
+            rank_constant=60,
+            weights=(1.0, 1.0),
+        )
 
 
 @pytest.mark.asyncio
@@ -377,7 +616,7 @@ async def test_client_and_namespace_are_reused_and_close_is_idempotent() -> None
 
     await provider.query_bm25(
         namespace="same",
-        text_attribute="body",
+        lexical_fields=(("title", 2.0), ("body", 1.0)),
         query_text="one",
         top_k=1,
         include_attributes=(),
@@ -474,7 +713,7 @@ async def test_provider_errors_are_mapped_without_secret_material(
     with pytest.raises(ProviderError) as raised:
         await provider.query_bm25(
             namespace="fixture",
-            text_attribute="body",
+            lexical_fields=(("title", 2.0), ("body", 1.0)),
             query_text="secret test",
             top_k=1,
             include_attributes=(),
@@ -518,7 +757,7 @@ async def test_every_sdk_path_detaches_secret_bearing_exception_context(operatio
         if operation == "query":
             await provider.query_bm25(
                 namespace="fixture",
-                text_attribute="body",
+                lexical_fields=(("title", 2.0), ("body", 1.0)),
                 query_text="safe query",
                 top_k=1,
                 include_attributes=(),

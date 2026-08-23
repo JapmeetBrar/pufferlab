@@ -9,6 +9,7 @@ from pufferlab.contracts.common import JsonValue, ObservedScore
 type ConsistencyLevel = Literal["strong", "eventual"]
 type DistanceMetric = Literal["cosine_distance", "euclidean_squared"]
 type DocumentId = str | int
+type LexicalFieldWeights = tuple[tuple[str, float], ...]
 
 
 class FullTextSearchSchema(TypedDict, total=False):
@@ -69,6 +70,15 @@ class ProviderDocument:
 @dataclass(frozen=True, slots=True)
 class ProviderQueryResult:
     documents: tuple[ProviderDocument, ...]
+    client_duration_ms: float
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderHybridProbeResult:
+    """Debug-only raw lists from one same-snapshot BM25/ANN multi-query."""
+
+    bm25_documents: tuple[ProviderDocument, ...]
+    ann_documents: tuple[ProviderDocument, ...]
     client_duration_ms: float
 
 

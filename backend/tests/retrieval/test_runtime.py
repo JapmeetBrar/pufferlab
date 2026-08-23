@@ -8,6 +8,7 @@ from pufferlab.contracts.filters import FilterLogical, FilterPredicate, LogicalO
 from pufferlab.contracts.search import SearchCompareRequest
 from pufferlab.datasets.loader import load_fixture_corpus
 from pufferlab.main import create_app
+from pufferlab.providers.rerankers import Reranker
 from pufferlab.providers.types import ProviderQueryResult
 from pufferlab.retrieval.errors import SearchError
 from pufferlab.retrieval.runtime import RuntimeSearchBackend
@@ -22,6 +23,7 @@ class FakeProvider:
         self.bm25_calls: list[dict[str, object]] = []
         self.ann_calls: list[dict[str, object]] = []
         self.closed = False
+        self.close_calls = 0
 
     async def query_bm25(self, **kwargs: object) -> ProviderQueryResult:
         self.bm25_calls.append(kwargs)
@@ -32,6 +34,7 @@ class FakeProvider:
         return ProviderQueryResult(documents=(), client_duration_ms=2.0)
 
     async def close(self) -> None:
+        self.close_calls += 1
         self.closed = True
 
 
@@ -110,7 +113,7 @@ async def test_runtime_uses_exact_manifest_and_lazily_reuses_clients() -> None:
         provider_factory=provider_factory,
         embedder_factory=embedder_factory,
     )
-    bm25, vector = runtime.list_configs()
+    bm25, vector, _, _ = runtime.list_configs()
 
     assert provider_factory.calls == []
     assert embedder_factory.calls == []
@@ -153,7 +156,7 @@ async def test_runtime_discovers_configs_without_server_credentials() -> None:
     )
     summaries = runtime.list_configs()
 
-    assert len(summaries) == 2
+    assert len(summaries) == 4
     with pytest.raises(SearchError, match="not configured") as caught:
         await runtime.compare(
             SearchCompareRequest(
@@ -277,3 +280,41 @@ async def test_runtime_factory_failures_are_detached_and_redacted() -> None:
     assert caught.value.__context__ is None
     assert "factory-secret-marker" not in repr(caught.value)
     assert "factory-secret-marker" not in formatted
+
+
+class SecretRerankerFactory:
+    def __call__(self, *, model: str, revision: str) -> Reranker:
+        del model, revision
+        raise RuntimeError("reranker-factory-secret-marker")
+
+
+@pytest.mark.asyncio
+async def test_runtime_closes_partially_constructed_provider_exactly_once() -> None:
+    corpus = load_fixture_corpus(FIXTURE_DIR)
+    provider_factory = FakeProviderFactory()
+    runtime = RuntimeSearchBackend(
+        settings=_settings(),
+        manifest=corpus.manifest,
+        provider_factory=provider_factory,
+        embedder_factory=FakeEmbedderFactory(),
+        reranker_factory=SecretRerankerFactory(),
+    )
+    bm25, vector, _, _ = runtime.list_configs()
+
+    with pytest.raises(SearchError) as caught:
+        await runtime.compare(
+            SearchCompareRequest(
+                query_text="query",
+                config_ids=[bm25.id, vector.id],
+            )
+        )
+
+    formatted = "".join(traceback.format_exception(caught.value))
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    assert "reranker-factory-secret-marker" not in repr(caught.value)
+    assert "reranker-factory-secret-marker" not in formatted
+    assert provider_factory.provider.close_calls == 1
+
+    await runtime.close()
+    assert provider_factory.provider.close_calls == 1

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from typing import Protocol
 
 from pufferlab.config import Settings
@@ -11,6 +12,12 @@ from pufferlab.contracts.search import SearchCompareRequest, SearchCompareRespon
 from pufferlab.datasets.loader import load_fixture_corpus
 from pufferlab.datasets.models import DatasetManifest
 from pufferlab.datasets.schema import compile_namespace_write_spec
+from pufferlab.providers.rerankers import (
+    DEFAULT_RERANKER_MODEL,
+    DEFAULT_RERANKER_REVISION,
+    Reranker,
+    SentenceTransformersReranker,
+)
 from pufferlab.providers.turbopuffer import TurbopufferProvider
 from pufferlab.retrieval.config import SearchConfigCatalog, build_search_catalog
 from pufferlab.retrieval.embeddings import SentenceTransformerQueryEmbedder
@@ -34,6 +41,10 @@ class _EmbedderFactory(Protocol):
     ) -> QueryEmbedder: ...
 
 
+class _RerankerFactory(Protocol):
+    def __call__(self, *, model: str, revision: str) -> Reranker: ...
+
+
 class RuntimeSearchBackend:
     """Expose config discovery eagerly and initialize network/model clients on first compare."""
 
@@ -44,6 +55,7 @@ class RuntimeSearchBackend:
         manifest: DatasetManifest,
         provider_factory: _ProviderFactory | None = None,
         embedder_factory: _EmbedderFactory | None = None,
+        reranker_factory: _RerankerFactory | None = None,
     ) -> None:
         self._settings = settings
         self._manifest = manifest
@@ -54,6 +66,7 @@ class RuntimeSearchBackend:
         self._embedder_factory: _EmbedderFactory = (
             embedder_factory or SentenceTransformerQueryEmbedder
         )
+        self._reranker_factory: _RerankerFactory = reranker_factory or SentenceTransformersReranker
         self._service: SearchCompareService | None = None
         self._service_lock = asyncio.Lock()
         self._closed = False
@@ -86,10 +99,10 @@ class RuntimeSearchBackend:
             return self._service
         async with self._service_lock:
             if self._service is None:
-                self._service = self._build_service()
+                self._service = await self._build_service()
         return self._service
 
-    def _build_service(self) -> SearchCompareService:
+    async def _build_service(self) -> SearchCompareService:
         namespace = self._settings.pufferlab_search_namespace
         api_key = self._settings.turbopuffer_api_key
         if namespace is None or not namespace.strip() or api_key is None:
@@ -100,6 +113,7 @@ class RuntimeSearchBackend:
 
         failure: SearchError | None = None
         service: SearchCompareService | None = None
+        provider: RetrievalProvider | None = None
         try:
             embedder = self._embedder_factory(
                 model=self._manifest.embedding.model,
@@ -110,16 +124,24 @@ class RuntimeSearchBackend:
                 api_key=secret,
                 region=self._settings.turbopuffer_region,
             )
+            reranker = self._reranker_factory(
+                model=DEFAULT_RERANKER_MODEL,
+                revision=DEFAULT_RERANKER_REVISION,
+            )
             service = SearchCompareService(
                 namespace=namespace,
                 catalog=self._catalog,
                 write_spec=self._write_spec,
                 provider=provider,
                 query_embedder=embedder,
+                reranker=reranker,
             )
         except Exception:
             failure = search_unavailable()
         if failure is not None:
+            if provider is not None:
+                with suppress(Exception):
+                    await provider.close()
             raise failure from None
         assert service is not None
         return service
