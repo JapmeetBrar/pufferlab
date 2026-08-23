@@ -27,6 +27,43 @@ Milestone 2 does not include the eval dashboard, regression deep-link UI, or for
 remain Milestone 3. It also does not add accounts, hosted services, a distributed queue, inferred
 provider internals, or raw licensed corpus data to Git.
 
+## Pinned dataset provenance and artifact policy
+
+M2-D uses one acquisition chain and must fail closed if any identifier or checksum drifts:
+
+| Layer | Exact source lock | Governing obligation |
+|---|---|---|
+| BEIR acquisition code and checksum registry | [`UKPLab/beir` (now `beir-cellar/beir`) commit `ef83d293`](https://github.com/beir-cellar/beir/tree/ef83d29307061c65d04b035b4f4e7c18bd8374af); [`download_dataset.py`](https://github.com/beir-cellar/beir/blob/ef83d29307061c65d04b035b4f4e7c18bd8374af/examples/dataset/download_dataset.py) and [`md5.csv`](https://github.com/beir-cellar/beir/blob/ef83d29307061c65d04b035b4f4e7c18bd8374af/examples/dataset/md5.csv) at that revision | Apache-2.0 applies to BEIR software/distribution tooling; retain its license/citation when code or documentation is reused. |
+| BEIR archive | [Pinned archive URL](https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/cqadupstack.zip); registry MD5 `4e41456d7df8ee7760a7f866133bda78`; select only `cqadupstack/unix` after whole-archive verification | The implementation checks the published MD5 before extraction, computes a SHA-256 over the completed archive, records that SHA-256 in the checked-in source lock, and rejects any later byte drift. |
+| Original CQADupStack tooling and dataset description | [`D1Doris/CQADupStack` commit `f73fc5b2`](https://github.com/D1Doris/CQADupStack/tree/f73fc5b2cc708c61d33bc76a3de93de0bf5bf584); [Apache-2.0 license](https://github.com/D1Doris/CQADupStack/blob/f73fc5b2cc708c61d33bc76a3de93de0bf5bf584/LICENSE.md); [paper DOI `10.1145/2838931.2838934`](https://doi.org/10.1145/2838931.2838934); documented source dump date `2014-09-26` | Apache-2.0 applies to the repository tooling, not automatically to the underlying post content. Retain the CQADupStack citation and audit any copied preprocessing logic for license/NOTICE duties. |
+| Underlying Unix & Linux Stack Exchange posts | Post identity derived from the pinned 2014 dump and canonical URL `https://unix.stackexchange.com/questions/<post-id>` | [Stack Overflow's license chronology](https://stackoverflow.com/help/licensing) assigns CC BY-SA 2.5 before `2011-04-08` and CC BY-SA 3.0 from that date through the 2014 dump. Preserve source identity and link, identify Unix & Linux Stack Exchange, link both possible licenses, mark transformations, and do not relabel the content Apache-2.0 or CC BY-SA 4.0. |
+
+M2-D checks in `docs/datasets/cqadupstack-unix.md`, a third-party `NOTICE`, and a machine-readable
+source-lock manifest containing the exact URLs, repository revisions, upstream MD5, computed
+SHA-256, archive member paths, expected counts, preprocessing version/hash, and citations. A
+reviewer independently verifies that the lock matches the downloaded bytes before dataset code may
+claim readiness.
+
+The dataset adapter retains, at minimum, `source_dataset`, `source_subset`, original post/query ID,
+canonical post URL, source site, dump date, applied transformation version, and content hash. It
+must inspect and document whether the pinned archive contains enough author/date/revision metadata
+for per-post attribution and license selection. Missing attribution fields are a visible audit
+limitation, never silently invented. Any locally displayed or exported licensed text includes the
+source link and dataset NOTICE; checked-in sample runs use synthetic content only.
+
+The tracked-versus-ignored boundary is explicit:
+
+| Tracked | Ignored and forbidden from Git history |
+|---|---|
+| Adapter/validation code and synthetic tests | Downloaded archives and partial downloads |
+| Source-lock manifest with URLs, revisions, checksums, paths, counts, and hashes—but no post/query text | Extracted corpus, query text, official qrels, and upstream metadata files |
+| CQADupStack/BEIR citations, Apache-2.0 notices, Stack Exchange attribution and CC BY-SA 2.5/3.0 links | Processed documents, query/qrel materializations, attribution sidecars containing upstream text or personal fields |
+| Deterministic curated-50 manifest containing only source query IDs, PufferLab-authored tags/reasons, selection version, and hashes | Embeddings, raw vectors, model/dataset caches, SQLite databases, run exports, logs, and live evidence |
+| Schema/config manifests and synthetic/golden fixtures | Any real title, body, query text, document snippet, author field, or copied upstream README/license body outside the audited NOTICE path |
+
+Tests must prove the ignored paths with `git check-ignore`, reject text-bearing tracked manifests,
+and scan the entire Git history for archive signatures and known sampled source text before review.
+
 ## Dependency and branch graph
 
 ```text
@@ -99,11 +136,16 @@ dependencies are on protected `main`; M2-F is the single goal-finalization PR.
 - **Branch:** `codex/m2-unix-dataset`
 - **Files:** deterministic dataset adapter/manifests, attribution and audit documentation, dataset
   tests, and CLI ingestion service extensions that do not overlap M2-E command routing.
-- **Acceptance:** processing is deterministic and content-addressed; source IDs and URLs preserve
-  Stack Exchange attribution; official qrels map only to retained documents; the curated 50-query
-  set is deterministic and contains exact-token, semantic, hybrid, and reranker cases; raw corpus,
-  generated embeddings, and downloaded archives stay ignored; interruption can resume stable-ID
-  upserts without deleting a caller-supplied namespace.
+- **Acceptance:** the selected source is exactly the pinned acquisition chain above; the published
+  MD5 and locally recorded SHA-256 match before extraction; the source lock and NOTICE pass an
+  independent license/citation audit that distinguishes Apache-2.0 tooling from CC BY-SA 2.5/3.0
+  post content; retained records carry the required source/transform fields and explicitly report
+  unavailable attribution metadata. Processing is deterministic and content-addressed; official
+  qrels map only to retained documents; the curated 50-query ID-only manifest is deterministic and
+  contains PufferLab-authored exact-token, semantic, hybrid, and reranker tags/reasons. Automated
+  tracked-versus-ignored inventory and history scans prove no real corpus/query/qrel text, upstream
+  personal metadata, archive, processed row, embedding, vector, cache, database, export, or log is
+  tracked. Interruption can resume stable-ID upserts without deleting a caller-supplied namespace.
 
 ### M2-E — Evaluation application service and CLI
 
@@ -141,8 +183,10 @@ dependencies are on protected `main`; M2-F is the single goal-finalization PR.
    coverage and error metrics.
 5. All latency is labeled client wall clock. Debug probes and local reranking have separate stages.
 6. Only internally generated, pattern-validated namespace identities may be deleted automatically.
-7. The API key, request headers, raw vectors, licensed raw corpus, and local database never enter
-   tracked files, logs, screenshots, exports, or PR descriptions.
+7. The API key, request headers, raw vectors, licensed source text/qrels/metadata, archives,
+   processed rows, local database, and real run exports never enter tracked files, logs,
+   screenshots, or PR descriptions. Dataset source locks, ID-only selections, hashes, citations,
+   and audited NOTICE material are the only tracked real-dataset artifacts.
 8. Workers never merge their own PRs. Each branch follows the full changes-requested and re-review
    loop before the dedicated reviewer merges it.
 
