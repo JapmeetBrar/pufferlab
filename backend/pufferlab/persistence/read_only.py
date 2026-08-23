@@ -19,6 +19,7 @@ from sqlalchemy.pool import StaticPool
 from pufferlab.persistence.repository import PufferLabRepository
 
 _CURRENT_REVISION = "20260822_0001"
+_DESCRIPTOR_ROOT = Path("/dev/fd")
 
 
 class ReadOnlyCatalogError(RuntimeError):
@@ -48,6 +49,78 @@ class _OpenOutcome:
     control: _OpenControl = _OpenControl.NONE
 
 
+class _GuardedDatabaseFile:
+    """Own the exact no-follow file description selected for this catalog."""
+
+    __slots__ = ("_fd", "identity")
+
+    def __init__(self, fd: int, identity: _FileIdentity) -> None:
+        self._fd: int | None = fd
+        self.identity = identity
+
+    @classmethod
+    def acquire(cls, path: Path) -> _GuardedDatabaseFile:
+        if os.name != "posix":
+            raise ReadOnlyCatalogError()
+        no_follow = getattr(os, "O_NOFOLLOW", None)
+        close_on_exec = getattr(os, "O_CLOEXEC", None)
+        if (
+            not isinstance(no_follow, int)
+            or no_follow == 0
+            or not isinstance(close_on_exec, int)
+            or close_on_exec == 0
+        ):
+            raise ReadOnlyCatalogError()
+        fd: int | None = None
+        try:
+            fd = os.open(path, os.O_RDONLY | no_follow | close_on_exec)
+            identity = _identity_from_metadata(os.fstat(fd))
+            guard = cls(fd, identity)
+            guard.verify()
+            return guard
+        except BaseException:
+            if fd is not None:
+                with suppress(BaseException):
+                    os.close(fd)
+            raise
+
+    @property
+    def descriptor_path(self) -> Path:
+        fd = self._fd
+        if fd is None or not _DESCRIPTOR_ROOT.is_absolute():
+            raise ReadOnlyCatalogError()
+        descriptor = _DESCRIPTOR_ROOT / str(fd)
+        try:
+            close_on_exec = getattr(os, "O_CLOEXEC", None)
+            if not isinstance(close_on_exec, int) or close_on_exec == 0:
+                raise ReadOnlyCatalogError()
+            descriptor_fd = os.open(descriptor, os.O_RDONLY | close_on_exec)
+            try:
+                descriptor_identity = _identity_from_metadata(os.fstat(descriptor_fd))
+            finally:
+                os.close(descriptor_fd)
+        except Exception as error:
+            _detach_exception(error)
+            raise ReadOnlyCatalogError() from None
+        if descriptor_identity != self.identity:
+            raise ReadOnlyCatalogError()
+        return descriptor
+
+    def sqlite_uri(self) -> str:
+        return f"{self.descriptor_path.as_uri()}?mode=ro&immutable=1"
+
+    def verify(self) -> None:
+        fd = self._fd
+        if fd is None or _identity_from_metadata(os.fstat(fd)) != self.identity:
+            raise ReadOnlyCatalogError()
+
+    def close(self) -> None:
+        fd = self._fd
+        self._fd = None
+        if fd is not None:
+            os.close(fd)
+
+
 class _PinnedConnectionCreator:
     """Give SQLAlchemy one already-open handle and refuse every attempted reopen."""
 
@@ -70,23 +143,40 @@ class _PinnedConnectionCreator:
         if connection is not None:
             connection.close()
 
+    @property
+    def claimed(self) -> bool:
+        return self._claimed
+
+    def release_after_engine_dispose(self) -> None:
+        self._connection = None
+
 
 class ExistingReadOnlyCatalog:
     """Own a validated immutable engine and its normal read repositories."""
 
-    __slots__ = ("_closed", "_creator", "_engine", "_identity", "_path", "repository")
+    __slots__ = (
+        "_closed",
+        "_creator",
+        "_engine",
+        "_guard",
+        "_identity",
+        "_path",
+        "repository",
+    )
 
     def __init__(
         self,
         *,
         path: Path,
         identity: _FileIdentity,
+        guard: _GuardedDatabaseFile,
         creator: _PinnedConnectionCreator,
         engine: Engine,
         repository: PufferLabRepository,
     ) -> None:
         self._path = path
         self._identity = identity
+        self._guard = guard
         self._creator = creator
         self._engine = engine
         self.repository = repository
@@ -98,11 +188,13 @@ class ExistingReadOnlyCatalog:
         self._closed = True
         engine = self._engine
         creator = self._creator
+        guard = self._guard
         path = self._path
         identity = self._identity
         failed, control = _dispose_and_validate(
             engine,
             creator=creator,
+            guard=guard,
             path=path,
             identity=identity,
         )
@@ -112,11 +204,13 @@ class ExistingReadOnlyCatalog:
         # value-free helper raises.
         self._engine = cast(Engine, None)
         self._creator = cast(_PinnedConnectionCreator, None)
+        self._guard = cast(_GuardedDatabaseFile, None)
         self._identity = _FileIdentity(0, 0, 0, 0)
         self._path = Path()
         self.repository = cast(PufferLabRepository, None)
         engine = cast(Engine, None)
         creator = cast(_PinnedConnectionCreator, None)
+        guard = cast(_GuardedDatabaseFile, None)
         path = Path()
         identity = _FileIdentity(0, 0, 0, 0)
         if control is _OpenControl.KEYBOARD_INTERRUPT:
@@ -165,6 +259,7 @@ def _open_existing_read_only_catalog_inner(path: Path) -> _OpenOutcome:
 
     engine: Engine | None = None
     creator: _PinnedConnectionCreator | None = None
+    guard: _GuardedDatabaseFile | None = None
     resolved: Path | None = None
     identity: _FileIdentity | None = None
     try:
@@ -174,10 +269,12 @@ def _open_existing_read_only_catalog_inner(path: Path) -> _OpenOutcome:
         # rejected when symbolic, and device/inode/size/mtime plus sidecars are rechecked after
         # validation and disposal to detect replacement around the SQLite open.
         resolved = path.resolve(strict=True)
-        identity = _file_identity(resolved)
-        uri = f"{resolved.as_uri()}?mode=ro&immutable=1"
+        guard = _GuardedDatabaseFile.acquire(resolved)
+        identity = guard.identity
+        if _sidecars_exist(resolved) or _file_identity(resolved) != identity:
+            raise ReadOnlyCatalogError()
         connection = sqlite3.connect(
-            uri,
+            guard.sqlite_uri(),
             uri=True,
             check_same_thread=False,
         )
@@ -194,13 +291,17 @@ def _open_existing_read_only_catalog_inner(path: Path) -> _OpenOutcome:
             class_=Session,
             expire_on_commit=False,
         )
+        _validate_database_binding(engine, expected_path=guard.descriptor_path)
+        guard.verify()
         _validate_catalog(engine)
+        guard.verify()
         if _sidecars_exist(resolved) or _file_identity(resolved) != identity:
             raise ReadOnlyCatalogError()
         return _OpenOutcome(
             catalog=ExistingReadOnlyCatalog(
                 path=resolved,
                 identity=identity,
+                guard=guard,
                 creator=creator,
                 engine=engine,
                 repository=PufferLabRepository(session_factory),
@@ -208,17 +309,30 @@ def _open_existing_read_only_catalog_inner(path: Path) -> _OpenOutcome:
         )
     except KeyboardInterrupt as error:
         _detach_exception(error)
-        _dispose_failed_open(engine, creator=creator, path=resolved, identity=identity)
+        _dispose_failed_open(
+            engine,
+            creator=creator,
+            guard=guard,
+            path=resolved,
+            identity=identity,
+        )
         return _OpenOutcome(control=_OpenControl.KEYBOARD_INTERRUPT)
     except SystemExit as error:
         _detach_exception(error)
-        _dispose_failed_open(engine, creator=creator, path=resolved, identity=identity)
+        _dispose_failed_open(
+            engine,
+            creator=creator,
+            guard=guard,
+            path=resolved,
+            identity=identity,
+        )
         return _OpenOutcome(control=_OpenControl.SYSTEM_EXIT)
     except Exception as error:
         _detach_exception(error)
         control = _dispose_failed_open(
             engine,
             creator=creator,
+            guard=guard,
             path=resolved,
             identity=identity,
         )
@@ -229,13 +343,14 @@ def _dispose_and_validate(
     engine: Engine,
     *,
     creator: _PinnedConnectionCreator,
+    guard: _GuardedDatabaseFile,
     path: Path,
     identity: _FileIdentity,
 ) -> tuple[bool, _OpenControl]:
     failed = False
     control = _OpenControl.NONE
     try:
-        engine.dispose()
+        guard.verify()
     except KeyboardInterrupt as error:
         _detach_exception(error)
         control = _OpenControl.KEYBOARD_INTERRUPT
@@ -244,8 +359,24 @@ def _dispose_and_validate(
         control = _OpenControl.SYSTEM_EXIT
     except Exception:
         failed = True
+    dispose_failed, dispose_control = _dispose_engine_and_connection(engine, creator=creator)
+    failed = failed or dispose_failed
+    if control is _OpenControl.NONE:
+        control = dispose_control
     try:
-        creator.close()
+        guard.verify()
+    except KeyboardInterrupt as error:
+        _detach_exception(error)
+        if control is _OpenControl.NONE:
+            control = _OpenControl.KEYBOARD_INTERRUPT
+    except SystemExit as error:
+        _detach_exception(error)
+        if control is _OpenControl.NONE:
+            control = _OpenControl.SYSTEM_EXIT
+    except Exception:
+        failed = True
+    try:
+        guard.close()
     except KeyboardInterrupt as error:
         _detach_exception(error)
         if control is _OpenControl.NONE:
@@ -277,13 +408,14 @@ def _dispose_failed_open(
     engine: Engine | None,
     *,
     creator: _PinnedConnectionCreator | None,
+    guard: _GuardedDatabaseFile | None,
     path: Path | None,
     identity: _FileIdentity | None,
 ) -> _OpenControl:
     control = _OpenControl.NONE
-    if engine is not None:
+    if guard is not None:
         try:
-            engine.dispose()
+            guard.verify()
         except KeyboardInterrupt as error:
             _detach_exception(error)
             control = _OpenControl.KEYBOARD_INTERRUPT
@@ -292,9 +424,24 @@ def _dispose_failed_open(
             control = _OpenControl.SYSTEM_EXIT
         except Exception:
             pass
-    if creator is not None:
+    _dispose_failed, dispose_control = _dispose_engine_and_connection(engine, creator=creator)
+    if control is _OpenControl.NONE:
+        control = dispose_control
+    if guard is not None:
         try:
-            creator.close()
+            guard.verify()
+        except KeyboardInterrupt as error:
+            _detach_exception(error)
+            if control is _OpenControl.NONE:
+                control = _OpenControl.KEYBOARD_INTERRUPT
+        except SystemExit as error:
+            _detach_exception(error)
+            if control is _OpenControl.NONE:
+                control = _OpenControl.SYSTEM_EXIT
+        except Exception:
+            pass
+        try:
+            guard.close()
         except KeyboardInterrupt as error:
             _detach_exception(error)
             if control is _OpenControl.NONE:
@@ -320,6 +467,45 @@ def _dispose_failed_open(
         except Exception:
             pass
     return control
+
+
+def _dispose_engine_and_connection(
+    engine: Engine | None,
+    *,
+    creator: _PinnedConnectionCreator | None,
+) -> tuple[bool, _OpenControl]:
+    failed = False
+    control = _OpenControl.NONE
+    engine_disposed = False
+    if engine is not None:
+        try:
+            engine.dispose()
+            engine_disposed = True
+        except KeyboardInterrupt as error:
+            _detach_exception(error)
+            control = _OpenControl.KEYBOARD_INTERRUPT
+        except SystemExit as error:
+            _detach_exception(error)
+            control = _OpenControl.SYSTEM_EXIT
+        except Exception:
+            failed = True
+    if creator is not None:
+        if engine_disposed and creator.claimed:
+            creator.release_after_engine_dispose()
+        else:
+            try:
+                creator.close()
+            except KeyboardInterrupt as error:
+                _detach_exception(error)
+                if control is _OpenControl.NONE:
+                    control = _OpenControl.KEYBOARD_INTERRUPT
+            except SystemExit as error:
+                _detach_exception(error)
+                if control is _OpenControl.NONE:
+                    control = _OpenControl.SYSTEM_EXIT
+            except Exception:
+                failed = True
+    return failed, control
 
 
 def _detach_exception(error: BaseException) -> None:
@@ -354,20 +540,25 @@ def _validate_catalog(engine: Engine) -> None:
             raise ReadOnlyCatalogError()
 
 
+def _validate_database_binding(engine: Engine, *, expected_path: Path) -> None:
+    with engine.connect() as connection:
+        databases = connection.exec_driver_sql("PRAGMA database_list").all()
+        if [(row[1], row[2]) for row in databases] != [("main", str(expected_path))]:
+            raise ReadOnlyCatalogError()
+
+
 def _configure_connection(connection: sqlite3.Connection) -> None:
-    try:
-        connection.execute("PRAGMA query_only=ON")
-        connection.execute("PRAGMA temp_store=MEMORY")
-        connection.execute("PRAGMA foreign_keys=ON")
-        connection.execute("PRAGMA trusted_schema=OFF")
-    except BaseException:
-        with suppress(BaseException):
-            connection.close()
-        raise
+    connection.execute("PRAGMA query_only=ON")
+    connection.execute("PRAGMA temp_store=MEMORY")
+    connection.execute("PRAGMA foreign_keys=ON")
+    connection.execute("PRAGMA trusted_schema=OFF")
 
 
 def _file_identity(path: Path) -> _FileIdentity:
-    metadata = path.stat(follow_symlinks=False)
+    return _identity_from_metadata(path.stat(follow_symlinks=False))
+
+
+def _identity_from_metadata(metadata: os.stat_result) -> _FileIdentity:
     if not stat.S_ISREG(metadata.st_mode):
         raise ReadOnlyCatalogError()
     return _FileIdentity(
