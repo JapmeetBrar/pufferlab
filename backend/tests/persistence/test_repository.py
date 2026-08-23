@@ -73,6 +73,54 @@ def test_immutable_revision_graph_round_trips_exactly(
         repository.put_query_set(sample_graph.query_set, changed_queries)
 
 
+def test_revision_selectors_are_deterministic_and_dataset_scoped(
+    repository: PufferLabRepository,
+    sample_graph: SampleGraph,
+) -> None:
+    persist_graph(repository, sample_graph)
+
+    other_dataset = sample_graph.dataset.model_copy(
+        update={
+            "id": stable_uuid("other-dataset"),
+            "namespace": "pufferlab-test-other",
+        }
+    )
+    other_config = sample_graph.configs[0].model_copy(
+        update={
+            "id": stable_uuid("other-config"),
+            "dataset_version_id": other_dataset.id,
+            "name": "other-bm25",
+            "config_hash": "other-config-hash",
+        }
+    )
+    other_query_set = sample_graph.query_set.model_copy(
+        update={
+            "id": stable_uuid("other-query-set"),
+            "dataset_version_id": other_dataset.id,
+            "name": "other queries",
+            "content_hash": "other-query-set-hash",
+        }
+    )
+    repository.put_dataset_version(other_dataset)
+    repository.put_retrieval_config(other_config)
+    repository.put_query_set(other_query_set, sample_graph.queries)
+
+    assert repository.list_dataset_versions() == sorted(
+        [sample_graph.dataset, other_dataset],
+        key=lambda value: (value.created_at, str(value.id)),
+    )
+    assert repository.list_retrieval_configs(dataset_version_id=other_dataset.id) == [other_config]
+    assert repository.list_query_sets(dataset_version_id=other_dataset.id) == [other_query_set]
+    assert {value.id for value in repository.list_retrieval_configs()} == {
+        *(value.id for value in sample_graph.configs),
+        other_config.id,
+    }
+    assert {value.id for value in repository.list_query_sets()} == {
+        sample_graph.query_set.id,
+        other_query_set.id,
+    }
+
+
 def test_revision_run_and_outcome_payload_times_are_canonical_utc(
     database: Database,
     repository: PufferLabRepository,

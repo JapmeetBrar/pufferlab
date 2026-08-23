@@ -634,6 +634,11 @@ def load_curated_unix_corpus(
     )
 
 
+def load_unix_dataset_manifest(path: Path) -> DatasetManifest:
+    """Load the checked Unix schema/model manifest through the strict JSON boundary."""
+    return _load_model_json(path, DatasetManifest)
+
+
 def verify_curated_query_manifest(
     processed_path: Path,
     curated_manifest_path: Path,

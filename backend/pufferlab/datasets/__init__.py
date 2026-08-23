@@ -1,7 +1,11 @@
 """Deterministic dataset loading, identity, and ingestion primitives."""
 
 from pufferlab.datasets.checkpoints import IngestionCheckpointStore
-from pufferlab.datasets.cqadupstack import load_curated_unix_corpus, prepare_unix_pack
+from pufferlab.datasets.cqadupstack import (
+    load_curated_unix_corpus,
+    load_unix_dataset_manifest,
+    prepare_unix_pack,
+)
 from pufferlab.datasets.identity import PUFFERLAB_NAMESPACE_UUID, document_uuid
 from pufferlab.datasets.ingestion import IngestionCheckpoint, IngestionService
 from pufferlab.datasets.loader import load_fixture_corpus
@@ -35,5 +39,6 @@ __all__ = [
     "load_curated_unix_corpus",
     "load_curated_unix_local_pack",
     "load_fixture_corpus",
+    "load_unix_dataset_manifest",
     "prepare_unix_pack",
 ]

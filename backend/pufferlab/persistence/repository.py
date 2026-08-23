@@ -95,6 +95,17 @@ class PufferLabRepository:
                 raise RecordNotFoundError(f"dataset version {dataset_version_id} was not found")
             return DatasetVersion.model_validate_json(row.payload_json)
 
+    def list_dataset_versions(self) -> list[DatasetVersion]:
+        """Return immutable dataset revisions in a deterministic selection order."""
+        with self._session_factory() as session:
+            rows = session.scalars(
+                select(DatasetVersionRow).order_by(
+                    DatasetVersionRow.created_at,
+                    DatasetVersionRow.id,
+                )
+            ).all()
+            return [DatasetVersion.model_validate_json(row.payload_json) for row in rows]
+
     def put_retrieval_config(self, value: RetrievalConfig) -> RetrievalConfig:
         payload = canonical_json(value)
         created_at = canonical_utc(value.created_at, field_name="retrieval_config.created_at")
@@ -125,6 +136,26 @@ class PufferLabRepository:
             if row is None:
                 raise RecordNotFoundError(f"retrieval config {config_id} was not found")
             return RetrievalConfig.model_validate_json(row.payload_json)
+
+    def list_retrieval_configs(
+        self,
+        *,
+        dataset_version_id: UUID | None = None,
+    ) -> list[RetrievalConfig]:
+        """Return immutable config revisions, optionally scoped to one dataset revision."""
+        with self._session_factory() as session:
+            statement = select(RetrievalConfigRow)
+            if dataset_version_id is not None:
+                statement = statement.where(
+                    RetrievalConfigRow.dataset_version_id == str(dataset_version_id)
+                )
+            rows = session.scalars(
+                statement.order_by(
+                    RetrievalConfigRow.created_at,
+                    RetrievalConfigRow.id,
+                )
+            ).all()
+            return [RetrievalConfig.model_validate_json(row.payload_json) for row in rows]
 
     def put_query_set(
         self,
@@ -193,6 +224,21 @@ class PufferLabRepository:
             if row is None:
                 raise RecordNotFoundError(f"query set {query_set_id} was not found")
             return self._load_query_set(session, row)
+
+    def list_query_sets(
+        self,
+        *,
+        dataset_version_id: UUID | None = None,
+    ) -> list[QuerySet]:
+        """Return query-set revisions without loading licensed query or qrel payloads."""
+        with self._session_factory() as session:
+            statement = select(QuerySetRow)
+            if dataset_version_id is not None:
+                statement = statement.where(
+                    QuerySetRow.dataset_version_id == str(dataset_version_id)
+                )
+            rows = session.scalars(statement.order_by(QuerySetRow.created_at, QuerySetRow.id)).all()
+            return [QuerySet.model_validate_json(row.payload_json) for row in rows]
 
     def create_run(self, value: EvalRun) -> EvalRun:
         self._validate_new_run_shape(value)

@@ -199,7 +199,9 @@ class EvaluationApplicationService:
     ) -> EvalRun:
         created = self.create_run(request, environment, run_id=run_id)
         self.start_run(created.id, on_progress=on_progress)
-        return await self.drain(created.id)
+        # The application owns the scheduled task. Caller cancellation must not directly cancel
+        # it; the CLI catches cancellation and requests cooperative manager cancellation instead.
+        return await asyncio.shield(self.drain(created.id))
 
     async def cancel(self, run_id: UUID) -> EvalRun:
         """Request cooperative manager cancellation and drain already-started work."""

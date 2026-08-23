@@ -8,7 +8,7 @@ import sys
 from collections.abc import Callable, Sequence
 from contextlib import suppress
 from pathlib import Path
-from typing import NoReturn, Protocol, TextIO
+from typing import Protocol, TextIO
 from uuid import UUID, uuid4
 
 from pufferlab.cli.evaluation import (
@@ -76,7 +76,7 @@ def main(
             error_output=error_output,
         )
 
-    factory = cli_application_factory or _missing_application_factory
+    factory = cli_application_factory or _default_application_factory
     try:
         settings = settings_factory()
         if arguments.command == "dataset" and arguments.dataset_command == "ingest-unix":
@@ -502,9 +502,10 @@ def _failure_message(arguments: argparse.Namespace) -> str:
     return "evaluation export failed"
 
 
-def _missing_application_factory(settings: Settings) -> NoReturn:
-    del settings
-    raise EvaluationCommandError("evaluation application composition is unavailable")
+def _default_application_factory(settings: Settings) -> CliApplication:
+    from pufferlab.cli.runtime import RuntimeCliApplication
+
+    return RuntimeCliApplication(settings)
 
 
 def _positive_int(value: str) -> int:

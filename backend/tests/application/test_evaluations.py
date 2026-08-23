@@ -492,6 +492,35 @@ async def test_cancellation_uses_manager_and_drains_started_outcomes(
 
 
 @pytest.mark.asyncio
+async def test_caller_cancellation_cannot_directly_cancel_the_owned_job(
+    repository: PufferLabRepository,
+) -> None:
+    seed, configs = _seed()
+    backend = FakeSearchBackend(configs)
+    backend.block = True
+    service = _service(repository, backend)
+    service.seed(seed, configs)
+    request = _request(seed, configs, warmup_query_count=0, max_concurrency=2)
+    run_id = _id("caller-cancel-run")
+    caller = asyncio.create_task(service.run(request, _environment(request), run_id=run_id))
+    await backend.started.wait()
+
+    caller.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await caller
+    assert repository.get_run(run_id).status is EvalRunStatus.RUNNING
+
+    cancellation = asyncio.create_task(service.cancel(run_id))
+    await asyncio.sleep(0)
+    backend.release.set()
+    cancelled = await cancellation
+
+    assert cancelled.status is EvalRunStatus.CANCELLED
+    assert len(backend.calls) == 2
+    assert len(repository.list_outcomes(run_id)) == 2
+
+
+@pytest.mark.asyncio
 async def test_close_cooperatively_cancels_a_blocked_warmup_without_outcomes(
     repository: PufferLabRepository,
 ) -> None:

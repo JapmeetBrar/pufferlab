@@ -63,9 +63,14 @@ class EvalExportOptions:
 
 
 class SeedResult(Protocol):
-    dataset_version: DatasetVersion
-    query_set: QuerySet
-    configs: Sequence[RetrievalConfig]
+    @property
+    def dataset_version(self) -> DatasetVersion: ...
+
+    @property
+    def query_set(self) -> QuerySet: ...
+
+    @property
+    def configs(self) -> Sequence[RetrievalConfig]: ...
 
 
 type ProgressCallback = Callable[[EvalRun], Awaitable[None]]
