@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Iterator
+import traceback
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -9,9 +10,10 @@ from typing import cast
 from uuid import UUID, uuid5
 
 import pytest
+from fastapi.testclient import TestClient
 from pufferlab.application.evaluation_controls import ProviderFreeEvaluationControls
 from pufferlab.application.evaluation_views import EvaluationViewService
-from pufferlab.application.view_errors import EvaluationViewError
+from pufferlab.application.view_errors import EvaluationViewError, evaluation_invalid
 from pufferlab.contracts.datasets import (
     DataOrigin,
     DatasetStatus,
@@ -21,6 +23,7 @@ from pufferlab.contracts.datasets import (
 )
 from pufferlab.contracts.errors import ApiErrorCode, ApiErrorDetail
 from pufferlab.contracts.evals import (
+    ConfigRunSummary,
     CreateEvalRunRequest,
     EvalFailurePayload,
     EvalOutcomeWarning,
@@ -43,10 +46,12 @@ from pufferlab.contracts.retrieval import (
     LexicalSpec,
     RerankerSpec,
     RetrievalConfig,
+    RetrievalConfigSummary,
     RetrievalMode,
     RrfSpec,
     VectorSpec,
 )
+from pufferlab.contracts.search import SearchCompareRequest, SearchCompareResponse
 from pufferlab.evals.metrics import evaluate_ranking
 from pufferlab.evals.models import Judgment
 from pufferlab.jobs.eval_runner import (
@@ -54,9 +59,18 @@ from pufferlab.jobs.eval_runner import (
     encode_outcome_payload,
     finalize_durable_outcomes,
 )
-from pufferlab.persistence import Database, PufferLabRepository, QueryOutcome, QueryOutcomeStatus
-from pufferlab.persistence.canonical import canonical_json
-from pufferlab.persistence.models import QueryOutcomeRow
+from pufferlab.main import create_app
+from pufferlab.persistence import (
+    Database,
+    PersistenceValidationError,
+    PufferLabRepository,
+    QueryOutcome,
+    QueryOutcomeStatus,
+    RecordNotFoundError,
+)
+from pufferlab.persistence.canonical import canonical_json, canonical_utc
+from pufferlab.persistence.models import EvalRunRow, QueryOutcomeRow
+from pufferlab.retrieval.types import SearchExecuteRequest, SearchExecuteResult
 from sqlalchemy import select
 
 _NAMESPACE = UUID("6c8d76a2-495f-4c12-a2cc-9a632ddff602")
@@ -65,6 +79,65 @@ _NOW = datetime(2026, 8, 23, 16, 0, tzinfo=UTC)
 
 def _id(name: str) -> UUID:
     return uuid5(_NAMESPACE, name)
+
+
+class _NoopSearchBackend:
+    def list_configs(self) -> tuple[RetrievalConfigSummary, ...]:
+        return ()
+
+    async def compare(self, request: SearchCompareRequest) -> SearchCompareResponse:
+        raise AssertionError(f"unexpected compare call for {request.query_text}")
+
+    async def search_one(self, request: SearchExecuteRequest) -> SearchExecuteResult:
+        raise AssertionError(f"unexpected search call for {request.query_text}")
+
+    async def close(self) -> None:
+        return None
+
+
+def _rewrite_run(
+    database: Database,
+    run_id: UUID,
+    *,
+    updates: dict[str, object],
+) -> EvalRun:
+    with database.session_factory.begin() as session:
+        row = session.get(EvalRunRow, str(run_id))
+        assert row is not None
+        current = EvalRun.model_validate_json(row.payload_json)
+        rewritten = current.model_copy(update=updates)
+        row.status = rewritten.status.value
+        row.completed_queries = rewritten.completed_queries
+        row.started_at = (
+            canonical_utc(rewritten.started_at, field_name="test.started_at")
+            if rewritten.started_at is not None
+            else None
+        )
+        row.completed_at = (
+            canonical_utc(rewritten.completed_at, field_name="test.completed_at")
+            if rewritten.completed_at is not None
+            else None
+        )
+        row.payload_json = canonical_json(rewritten)
+    return rewritten
+
+
+def _assert_detached_failure(
+    loader: Callable[[], object],
+    *,
+    marker: str,
+    http_status: int,
+) -> EvaluationViewError:
+    with pytest.raises(EvaluationViewError) as raised:
+        loader()
+    error = raised.value
+    assert error.http_status == http_status
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    rendered = "".join(traceback.format_exception(type(error), error, error.__traceback__))
+    assert marker not in rendered
+    assert marker not in repr(error)
+    return error
 
 
 @dataclass(frozen=True, slots=True)
@@ -332,14 +405,35 @@ def _persist_six_status_runs(
     for run in runs.values():
         repository.create_run(run)
 
-    repository.transition_run(runs[EvalRunStatus.RUNNING].id, EvalRunStatus.RUNNING)
-    repository.transition_run(runs[EvalRunStatus.CANCELLED].id, EvalRunStatus.CANCELLED)
-    repository.transition_run(runs[EvalRunStatus.INTERRUPTED].id, EvalRunStatus.RUNNING)
-    repository.transition_run(runs[EvalRunStatus.INTERRUPTED].id, EvalRunStatus.INTERRUPTED)
-    repository.transition_run(runs[EvalRunStatus.FAILED].id, EvalRunStatus.RUNNING)
+    repository.transition_run(
+        runs[EvalRunStatus.RUNNING].id,
+        EvalRunStatus.RUNNING,
+        at=runs[EvalRunStatus.RUNNING].created_at + timedelta(seconds=1),
+    )
+    repository.transition_run(
+        runs[EvalRunStatus.CANCELLED].id,
+        EvalRunStatus.CANCELLED,
+        at=runs[EvalRunStatus.CANCELLED].created_at + timedelta(seconds=1),
+    )
+    repository.transition_run(
+        runs[EvalRunStatus.INTERRUPTED].id,
+        EvalRunStatus.RUNNING,
+        at=runs[EvalRunStatus.INTERRUPTED].created_at + timedelta(seconds=1),
+    )
+    repository.transition_run(
+        runs[EvalRunStatus.INTERRUPTED].id,
+        EvalRunStatus.INTERRUPTED,
+        at=runs[EvalRunStatus.INTERRUPTED].created_at + timedelta(seconds=2),
+    )
+    repository.transition_run(
+        runs[EvalRunStatus.FAILED].id,
+        EvalRunStatus.RUNNING,
+        at=runs[EvalRunStatus.FAILED].created_at + timedelta(seconds=1),
+    )
     repository.transition_run(
         runs[EvalRunStatus.FAILED].id,
         EvalRunStatus.FAILED,
+        at=runs[EvalRunStatus.FAILED].created_at + timedelta(seconds=2),
         error=ApiErrorDetail(
             code=ApiErrorCode.INTERNAL_ERROR,
             message="evaluation failed safely",
@@ -350,7 +444,11 @@ def _persist_six_status_runs(
     )
 
     completed = runs[EvalRunStatus.COMPLETED]
-    repository.transition_run(completed.id, EvalRunStatus.RUNNING)
+    repository.transition_run(
+        completed.id,
+        EvalRunStatus.RUNNING,
+        at=completed.created_at + timedelta(seconds=1),
+    )
     for query_index in range(50):
         for config_index in range(4):
             repository.record_outcome(_outcome(completed, graph, query_index, config_index))
@@ -360,7 +458,11 @@ def _persist_six_status_runs(
         outcomes,
         query_ids=[query.id for query in graph.queries],
     )
-    repository.complete_run(completed.id, summaries)
+    repository.complete_run(
+        completed.id,
+        summaries,
+        at=completed.created_at + timedelta(seconds=2),
+    )
     return {status: repository.get_run(run.id) for status, run in runs.items()}
 
 
@@ -454,7 +556,11 @@ def test_partial_regression_coverage_uses_all_frozen_exclusions_and_exact_qrels(
     repository.put_query_set(graph.query_set, graph.queries)
     run = graph.make_run("partial-coverage")
     repository.create_run(run)
-    repository.transition_run(run.id, EvalRunStatus.RUNNING)
+    repository.transition_run(
+        run.id,
+        EvalRunStatus.RUNNING,
+        at=run.created_at + timedelta(seconds=1),
+    )
 
     # q0 lacks baseline; q1 lacks candidate; q2/q3 fail one side; q4 fails both; q5 has
     # no positive qrels. The remaining exact query IDs are observed successful pairs.
@@ -510,6 +616,198 @@ def test_corrupt_durable_outcome_is_a_redacted_unavailable_error(
         EvaluationViewService(repository).export_eval_run(run.id)
     assert unavailable.value.http_status == 503
     assert str(unavailable.value) == "stored evaluation data is temporarily unavailable"
+
+
+def test_completed_run_rewritten_queued_fails_real_http_projections(
+    database: Database,
+    repository: PufferLabRepository,
+    graph: CanonicalGraph,
+) -> None:
+    completed = _persist_six_status_runs(repository, graph)[EvalRunStatus.COMPLETED]
+    rewritten = _rewrite_run(
+        database,
+        completed.id,
+        updates={"status": EvalRunStatus.QUEUED},
+    )
+    assert rewritten.started_at is not None
+    assert rewritten.completed_at is not None
+    assert rewritten.completed_queries == 50
+    assert len(rewritten.summaries) == 4
+    assert len(repository.list_outcomes(rewritten.id)) == 200
+
+    app = create_app(
+        search_backend=_NoopSearchBackend(),
+        evaluation_views=EvaluationViewService(repository),
+    )
+    with TestClient(app, raise_server_exceptions=False) as client:
+        responses = (
+            client.get("/api/v1/eval-runs?limit=6"),
+            client.get(f"/api/v1/eval-runs/{rewritten.id}"),
+            client.get(f"/api/v1/eval-runs/{rewritten.id}/export"),
+        )
+
+    for response in responses:
+        assert response.status_code == 503
+        assert response.json()["code"] == "internal_error"
+        assert response.json()["message"] == ("stored evaluation data is temporarily unavailable")
+        assert "detail" not in response.json()
+        UUID(response.json()["trace_id"])
+
+
+@pytest.mark.parametrize(
+    "attack",
+    [
+        "start_before_creation",
+        "completion_before_start",
+        "nonterminal_summaries",
+        "progress_mismatch",
+    ],
+)
+def test_impossible_lifecycle_variants_fail_closed(
+    attack: str,
+    database: Database,
+    repository: PufferLabRepository,
+    graph: CanonicalGraph,
+) -> None:
+    run = graph.make_run(f"lifecycle-{attack}")
+    repository.create_run(run)
+    if attack == "start_before_creation":
+        repository.transition_run(
+            run.id,
+            EvalRunStatus.RUNNING,
+            at=run.created_at + timedelta(seconds=1),
+        )
+        _rewrite_run(
+            database,
+            run.id,
+            updates={"started_at": run.created_at - timedelta(seconds=1)},
+        )
+    elif attack == "completion_before_start":
+        repository.transition_run(
+            run.id,
+            EvalRunStatus.RUNNING,
+            at=run.created_at + timedelta(seconds=2),
+        )
+        repository.transition_run(
+            run.id,
+            EvalRunStatus.INTERRUPTED,
+            at=run.created_at + timedelta(seconds=3),
+        )
+        _rewrite_run(
+            database,
+            run.id,
+            updates={"completed_at": run.created_at + timedelta(seconds=1)},
+        )
+    elif attack == "nonterminal_summaries":
+        repository.transition_run(
+            run.id,
+            EvalRunStatus.RUNNING,
+            at=run.created_at + timedelta(seconds=1),
+        )
+        _rewrite_run(
+            database,
+            run.id,
+            updates={
+                "summaries": [
+                    ConfigRunSummary(
+                        config_id=graph.configs[0].id,
+                        metrics=[],
+                        completed_queries=0,
+                        failed_queries=0,
+                    )
+                ]
+            },
+        )
+    else:
+        repository.transition_run(
+            run.id,
+            EvalRunStatus.RUNNING,
+            at=run.created_at + timedelta(seconds=1),
+        )
+        for config_index in range(4):
+            repository.record_outcome(_outcome(run, graph, 0, config_index))
+        assert repository.get_run(run.id).completed_queries == 1
+        _rewrite_run(database, run.id, updates={"completed_queries": 0})
+
+    error = _assert_detached_failure(
+        lambda: EvaluationViewService(repository).get_eval_run(run.id),
+        marker="lifecycle-marker-not-public",
+        http_status=503,
+    )
+    assert str(error) == "stored evaluation data is temporarily unavailable"
+
+
+def test_completed_summary_mismatch_fails_durable_recomputation(
+    database: Database,
+    repository: PufferLabRepository,
+    graph: CanonicalGraph,
+) -> None:
+    completed = _persist_six_status_runs(repository, graph)[EvalRunStatus.COMPLETED]
+    first_summary = completed.summaries[0]
+    first_metric = first_summary.metrics[0]
+    corrupted_metric = first_metric.model_copy(
+        update={"value": 0.123 if first_metric.value != 0.123 else 0.456}
+    )
+    corrupted_summary = first_summary.model_copy(
+        update={"metrics": [corrupted_metric, *first_summary.metrics[1:]]}
+    )
+    _rewrite_run(
+        database,
+        completed.id,
+        updates={"summaries": [corrupted_summary, *completed.summaries[1:]]},
+    )
+
+    error = _assert_detached_failure(
+        lambda: EvaluationViewService(repository).get_eval_run(completed.id),
+        marker="summary-marker-not-public",
+        http_status=503,
+    )
+    assert str(error) == "stored evaluation data is temporarily unavailable"
+
+
+def test_queued_recovery_failure_and_running_full_coverage_are_valid_states(
+    database: Database,
+    repository: PufferLabRepository,
+    graph: CanonicalGraph,
+) -> None:
+    recovery_failed = graph.make_run("queued-recovery-failed")
+    repository.create_run(recovery_failed)
+    _rewrite_run(
+        database,
+        recovery_failed.id,
+        updates={
+            "status": EvalRunStatus.FAILED,
+            "completed_at": recovery_failed.created_at + timedelta(seconds=1),
+            "error": ApiErrorDetail(
+                code=ApiErrorCode.INTERNAL_ERROR,
+                message="queued run could not be reconstructed",
+                retryable=False,
+                trace_id=_id("queued-recovery-error"),
+                details={"operation": "recover_queued_run"},
+            ),
+        },
+    )
+
+    running = graph.make_run("running-full-coverage", offset=1)
+    repository.create_run(running)
+    repository.transition_run(
+        running.id,
+        EvalRunStatus.RUNNING,
+        at=running.created_at + timedelta(seconds=1),
+    )
+    for query_index in range(50):
+        for config_index in range(4):
+            repository.record_outcome(_outcome(running, graph, query_index, config_index))
+
+    service = EvaluationViewService(repository)
+    failed_view = service.get_eval_run(recovery_failed.id).result
+    running_view = service.get_eval_run(running.id).result
+    assert failed_view.run.status is EvalRunStatus.FAILED
+    assert failed_view.run.started_at is None
+    assert failed_view.completed_attempts == 0
+    assert running_view.run.status is EvalRunStatus.RUNNING
+    assert running_view.run.completed_queries == 50
+    assert running_view.completed_attempts == 200
 
 
 def test_completed_foreign_query_identity_attack_fails_every_run_projection(
@@ -590,6 +888,111 @@ def test_valid_shaped_metric_corruption_fails_qrel_bearing_views(
             loader()
         assert unavailable.value.http_status == 503
         assert str(unavailable.value) == "stored evaluation data is temporarily unavailable"
+
+
+def test_safe_error_translation_detaches_all_internal_exception_frames(
+    repository: PufferLabRepository,
+    graph: CanonicalGraph,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = EvaluationViewService(repository)
+    app = create_app(
+        search_backend=_NoopSearchBackend(),
+        evaluation_views=service,
+    )
+
+    def assert_http_error(
+        response_status: int,
+        response_text: str,
+        marker: str,
+        expected_status: int,
+    ) -> None:
+        assert response_status == expected_status
+        assert marker not in response_text
+        assert '"detail"' not in response_text
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        value_marker = "VALUE_ERROR_PRIVATE_MARKER"
+
+        def fail_value(*_args: object, **_kwargs: object) -> None:
+            raise ValueError(value_marker)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(repository, "list_dataset_versions", fail_value)
+            _assert_detached_failure(
+                service.list_datasets,
+                marker=value_marker,
+                http_status=503,
+            )
+            response = client.get("/api/v1/datasets")
+            assert_http_error(response.status_code, response.text, value_marker, 503)
+
+        persistence_marker = "PERSISTENCE_PRIVATE_MARKER"
+
+        def fail_persistence(*_args: object, **_kwargs: object) -> None:
+            raise PersistenceValidationError(persistence_marker)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(repository, "list_runs", fail_persistence)
+            _assert_detached_failure(
+                lambda: service.list_eval_runs(EvalRunListQuery(limit=1)),
+                marker=persistence_marker,
+                http_status=503,
+            )
+            response = client.get("/api/v1/eval-runs?limit=1")
+            assert_http_error(response.status_code, response.text, persistence_marker, 503)
+
+        missing_marker = "NOT_FOUND_PRIVATE_MARKER"
+
+        def fail_not_found(*_args: object, **_kwargs: object) -> None:
+            raise RecordNotFoundError(missing_marker)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(repository, "get_dataset_version", fail_not_found)
+            _assert_detached_failure(
+                lambda: service.get_dataset(graph.dataset.id),
+                marker=missing_marker,
+                http_status=404,
+            )
+            response = client.get(f"/api/v1/datasets/{graph.dataset.id}")
+            assert_http_error(response.status_code, response.text, missing_marker, 404)
+
+        catalog_marker = "CONFIG_CATALOG_PRIVATE_MARKER"
+
+        def fail_catalog(*_args: object, **_kwargs: object) -> None:
+            raise ValueError(catalog_marker)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(service, "_canonical_configs", fail_catalog)
+            _assert_detached_failure(
+                lambda: service.list_dataset_configs(graph.dataset.id),
+                marker=catalog_marker,
+                http_status=409,
+            )
+            response = client.get(f"/api/v1/datasets/{graph.dataset.id}/configs")
+            assert_http_error(response.status_code, response.text, catalog_marker, 409)
+
+        propagated_marker = "PROPAGATED_ERROR_PRIVATE_MARKER"
+
+        def fail_with_context(*_args: object, **_kwargs: object) -> None:
+            try:
+                raise ValueError(propagated_marker)
+            except ValueError:
+                raise evaluation_invalid(
+                    message="safe propagated validation failure",
+                    operation="list_datasets",
+                ) from None
+
+        with monkeypatch.context() as patch:
+            patch.setattr(repository, "list_dataset_versions", fail_with_context)
+            error = _assert_detached_failure(
+                service.list_datasets,
+                marker=propagated_marker,
+                http_status=422,
+            )
+            assert str(error) == "safe propagated validation failure"
+            response = client.get("/api/v1/datasets")
+            assert_http_error(response.status_code, response.text, propagated_marker, 422)
 
 
 class _OriginViews:

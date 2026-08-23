@@ -41,6 +41,7 @@ from pufferlab.contracts.evals import (
     EvalRunListQuery,
     EvalRunListResponse,
     EvalRunQueryDetailResponse,
+    EvalRunStatus,
     EvalRunView,
     EvalSuccessPayload,
     ExcludedPairCount,
@@ -69,9 +70,10 @@ from pufferlab.evals.models import (
 )
 from pufferlab.evals.models import QueryOutcome as EvaluatedQueryOutcome
 from pufferlab.evals.pairing import order_quality_deltas, paired_deltas
-from pufferlab.jobs.eval_runner import export_outcome_record
+from pufferlab.jobs.eval_runner import export_outcome_record, finalize_durable_outcomes
 from pufferlab.persistence.errors import PersistenceError, RecordNotFoundError
 from pufferlab.persistence.repository import PufferLabRepository
+from pufferlab.persistence.types import QueryOutcome
 
 _CANONICAL_QUERY_COUNT = 50
 _CANONICAL_CONFIG_COUNT = 4
@@ -223,15 +225,17 @@ class EvaluationViewService:
         try:
             ordered = self._canonical_configs(configs, dataset_id=dataset.id)
         except ValueError:
-            raise evaluation_conflict(
+            error = evaluation_conflict(
                 message="dataset does not have one canonical four-config evaluation catalog",
                 operation="list_dataset_configs",
-            ) from None
-        return RetrievalConfigCatalogResponse(
-            dataset_version_id=dataset.id,
-            data_origin=dataset.data_origin,
-            configs=[self._config_summary(config) for config in ordered],
-        )
+            )
+        else:
+            return RetrievalConfigCatalogResponse(
+                dataset_version_id=dataset.id,
+                data_origin=dataset.data_origin,
+                configs=[self._config_summary(config) for config in ordered],
+            )
+        raise error
 
     def _run_list(self, query: EvalRunListQuery) -> EvalRunListResponse:
         query_ids_by_set: dict[UUID, frozenset[UUID]] = {}
@@ -267,10 +271,8 @@ class EvaluationViewService:
         configs = tuple(self._repository.list_run_configs(run.id))
         if configs != self._canonical_configs(configs, dataset_id=dataset.id):
             raise ValueError("durable run configs are not in canonical contract order")
-        outcomes = tuple(
-            export_outcome_record(outcome)
-            for outcome in self._repository.list_outcomes(run.id, limit=200)
-        )
+        durable_outcomes = tuple(self._repository.list_outcomes(run.id, limit=200))
+        outcomes = tuple(export_outcome_record(outcome) for outcome in durable_outcomes)
         query_ids = None if query_ids_by_set is None else query_ids_by_set.get(query_set.id)
         if query_ids is None:
             selected_query_ids = self._repository.list_query_ids(query_set.id, limit=50)
@@ -282,6 +284,13 @@ class EvaluationViewService:
             if query_ids_by_set is not None:
                 query_ids_by_set[query_set.id] = query_ids
         self._validate_outcome_scope(run, query_set, configs, outcomes, query_ids=query_ids)
+        self._validate_run_lifecycle(
+            run,
+            configs=configs,
+            durable_outcomes=durable_outcomes,
+            outcomes=outcomes,
+            query_ids=query_ids,
+        )
         return _RunContext(
             run=run,
             query_set=query_set,
@@ -312,6 +321,102 @@ class EvaluationViewService:
             raise ValueError("durable outcome is outside its run/config/query-set scope")
         if query_set.query_count != _CANONICAL_QUERY_COUNT:
             raise ValueError("P0 run views require exactly 50 judged queries")
+
+    @staticmethod
+    def _validate_run_lifecycle(
+        run: EvalRun,
+        *,
+        configs: Sequence[RetrievalConfig],
+        durable_outcomes: Sequence[QueryOutcome],
+        outcomes: Sequence[EvalOutcomeRecord],
+        query_ids: frozenset[UUID],
+    ) -> None:
+        config_ids = {config.id for config in configs}
+        configs_by_query: dict[UUID, set[UUID]] = {query_id: set() for query_id in query_ids}
+        for outcome in outcomes:
+            configs_by_query[outcome.query_id].add(outcome.config_id)
+        completed_groups = sum(
+            observed_config_ids == config_ids for observed_config_ids in configs_by_query.values()
+        )
+        if run.completed_queries != completed_groups:
+            raise ValueError("run progress does not match complete durable query groups")
+
+        if run.started_at is not None and run.started_at < run.created_at:
+            raise ValueError("run start timestamp precedes creation")
+        if run.completed_at is not None and run.completed_at < run.created_at:
+            raise ValueError("run completion timestamp precedes creation")
+        if (
+            run.started_at is not None
+            and run.completed_at is not None
+            and run.completed_at < run.started_at
+        ):
+            raise ValueError("run completion timestamp precedes its start")
+
+        if run.status is EvalRunStatus.QUEUED:
+            if (
+                run.started_at is not None
+                or run.completed_at is not None
+                or outcomes
+                or completed_groups != 0
+                or run.summaries
+                or run.error is not None
+            ):
+                raise ValueError("queued run lifecycle is inconsistent with durable evidence")
+            return
+
+        if run.status is EvalRunStatus.RUNNING:
+            if (
+                run.started_at is None
+                or run.completed_at is not None
+                or run.summaries
+                or run.error is not None
+            ):
+                raise ValueError("running run lifecycle is inconsistent with durable evidence")
+            return
+
+        if run.status is EvalRunStatus.COMPLETED:
+            if (
+                run.started_at is None
+                or run.completed_at is None
+                or run.error is not None
+                or completed_groups != _CANONICAL_QUERY_COUNT
+                or len(outcomes) != _CANONICAL_QUERY_COUNT * _CANONICAL_CONFIG_COUNT
+            ):
+                raise ValueError("completed run lifecycle is inconsistent with durable evidence")
+            recomputed_summaries = finalize_durable_outcomes(
+                run,
+                durable_outcomes,
+                query_ids=sorted(query_ids, key=str),
+            )
+            if run.summaries != recomputed_summaries:
+                raise ValueError("completed run summaries do not match durable outcomes")
+            return
+
+        if run.status is EvalRunStatus.FAILED:
+            if run.completed_at is None or run.error is None or run.summaries:
+                raise ValueError("failed run lifecycle is inconsistent with durable evidence")
+            if run.started_at is None and (outcomes or completed_groups != 0):
+                raise ValueError("unstarted failed run cannot contain durable outcomes")
+            return
+
+        if run.status is EvalRunStatus.CANCELLED:
+            if run.completed_at is None or run.error is not None or run.summaries:
+                raise ValueError("cancelled run lifecycle is inconsistent with durable evidence")
+            if run.started_at is None and (outcomes or completed_groups != 0):
+                raise ValueError("unstarted cancelled run cannot contain durable outcomes")
+            return
+
+        if run.status is EvalRunStatus.INTERRUPTED:
+            if (
+                run.started_at is None
+                or run.completed_at is None
+                or run.error is not None
+                or run.summaries
+            ):
+                raise ValueError("interrupted run lifecycle is inconsistent with durable evidence")
+            return
+
+        raise ValueError("run status is outside the frozen lifecycle")
 
     def _run_view(self, context: _RunContext) -> EvalRunView:
         return EvalRunView(
@@ -713,12 +818,19 @@ class EvaluationViewService:
     ) -> _T:
         try:
             return loader()
-        except EvaluationViewError:
-            raise
+        except EvaluationViewError as caught:
+            error = EvaluationViewError(
+                code=caught.code,
+                message=str(caught),
+                http_status=caught.http_status,
+                operation=caught.operation,
+                retryable=caught.retryable,
+            )
         except RecordNotFoundError:
-            raise evaluation_not_found(
+            error = evaluation_not_found(
                 message=not_found_message,
                 operation=operation,
-            ) from None
+            )
         except (PersistenceError, ValidationError, SQLAlchemyError, TypeError, ValueError):
-            raise evaluation_unavailable(operation=operation) from None
+            error = evaluation_unavailable(operation=operation)
+        raise error
