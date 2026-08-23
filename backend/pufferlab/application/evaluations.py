@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
-from pufferlab.contracts.datasets import DatasetVersion
+from pufferlab.contracts.datasets import DatasetStatus, DatasetVersion
 from pufferlab.contracts.errors import ApiErrorCode, ApiErrorDetail
 from pufferlab.contracts.evals import (
     ConfigRunSummary,
@@ -22,7 +22,14 @@ from pufferlab.contracts.evals import (
     QuerySetSummary,
     RunEnvironment,
 )
-from pufferlab.contracts.retrieval import RetrievalConfig, RetrievalMode
+from pufferlab.contracts.retrieval import (
+    LexicalSpec,
+    RerankerSpec,
+    RetrievalConfig,
+    RetrievalMode,
+    RrfSpec,
+    VectorSpec,
+)
 from pufferlab.datasets.unix_application import UnixEvaluationSeed
 from pufferlab.jobs.eval_runner import (
     EvaluationOutcomeExecutor,
@@ -34,6 +41,7 @@ from pufferlab.persistence.errors import PersistenceValidationError
 from pufferlab.persistence.repository import PufferLabRepository
 from pufferlab.persistence.types import QueryOutcome
 from pufferlab.providers.errors import ProviderError
+from pufferlab.providers.rerankers import DEFAULT_RERANKER_MODEL, DEFAULT_RERANKER_REVISION
 from pufferlab.retrieval.errors import SearchError
 from pufferlab.retrieval.types import SearchBackend, SearchExecuteRequest
 
@@ -87,12 +95,7 @@ class EvaluationApplicationService:
                 "evaluation seeding requires exactly one config for each supported mode"
             )
         ordered = tuple(by_mode[mode] for mode in _CONFIG_MODE_ORDER)
-        if any(config.dataset_version_id != seed.dataset_version.id for config in ordered):
-            raise PersistenceValidationError(
-                "every seeded retrieval config must bind to the evaluation dataset revision"
-            )
-        if any(config.result_k != 50 for config in ordered):
-            raise PersistenceValidationError("evaluation retrieval configs must use result_k=50")
+        _validate_canonical_seed(seed, ordered)
 
         self._repository.put_dataset_version(seed.dataset_version)
         for config in ordered:
@@ -360,3 +363,55 @@ def _interleaved_work_items(
         rotated = [*config_ids[rotation:], *config_ids[:rotation]]
         items.extend(QueryWorkItem(config_id=config_id, query_id=query.id) for config_id in rotated)
     return items
+
+
+def _validate_canonical_seed(
+    seed: UnixEvaluationSeed,
+    configs: tuple[RetrievalConfig, ...],
+) -> None:
+    if seed.dataset_version.status is not DatasetStatus.READY:
+        raise PersistenceValidationError("evaluation dataset revision must be ready")
+    if seed.query_set.query_count != 50 or len(seed.judged_queries) != 50:
+        raise PersistenceValidationError("evaluation seeding requires the curated 50-query set")
+    if any(config.dataset_version_id != seed.dataset_version.id for config in configs):
+        raise PersistenceValidationError(
+            "every seeded retrieval config must bind to the evaluation dataset revision"
+        )
+    if any(
+        config.result_k != 50
+        or config.candidate_k != 100
+        or config.consistency != "strong"
+        or config.filters is not None
+        for config in configs
+    ):
+        raise PersistenceValidationError(
+            "evaluation configs require result_k=50, candidate_k=100, strong consistency, "
+            "and no implicit filters"
+        )
+
+    lexical = LexicalSpec()
+    vector = VectorSpec(
+        attribute=seed.dataset_version.index_profile.vector_attribute,
+        embedding_model=seed.dataset_version.index_profile.embedding_model,
+    )
+    rrf = RrfSpec()
+    reranker = RerankerSpec(
+        provider="sentence_transformers",
+        model=DEFAULT_RERANKER_MODEL,
+        revision=DEFAULT_RERANKER_REVISION,
+        depth=50,
+    )
+    expected_specs = (
+        (lexical, None, None, None),
+        (None, vector, None, None),
+        (lexical, vector, rrf, None),
+        (lexical, vector, rrf, reranker),
+    )
+    actual_specs = tuple(
+        (config.lexical, config.vector, config.rrf, config.reranker) for config in configs
+    )
+    if actual_specs != expected_specs:
+        raise PersistenceValidationError(
+            "evaluation configs do not match the canonical weighted lexical, vector, server RRF, "
+            "and pinned local-reranker suite"
+        )

@@ -54,6 +54,7 @@ from pufferlab.jobs import (
 )
 from pufferlab.persistence import Database, PufferLabRepository
 from pufferlab.persistence.errors import PersistenceValidationError
+from pufferlab.providers.rerankers import DEFAULT_RERANKER_MODEL, DEFAULT_RERANKER_REVISION
 from pufferlab.retrieval.errors import provider_failed
 from pufferlab.retrieval.types import (
     SearchExecuteRequest,
@@ -91,6 +92,7 @@ class FakeSearchBackend:
         self.block = False
         self.started = asyncio.Event()
         self.release = asyncio.Event()
+        self.closed = False
 
     def list_configs(self) -> tuple[RetrievalConfigSummary, ...]:
         return tuple(self._summary(config) for config in self._configs.values())
@@ -158,7 +160,7 @@ class FakeSearchBackend:
             self.active -= 1
 
     async def close(self) -> None:
-        return None
+        self.closed = True
 
     @staticmethod
     def _summary(config: RetrievalConfig) -> RetrievalConfigSummary:
@@ -287,8 +289,8 @@ def _seed() -> tuple[UnixEvaluationSeed, tuple[RetrievalConfig, ...]]:
             rrf=RrfSpec(),
             reranker=RerankerSpec(
                 provider="sentence_transformers",
-                model="test-reranker",
-                revision="revision",
+                model=DEFAULT_RERANKER_MODEL,
+                revision=DEFAULT_RERANKER_REVISION,
                 depth=50,
             ),
             config_hash="rerank-hash",
@@ -487,6 +489,53 @@ async def test_cancellation_uses_manager_and_drains_started_outcomes(
     assert len(backend.calls) == 2
     assert len(repository.list_outcomes(run.id)) == 2
     assert len(service.export(run.id).outcomes) == 2
+
+
+@pytest.mark.asyncio
+async def test_close_cooperatively_cancels_a_blocked_warmup_without_outcomes(
+    repository: PufferLabRepository,
+) -> None:
+    seed, configs = _seed()
+    backend = FakeSearchBackend(configs)
+    backend.block = True
+    service = _service(repository, backend)
+    service.seed(seed, configs)
+    request = _request(seed, configs, warmup_query_count=1, max_concurrency=2)
+    run = service.create_run(request, _environment(request), run_id=_id("warmup-cancel-run"))
+    service.start_run(run.id)
+    await backend.started.wait()
+
+    closing = asyncio.create_task(service.close())
+    for _ in range(20):
+        await asyncio.sleep(0)
+        if repository.get_run(run.id).status is EvalRunStatus.CANCELLED:
+            break
+    assert repository.get_run(run.id).status is EvalRunStatus.CANCELLED
+    assert len(backend.calls) == 1
+    backend.release.set()
+    await closing
+
+    assert backend.closed is True
+    assert repository.get_run(run.id).status is EvalRunStatus.CANCELLED
+    assert repository.list_outcomes(run.id) == []
+
+
+def test_seed_rejects_noncanonical_candidate_depth_and_reranker_depth(
+    repository: PufferLabRepository,
+) -> None:
+    seed, configs = _seed()
+    backend = FakeSearchBackend(configs)
+    service = _service(repository, backend)
+    wrong_candidate_depth = configs[0].model_copy(update={"candidate_k": 99})
+    assert configs[3].reranker is not None
+    wrong_reranker_depth = configs[3].model_copy(
+        update={"reranker": configs[3].reranker.model_copy(update={"depth": 51})}
+    )
+
+    with pytest.raises(PersistenceValidationError, match="candidate_k=100"):
+        service.seed(seed, (wrong_candidate_depth, *configs[1:]))
+    with pytest.raises(PersistenceValidationError, match="pinned local-reranker suite"):
+        service.seed(seed, (*configs[:3], wrong_reranker_depth))
 
 
 def _assert_no_exposed_fields(value: object) -> None:
