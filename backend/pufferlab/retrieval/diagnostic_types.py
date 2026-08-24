@@ -41,6 +41,7 @@ _MAX_DIAGNOSTIC_SCORE = 1_000_000_000_000.0
 _MAX_DIAGNOSTIC_DURATION_MS = 600_000.0
 _SAFE_FILTER_FIELD = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]{0,63}\Z")
 _SAFE_NAMESPACE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
+_SAFE_REGION = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
 _RESERVED_DIAGNOSTIC_FIELDS = {
     "id",
     "__pufferlab_diagnostic_bm25",
@@ -426,6 +427,12 @@ def is_valid_diagnostic_namespace(value: object) -> bool:
         and value not in {".", ".."}
         and _SAFE_NAMESPACE.fullmatch(value) is not None
     )
+
+
+def is_valid_diagnostic_region(value: object) -> bool:
+    """Return whether a stored diagnostic region is one exact official DNS label."""
+
+    return type(value) is str and _SAFE_REGION.fullmatch(value) is not None
 
 
 def _validate_predicate_value(op: PredicateOp, value: object) -> None:

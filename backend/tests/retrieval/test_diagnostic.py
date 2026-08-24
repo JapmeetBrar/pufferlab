@@ -22,6 +22,7 @@ from pufferlab.contracts.filters import (
 )
 from pufferlab.contracts.forensics import DiagnosticSubqueryRole
 from pufferlab.contracts.retrieval import RetrievalConfigSummary, RetrievalMode
+from pufferlab.retrieval import is_valid_diagnostic_region
 from pufferlab.retrieval.config import SeededSearchConfig
 from pufferlab.retrieval.diagnostic import (
     DiagnosticRetrievalConfigurationError,
@@ -45,6 +46,46 @@ _CONFIG_ID = UUID("10000000-0000-0000-0000-000000000001")
 _TARGET = UUID("20000000-0000-0000-0000-000000000001")
 _OTHER = UUID("20000000-0000-0000-0000-000000000002")
 _MARKER = "sensitive-query-filter-provider-marker"
+
+
+@pytest.mark.parametrize(
+    "region",
+    ["a", "0", "gcp-us-west1", "a" * 63, f"a{'-' * 61}z"],
+)
+def test_diagnostic_region_accepts_exact_official_dns_labels(region: str) -> None:
+    assert is_valid_diagnostic_region(region) is True
+
+
+@pytest.mark.parametrize(
+    "region",
+    [
+        None,
+        object(),
+        True,
+        1,
+        "",
+        "-a",
+        "a-",
+        "A",
+        "gcp_us_west1",
+        "gcp.us-west1",
+        "gcp/us-west1",
+        "gcp\\us-west1",
+        "gcp us-west1",
+        "gcp-us-west1\n",
+        "gcp-us-wést1",
+        "a" * 64,
+    ],
+)
+def test_diagnostic_region_rejects_nonexact_or_malformed_values(region: object) -> None:
+    assert is_valid_diagnostic_region(region) is False
+
+
+def test_diagnostic_region_rejects_string_subclasses() -> None:
+    class StringSubclass(str):
+        pass
+
+    assert is_valid_diagnostic_region(StringSubclass("gcp-us-west1")) is False
 
 
 def _config(mode: RetrievalMode) -> SeededSearchConfig:

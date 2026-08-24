@@ -7,7 +7,6 @@ import hashlib
 import inspect
 import json
 import math
-import re
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from time import perf_counter
@@ -39,6 +38,7 @@ from pufferlab.retrieval.diagnostic_types import (
     DiagnosticProviderResult,
     DiagnosticTargetObservation,
     is_valid_diagnostic_namespace,
+    is_valid_diagnostic_region,
     monotonic,
     require_exact_uuid,
     require_finite_nonnegative,
@@ -46,7 +46,6 @@ from pufferlab.retrieval.diagnostic_types import (
 
 _TIMEOUT_SECONDS = 10.0
 _OFFICIAL_BASE_URL_TEMPLATE = "https://{region}.turbopuffer.com"
-_REGION_PATTERN = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
 _NAMESPACE_PATH_SAFE = "!$&'()*+,;=:@"
 _USER_AGENT = "pufferlab-expected-document-diagnostic/1"
 _BM25_COMPUTE_FIELD = "__pufferlab_diagnostic_bm25"
@@ -514,8 +513,7 @@ async def _create_inner(
 ) -> _CreateOutcome:
     if (
         not _valid_api_key(api_key)
-        or type(region) is not str
-        or _REGION_PATTERN.fullmatch(region) is None
+        or not is_valid_diagnostic_region(region)
         or not is_valid_diagnostic_namespace(namespace)
     ):
         return _CreateOutcome(configuration_error=True)
