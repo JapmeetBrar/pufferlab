@@ -408,7 +408,8 @@ def _validate_filter_definition(value: object) -> _FilterDefinition | None:
             _fail(DiagnosticAnalysisErrorCode.INVALID_FILTER)
         if isinstance(node, FilterPredicate) and type(node) is FilterPredicate:
             if (
-                node.kind != "predicate"
+                type(node.kind) is not str
+                or node.kind != "predicate"
                 or type(node.field) is not str
                 or _FIELD_PATTERN.fullmatch(node.field) is None
                 or type(node.op) is not PredicateOp
@@ -433,7 +434,8 @@ def _validate_filter_definition(value: object) -> _FilterDefinition | None:
         if not isinstance(node, FilterLogical) or type(node) is not FilterLogical:
             _fail(DiagnosticAnalysisErrorCode.INVALID_FILTER)
         if (
-            node.kind != "logical"
+            type(node.kind) is not str
+            or node.kind != "logical"
             or type(node.op) is not LogicalOp
             or type(node.children) is not list
             or not node.children

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import traceback
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -579,6 +580,125 @@ def test_constructed_logical_and_presence_attacks_fail_as_fixed_errors() -> None
             ),
         )
     assert presence.value.code is DiagnosticAnalysisErrorCode.INVALID_FILTER
+
+
+@pytest.mark.parametrize("node_type", ["predicate", "logical"])
+@pytest.mark.parametrize("construction", ["model_copy", "model_construct"])
+def test_forged_kind_discriminators_fail_before_hostile_comparison_in_both_entrypoints(
+    node_type: str,
+    construction: str,
+) -> None:
+    calls: list[str] = []
+    marker = f"PRIVATE_{node_type.upper()}_{construction.upper()}_KIND"
+
+    class HostileKind(str):
+        def __eq__(self, other: object) -> bool:
+            calls.append("eq")
+            return True
+
+        def __ne__(self, other: object) -> bool:
+            calls.append("ne")
+            return False
+
+    forged_kind = HostileKind(marker)
+    predicate = FilterPredicate(field="safe", op=PredicateOp.EQ, value="x")
+    if node_type == "predicate":
+        node = (
+            predicate.model_copy(update={"kind": forged_kind})
+            if construction == "model_copy"
+            else FilterPredicate.model_construct(
+                kind=forged_kind,
+                field="safe",
+                op=PredicateOp.EQ,
+                value="x",
+            )
+        )
+    else:
+        logical = FilterLogical(op=LogicalOp.AND, children=[predicate])
+        node = (
+            logical.model_copy(update={"kind": forged_kind})
+            if construction == "model_copy"
+            else FilterLogical.model_construct(
+                kind=forged_kind,
+                op=LogicalOp.AND,
+                children=[predicate],
+            )
+        )
+    assert calls == []
+    assert type(node.kind) is HostileKind
+
+    schema = (FilterFieldSchema("safe", FilterValueType.STRING, True),)
+    for invoke in (
+        lambda: preflight_filter_definition(FilterDefinitionInput(node=node, schema=schema)),
+        lambda: _analyze_filter(
+            node,
+            schemas=schema,
+            attributes=(
+                ObservedFilterAttribute(
+                    "safe",
+                    PreservedAttribute(AttributePresence.PRESENT_VALUE, "x"),
+                ),
+            ),
+        ),
+    ):
+        with pytest.raises(DiagnosticAnalysisError) as raised:
+            invoke()
+        error = raised.value
+        assert error.code is DiagnosticAnalysisErrorCode.INVALID_FILTER
+        assert error.__cause__ is error.__context__ is None
+        assert marker not in str(error)
+        assert marker not in repr(error)
+        assert marker not in "".join(traceback.format_exception(error))
+        current = error.__traceback__
+        while current is not None:
+            if current.tb_frame.f_code.co_filename.endswith("diagnostic_analysis.py"):
+                assert marker not in repr(current.tb_frame.f_locals)
+            current = current.tb_next
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "attacked_field", ["schema_field", "predicate_field", "predicate_op", "logical_op"]
+)
+def test_adjacent_filter_discriminators_authenticate_exact_types_before_use(
+    attacked_field: str,
+) -> None:
+    calls: list[str] = []
+
+    class HostileScalar(str):
+        def __eq__(self, other: object) -> bool:
+            calls.append("eq")
+            return True
+
+        def __ne__(self, other: object) -> bool:
+            calls.append("ne")
+            return False
+
+        def __hash__(self) -> int:
+            calls.append("hash")
+            return super().__hash__()
+
+    hostile = HostileScalar(f"PRIVATE_{attacked_field.upper()}_MARKER")
+    predicate = FilterPredicate(field="safe", op=PredicateOp.EQ, value="x")
+    schema = (FilterFieldSchema("safe", FilterValueType.STRING, True),)
+    node: object = predicate
+    if attacked_field == "schema_field":
+        schema = (FilterFieldSchema(hostile, FilterValueType.STRING, True),)
+    elif attacked_field == "predicate_field":
+        node = predicate.model_copy(update={"field": hostile})
+    elif attacked_field == "predicate_op":
+        node = predicate.model_copy(update={"op": hostile})
+    else:
+        node = FilterLogical(op=LogicalOp.AND, children=[predicate]).model_copy(
+            update={"op": hostile}
+        )
+    assert calls == []
+
+    with pytest.raises(DiagnosticAnalysisError) as raised:
+        preflight_filter_definition(FilterDefinitionInput(node=node, schema=schema))
+    assert raised.value.code is DiagnosticAnalysisErrorCode.INVALID_FILTER
+    assert raised.value.__cause__ is raised.value.__context__ is None
+    assert calls == []
 
 
 def test_signed_truth_witnesses_follow_nested_not_polarity_without_false_leaf_claims() -> None:
