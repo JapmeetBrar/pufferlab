@@ -49,11 +49,12 @@ Exit: a reviewer can clone, configure, ingest, run, inspect, and clean up withou
 Add the original P1 expected-document probe to the authenticated recorded-query workflow. An
 operator explicitly selects one positively judged document and one config, then requests one new
 same-snapshot diagnostic observation: exact ID lookup with computed lexical/vector scores,
-stored-query-filter evidence, candidate cutoff/membership, and an eligible no-filter
-counterfactual. The dedicated request uses one strong-consistency multi-query with exactly two,
-three, or five ordered subqueries by mode and option, and one HTTP attempt; it never claims to
-reproduce stored evidence, server RRF, provider internals, or local-reranker output. The finite
-architecture, contracts, risks, and branch plan are in
+SDK-preserved missing/null/value stored-query-filter evidence, candidate cutoff/membership, and an
+eligible no-filter counterfactual. The dedicated request uses one strong-consistency multi-query
+with exactly two, three, or five ordered subqueries by mode and option, and one HTTP attempt; it
+never claims to reproduce stored evidence, server RRF, provider internals, or local-reranker output.
+The finite architecture, contracts, risks, and branch plan split already-reachable shared schema
+generation from the later dedicated endpoint/model generation in
 [`milestone-5-execution.md`](milestone-5-execution.md).
 
 Exit: a selected positive-qrel document produces source-bound, bounded diagnostic evidence or an

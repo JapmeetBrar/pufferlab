@@ -63,6 +63,8 @@ branching likewise needs a compatible registered dataset plus a separate ownersh
 - One diagnostic provider request returns an exact ID-ranked target lookup plus the candidate lists
   applicable to the selected config. An optional no-filter view is available only when that stored
   query has a validated filter.
+- The adapter preserves each requested filter attribute as `missing`, `present_null`, or
+  `present_value` before pure evaluation; unset SDK fields never become synthetic nulls.
 - The response distinguishes direct compute scores, locally evaluated filter predicates,
   stored-query candidate evidence, no-filter counterfactual evidence, qualified client-computed
   RRF, and unsupported final/reranker claims.
@@ -291,6 +293,15 @@ computed field, duplicate candidate ID/rank, or non-finite score. It does not re
 `_row_to_document`, whose score semantics assume `$dist`; attribute-ranked lookup correctly has no
 `$dist`.
 
+For requested filter attributes, the M5-B decoder consults `Row.model_fields_set` and
+`Row.model_extra` and uses `model_dump(exclude_unset=True)` only as a checked serialization view.
+It emits an internal presence-tagged value (`missing`, `present_null`, or `present_value`) before
+discarding the SDK row. Ordinary `model_dump()` is forbidden on this path because it can synthesize
+unset optional fields as null and erase the provider-visible distinction. Pinned-SDK 2.9
+`httpx.MockTransport` tests must decode otherwise identical exact-lookup responses with an omitted
+attribute and an explicit JSON null, prove distinct tags through both Pydantic presence mechanisms,
+and feed both into the pure truth table without a real request.
+
 Every candidate list must satisfy this complete integrity table before analysis: document IDs are
 unique; derived ranks are exactly contiguous `1..returned_count`; returned count does not exceed the
 requested limit; BM25 scores are finite, nonnegative, and monotonically non-increasing; VectorDist
@@ -313,15 +324,23 @@ concurrency.
 
 The pure filter evaluator supports only the already validated AST (`and`, `or`, `not`, `eq`,
 `not_eq`, `lt`, `lte`, `gt`, `gte`, `in`, `contains_any`) and compiled schema types. Logical
-evaluation is three-valued so unsupported or type-incomparable data cannot become a false causal
-claim. The diagnostic cannot distinguish a missing returned attribute from a present provider null,
-so both become one local null-or-missing state and no finding claims which occurred. For that state,
-the frozen official-semantics matrix is: `Eq null=true`, `NotEq null=false`, `Eq nonnull=false`,
-`NotEq nonnull=true`, `Lt/Lte nonnull=true`, `Gt/Gte=false`, and `In/ContainsAny=false`. Valid
-non-null values use schema-typed comparisons only. Tests cover both raw shapes and nested
-`And`/`Or`/`Not`; invalid operand types/shapes reject and Python truthiness/coercion is forbidden.
-M5-C freezes the truth tables and stable predicate paths. Official semantics plus exhaustive
-provider-free fake/SDK tests enable `FILTER_PREDICATE_FAILED`; an isolated live parity test remains
+evaluation is three-valued (`T`, `F`, `U`) so current documentation gaps cannot become false causal
+claims. `U` renders `not_observable`, never `FILTER_PREDICATE_FAILED`, unless a later milestone adds
+separately authorized live parity evidence. The exact conservative table is:
+
+| Preserved attribute state | `Eq null` | `NotEq null` | `Eq value` | `NotEq value` | `Lt`/`Lte` value | `Gt`/`Gte` value | `In` | `ContainsAny` |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| missing | T | F | F | T | U | U | F | F |
+| present null | U | T | F | T | T | U | F | F |
+
+Range right-hand sides and every `In`/`ContainsAny` element are already required to be non-null and
+schema-typed. Present non-null scalar/array values use the documented, schema-typed operator
+semantics; invalid or type-incomparable shapes reject instead of returning `U`. Nested nodes use
+strong Kleene logic: `Not U=U`; `And` is F if any child is F, T only if all are T, otherwise U; `Or`
+is T if any child is T, F only if all are F, otherwise U. M5-B/M5-C tests cover all eight operators
+for missing, present-null, matching/nonmatching present values, invalid shapes, and nested
+`And`/`Or`/`Not`. Python truthiness/coercion is forbidden. Official semantics plus exhaustive
+provider-free fake/SDK tests enable only supported findings; an isolated live parity test remains
 optional and separately authorized rather than a merge prerequisite.
 
 The diagnostic accepts at most 16 predicates, 31 total AST nodes, and depth 8, matching the public
@@ -445,12 +464,16 @@ PR.
 
 ### M5-A — Additive contract freeze
 
-- **Files:** forensic/common Pydantic contracts and tests plus `contracts.md` only.
+- **Files:** forensic/common Pydantic contracts and tests, `contracts.md`, generated OpenAPI, and
+  generated TypeScript.
 - **Acceptance:** strict additive request/response/evidence shapes, distinct diagnostic origin,
   exact source binding and finite bounds, and duplicate/non-finite/cross-trace/tie attacks. Request
   shape requires explicit UUIDs/boolean only; positive-qrel/run/config semantics belong to M5-D.
-  Because unreachable models are not emitted, OpenAPI/generated TypeScript must have zero delta.
-  No provider, persistence, route, application, or UI behavior.
+  `EvidenceOrigin` is already reachable through `ForensicObservation`, so M5-A owns the additive
+  `LIVE_EXPECTED_DOCUMENT_DIAGNOSTIC` enum delta and any shared forensic evidence-union delta in
+  OpenAPI and generated TypeScript, with regeneration/drift tests. Dedicated request/response models
+  remain unreachable and are not emitted until M5-D adds the route. No provider, persistence, route,
+  application, or UI behavior.
 
 ### M5-B — Provider and retrieval diagnostic adapter
 
@@ -461,24 +484,28 @@ PR.
   validation, ID-ranked lookup, required compute attributes, mode/filter shapes, no `rerank_by`,
   strict internal full-row response decoder,
   zero-row/contradiction behavior, environment-poison attacks, resource drainage, and redacted
-  exception graphs. A started threaded embedding drains under cancellation, discards its result,
-  constructs no provider client, and leaves no sensitive exception frame. Any live test creates
-  and cleans only its internally generated test namespace
-  after independent safety review; it is not required by normal CI or merge acceptance.
+  exception graphs. Pinned-SDK 2.9 `MockTransport` tests prove omitted versus explicit-null row
+  attributes survive `model_fields_set`, `model_extra`, and `model_dump(exclude_unset=True)` as
+  distinct internal states, while ordinary `model_dump()` is forbidden. A started threaded
+  embedding drains under cancellation, discards its result, constructs no provider client, and
+  leaves no sensitive exception frame. Any live test creates and cleans only its internally
+  generated test namespace after independent safety review; it is not required by normal CI or
+  merge acceptance.
 
 ### M5-C — Pure filter/cutoff/forensic analysis
 
 - **Files:** pure evaluator/analysis modules and exhaustive tests only.
 - **Acceptance:** no SDK/FastAPI/SQLAlchemy/filesystem/network/model imports; exact tri-state AST
-  truth tables; higher/lower score directions; zero, short/full lists, equality/ties, missing
-  boundary, ANN miss, qualified RRF, and reranker/final `NOT_OBSERVABLE` cases; deterministic bounded
-  findings from internal bounded rows, target-scoped safe summaries, and forbidden-causal-copy or
-  unrelated-ID exposure tests.
+  truth tables for all eight operators across missing/present-null/present-value plus strong-Kleene
+  nested `And`/`Or`/`Not`; higher/lower score directions; zero, short/full lists, equality/ties,
+  missing boundary, ANN miss, qualified RRF, and reranker/final `NOT_OBSERVABLE` cases;
+  deterministic bounded findings from internal bounded rows, target-scoped safe summaries, and
+  forbidden-causal-copy or unrelated-ID exposure tests.
 
 ### M5-D — Authenticated diagnostic integration
 
-- **Files:** evaluation application/runtime, dedicated route, OpenAPI/generated TypeScript, focused
-  application/API tests.
+- **Files:** evaluation application/runtime, dedicated route, dedicated request/response OpenAPI and
+  generated-TypeScript delta, focused application/API tests.
 - **Acceptance:** full source/qrel/config authentication and positive-target/no-filter validation
   before every sensitive factory; namespace only from the authenticated live dataset and current
   region exact-bound to the stored run plus official syntax; dedicated diagnostic source
@@ -533,8 +560,10 @@ requirement. M5 does not mutate the canonical catalog merely to make that UI sta
 
 ## Rollback
 
-- M5-A is additive and unreachable until M5-D mounts the dedicated route. Existing replay remains
-  unchanged. Revert it before dependents if the contract is rejected.
+- M5-A's shared enum/forensic-union schema additions are already generated because their parent
+  types are reachable, but no existing producer emits the new origin; its dedicated request/response
+  models remain unreachable until M5-D mounts the route. Existing replay behavior remains unchanged.
+  Revert M5-A before dependents if the contract is rejected.
 - M5-B/C are non-persistent. Reverting removes adapter/analysis behavior without changing SQLite or
   namespaces.
 - M5-D adds no migration and writes no diagnostic evidence. In-flight rollback is ordinary request
@@ -552,7 +581,7 @@ requirement. M5 does not mutate the canonical catalog merely to make that UI sta
 | Multi-query cost is misunderstood | Publish exact call/subquery bound and workload-dependent logical-byte/concurrency wording. |
 | Direct-score lookup drops score-zero rows | Rank by ID; compute scores separately. |
 | SDK result ordering/shape drifts | Bind fixed ordinal/role and real-SDK serialization/decoder tests. |
-| Filter local semantics diverge | Freeze official missing/null/type semantics and exhaustive provider-free parity fakes; keep a live test optional. |
+| Filter local semantics diverge or SDK unset fields collapse to null | Preserve presence through `model_fields_set`/`model_extra` and `exclude_unset`; freeze the conservative T/F/U table and exhaustive MockTransport/pure tests; keep live parity optional. |
 | ANN absence is overexplained | Report only observed miss relative to exact distance/boundary; internal cause remains unknown. |
 | RRF/reranker is overclaimed | No `rerank_by`, only qualified client RRF; reranker/final cutoff stays `NOT_OBSERVABLE`. |
 | Failure leaks provider detail | Normal fixed API error, detached exception graph, no partial diagnostic response. |
