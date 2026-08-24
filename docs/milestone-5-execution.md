@@ -349,6 +349,29 @@ returns a provider-free fixed validation/evidence error before credential/provid
 not create a trace-bearing `NOT_OBSERVABLE` observation. The durable query remains readable.
 Predicate values never enter the response.
 
+M5-C exposes a definition-only preflight for M5-D to run before any credential, provider, or model
+factory. It accepts no observed target attributes and validates the same AST bounds, exact field
+membership, `filterable=true` eligibility, operator/type compatibility, and scalar/array operands
+as the evaluator. Empty `In`/`ContainsAny` operands remain valid and match nothing; collection
+operands and observed arrays are each bounded to 10,000 values.
+
+Provider `datetime` fields use a bounded ISO-8601 subset that accepts calendar-valid date-only and
+`T`-separated datetime values with optional fractional seconds and optional `Z`/numeric offset.
+Offset-bearing values normalize to UTC; date-only and timezone-less values are interpreted as UTC
+wall time, an explicit local inference from turbopuffer's UTC-normalized millisecond-epoch storage
+rather than a claim about a namespace timezone. Comparisons use integer epoch milliseconds, so
+equivalent offsets and sub-millisecond values in the same stored millisecond compare equal,
+including before the epoch. UUID operands and attributes are parsed as typed UUID identities;
+parseable equivalent lexical forms compare by identity, while malformed datetime/UUID values fail
+closed instead of falling back to string comparison.
+
+Strong-Kleene root truth is retained separately from complete atomic evidence. Public filter
+findings follow signed truth witnesses: false `And` follows its false children, false `Or` follows
+all false children, `Not` flips the desired truth, and unknown roots follow only contributing
+unknown children. Atomic findings are emitted only for reached false/unknown leaves. Consequently,
+`Not(T)` and `Not(Or(T,F))` can have a false aggregate with safe atomic evidence but no false-leaf
+finding, while `Not(Not(F))` recovers the authenticated false leaf without relabeling evidence.
+
 Cutoff comparisons are direction-aware and only compare values from the one diagnostic trace:
 
 - Target membership and rank in a returned list are observed facts.
@@ -528,8 +551,10 @@ goal-closing PR.
 - **Files:** pure evaluator/analysis modules and exhaustive tests only.
 - **Acceptance:** no SDK/FastAPI/SQLAlchemy/filesystem/network/model imports; exact tri-state AST
   truth tables for all eight operators across missing/present-null/present-value plus strong-Kleene
-  nested `And`/`Or`/`Not`; higher/lower score directions; zero, short/full lists, equality/ties,
-  missing boundary, ANN miss, qualified RRF, and reranker/final `NOT_OBSERVABLE` cases;
+  nested `And`/`Or`/`Not` and signed truth witnesses; provider-compatible typed datetime/UUID
+  evaluation and definition-only schema preflight; higher/lower score directions; zero, short/full
+  lists, equality/ties, missing boundary, ANN miss, qualified RRF, and reranker/final
+  `NOT_OBSERVABLE` cases;
   deterministic bounded findings from internal bounded rows, target-scoped safe summaries, and
   forbidden-causal-copy or unrelated-ID exposure tests.
 
