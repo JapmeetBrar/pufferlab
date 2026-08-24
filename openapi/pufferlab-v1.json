@@ -113,6 +113,153 @@
         "title": "CandidateCountEvidenceValue",
         "type": "object"
       },
+      "CandidateCutoffEvidence": {
+        "additionalProperties": false,
+        "properties": {
+          "boundary_score": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ObservedScore"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "certainty": {
+            "$ref": "#/components/schemas/EvidenceCertainty"
+          },
+          "config_id": {
+            "format": "uuid",
+            "title": "Config Id",
+            "type": "string"
+          },
+          "direct_score": {
+            "$ref": "#/components/schemas/ObservedScore"
+          },
+          "observed_at": {
+            "format": "date-time",
+            "title": "Observed At",
+            "type": "string"
+          },
+          "origin": {
+            "const": "client_computed",
+            "default": "client_computed",
+            "title": "Origin",
+            "type": "string"
+          },
+          "relation": {
+            "$ref": "#/components/schemas/DiagnosticCutoffRelation"
+          },
+          "requested_limit": {
+            "enum": [
+              50,
+              100
+            ],
+            "title": "Requested Limit",
+            "type": "integer"
+          },
+          "returned_count": {
+            "maximum": 100.0,
+            "minimum": 0.0,
+            "title": "Returned Count",
+            "type": "integer"
+          },
+          "role": {
+            "enum": [
+              "stored_query_bm25_candidates",
+              "stored_query_ann_candidates",
+              "no_filter_counterfactual_bm25_candidates",
+              "no_filter_counterfactual_ann_candidates"
+            ],
+            "title": "Role",
+            "type": "string"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/DiagnosticCandidateScope"
+          },
+          "signal": {
+            "enum": [
+              "bm25",
+              "ann"
+            ],
+            "title": "Signal",
+            "type": "string"
+          },
+          "stored_filter_result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DiagnosticPredicateResult"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "subquery_ordinal": {
+            "maximum": 4.0,
+            "minimum": 1.0,
+            "title": "Subquery Ordinal",
+            "type": "integer"
+          },
+          "target_document_id": {
+            "format": "uuid",
+            "title": "Target Document Id",
+            "type": "string"
+          },
+          "target_present": {
+            "title": "Target Present",
+            "type": "boolean"
+          },
+          "target_rank": {
+            "anyOf": [
+              {
+                "maximum": 100.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Rank"
+          },
+          "target_score": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ObservedScore"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "trace_id": {
+            "format": "uuid",
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "config_id",
+          "target_document_id",
+          "observed_at",
+          "trace_id",
+          "subquery_ordinal",
+          "role",
+          "scope",
+          "stored_filter_result",
+          "signal",
+          "requested_limit",
+          "returned_count",
+          "target_present",
+          "direct_score",
+          "relation",
+          "certainty"
+        ],
+        "title": "CandidateCutoffEvidence",
+        "type": "object"
+      },
       "CandidateRelevantRankChanges": {
         "additionalProperties": false,
         "properties": {
@@ -582,6 +729,93 @@
         "title": "DiagnosticCandidateScope",
         "type": "string"
       },
+      "DiagnosticCandidateSubquerySummary": {
+        "additionalProperties": false,
+        "properties": {
+          "boundary_score": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ObservedScore"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "kind": {
+            "const": "candidate",
+            "default": "candidate",
+            "title": "Kind",
+            "type": "string"
+          },
+          "ordinal": {
+            "maximum": 4.0,
+            "minimum": 1.0,
+            "title": "Ordinal",
+            "type": "integer"
+          },
+          "requested_limit": {
+            "enum": [
+              50,
+              100
+            ],
+            "title": "Requested Limit",
+            "type": "integer"
+          },
+          "returned_count": {
+            "maximum": 100.0,
+            "minimum": 0.0,
+            "title": "Returned Count",
+            "type": "integer"
+          },
+          "role": {
+            "enum": [
+              "stored_query_bm25_candidates",
+              "stored_query_ann_candidates",
+              "no_filter_counterfactual_bm25_candidates",
+              "no_filter_counterfactual_ann_candidates"
+            ],
+            "title": "Role",
+            "type": "string"
+          },
+          "target_present": {
+            "title": "Target Present",
+            "type": "boolean"
+          },
+          "target_rank": {
+            "anyOf": [
+              {
+                "maximum": 100.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Rank"
+          },
+          "target_score": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ObservedScore"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "ordinal",
+          "role",
+          "requested_limit",
+          "returned_count",
+          "target_present"
+        ],
+        "title": "DiagnosticCandidateSubquerySummary",
+        "type": "object"
+      },
       "DiagnosticCutoffRelation": {
         "enum": [
           "target_present",
@@ -609,6 +843,149 @@
           "rrf"
         ],
         "title": "DiagnosticSignal",
+        "type": "string"
+      },
+      "DiagnosticSubquerySummary": {
+        "discriminator": {
+          "mapping": {
+            "candidate": "#/components/schemas/DiagnosticCandidateSubquerySummary",
+            "target_lookup": "#/components/schemas/DiagnosticTargetLookupSubquerySummary"
+          },
+          "propertyName": "kind"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/DiagnosticTargetLookupSubquerySummary"
+          },
+          {
+            "$ref": "#/components/schemas/DiagnosticCandidateSubquerySummary"
+          }
+        ]
+      },
+      "DiagnosticTargetLookup": {
+        "additionalProperties": false,
+        "properties": {
+          "available": {
+            "title": "Available",
+            "type": "boolean"
+          },
+          "bm25_score": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ObservedScore"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "config_id": {
+            "format": "uuid",
+            "title": "Config Id",
+            "type": "string"
+          },
+          "observed_at": {
+            "format": "date-time",
+            "title": "Observed At",
+            "type": "string"
+          },
+          "origin": {
+            "const": "live_expected_document_diagnostic",
+            "default": "live_expected_document_diagnostic",
+            "title": "Origin",
+            "type": "string"
+          },
+          "target_document_id": {
+            "format": "uuid",
+            "title": "Target Document Id",
+            "type": "string"
+          },
+          "trace_id": {
+            "format": "uuid",
+            "title": "Trace Id",
+            "type": "string"
+          },
+          "unavailable_reason": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DiagnosticTargetUnavailableReason"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "vector_distance": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ObservedScore"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "config_id",
+          "target_document_id",
+          "observed_at",
+          "trace_id",
+          "available"
+        ],
+        "title": "DiagnosticTargetLookup",
+        "type": "object"
+      },
+      "DiagnosticTargetLookupSubquerySummary": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "target_lookup",
+            "default": "target_lookup",
+            "title": "Kind",
+            "type": "string"
+          },
+          "ordinal": {
+            "const": 0,
+            "default": 0,
+            "title": "Ordinal",
+            "type": "integer"
+          },
+          "requested_limit": {
+            "const": 1,
+            "default": 1,
+            "title": "Requested Limit",
+            "type": "integer"
+          },
+          "returned_count": {
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Returned Count",
+            "type": "integer"
+          },
+          "role": {
+            "const": "target_lookup",
+            "default": "target_lookup",
+            "title": "Role",
+            "type": "string"
+          },
+          "target_present": {
+            "title": "Target Present",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "returned_count",
+          "target_present"
+        ],
+        "title": "DiagnosticTargetLookupSubquerySummary",
+        "type": "object"
+      },
+      "DiagnosticTargetUnavailableReason": {
+        "enum": [
+          "target_unavailable_in_diagnostic_snapshot"
+        ],
+        "title": "DiagnosticTargetUnavailableReason",
         "type": "string"
       },
       "DirectScoreEvidenceValue": {
@@ -1440,6 +1817,187 @@
         "title": "ExcludedPairCount",
         "type": "object"
       },
+      "ExpectedDocumentDiagnosticRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "config_id": {
+            "format": "uuid",
+            "title": "Config Id",
+            "type": "string"
+          },
+          "contract_version": {
+            "$ref": "#/components/schemas/ContractVersion",
+            "default": 1
+          },
+          "include_no_filter_counterfactual": {
+            "default": false,
+            "title": "Include No Filter Counterfactual",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "config_id"
+        ],
+        "title": "ExpectedDocumentDiagnosticRequest",
+        "type": "object"
+      },
+      "ExpectedDocumentDiagnosticResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "candidate_evidence": {
+            "items": {
+              "$ref": "#/components/schemas/CandidateCutoffEvidence"
+            },
+            "maxItems": 4,
+            "title": "Candidate Evidence",
+            "type": "array"
+          },
+          "config_id": {
+            "format": "uuid",
+            "title": "Config Id",
+            "type": "string"
+          },
+          "config_mode": {
+            "$ref": "#/components/schemas/RetrievalMode"
+          },
+          "contract_version": {
+            "$ref": "#/components/schemas/ContractVersion",
+            "default": 1
+          },
+          "data_origin": {
+            "const": "live",
+            "default": "live",
+            "title": "Data Origin",
+            "type": "string"
+          },
+          "duration_ms": {
+            "maximum": 600000.0,
+            "minimum": 0.0,
+            "title": "Duration Ms",
+            "type": "number"
+          },
+          "embedding_duration_ms": {
+            "anyOf": [
+              {
+                "maximum": 600000.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Embedding Duration Ms"
+          },
+          "filter_evidence": {
+            "items": {
+              "$ref": "#/components/schemas/FilterPredicateEvidence"
+            },
+            "maxItems": 16,
+            "title": "Filter Evidence",
+            "type": "array"
+          },
+          "included_no_filter_counterfactual": {
+            "title": "Included No Filter Counterfactual",
+            "type": "boolean"
+          },
+          "observability_notice": {
+            "const": "new_live_diagnostic_not_original_run",
+            "default": "new_live_diagnostic_not_original_run",
+            "title": "Observability Notice",
+            "type": "string"
+          },
+          "observations": {
+            "items": {
+              "$ref": "#/components/schemas/ForensicObservation"
+            },
+            "maxItems": 32,
+            "title": "Observations",
+            "type": "array"
+          },
+          "observed_at": {
+            "format": "date-time",
+            "title": "Observed At",
+            "type": "string"
+          },
+          "origin": {
+            "const": "live_expected_document_diagnostic",
+            "default": "live_expected_document_diagnostic",
+            "title": "Origin",
+            "type": "string"
+          },
+          "qualified_rrf_evidence": {
+            "items": {
+              "$ref": "#/components/schemas/QualifiedRrfEvidence"
+            },
+            "maxItems": 2,
+            "title": "Qualified Rrf Evidence",
+            "type": "array"
+          },
+          "query_id": {
+            "format": "uuid",
+            "title": "Query Id",
+            "type": "string"
+          },
+          "run_id": {
+            "format": "uuid",
+            "title": "Run Id",
+            "type": "string"
+          },
+          "stored_filter_result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DiagnosticPredicateResult"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "subqueries": {
+            "items": {
+              "$ref": "#/components/schemas/DiagnosticSubquerySummary"
+            },
+            "maxItems": 5,
+            "minItems": 2,
+            "title": "Subqueries",
+            "type": "array"
+          },
+          "target": {
+            "$ref": "#/components/schemas/DiagnosticTargetLookup"
+          },
+          "target_document_id": {
+            "format": "uuid",
+            "title": "Target Document Id",
+            "type": "string"
+          },
+          "trace_id": {
+            "format": "uuid",
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id",
+          "query_id",
+          "config_id",
+          "config_mode",
+          "target_document_id",
+          "included_no_filter_counterfactual",
+          "stored_filter_result",
+          "observed_at",
+          "trace_id",
+          "duration_ms",
+          "subqueries",
+          "target",
+          "filter_evidence",
+          "candidate_evidence",
+          "qualified_rrf_evidence",
+          "observations"
+        ],
+        "title": "ExpectedDocumentDiagnosticResponse",
+        "type": "object"
+      },
       "FilterLogical-Input": {
         "additionalProperties": false,
         "properties": {
@@ -1600,6 +2158,84 @@
           "value"
         ],
         "title": "FilterPredicate",
+        "type": "object"
+      },
+      "FilterPredicateEvidence": {
+        "additionalProperties": false,
+        "properties": {
+          "certainty": {
+            "$ref": "#/components/schemas/EvidenceCertainty"
+          },
+          "config_id": {
+            "format": "uuid",
+            "title": "Config Id",
+            "type": "string"
+          },
+          "field": {
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[A-Za-z_][A-Za-z0-9_.-]*$",
+            "title": "Field",
+            "type": "string"
+          },
+          "observed_at": {
+            "format": "date-time",
+            "title": "Observed At",
+            "type": "string"
+          },
+          "operator": {
+            "$ref": "#/components/schemas/PredicateOp"
+          },
+          "origin": {
+            "const": "client_computed",
+            "default": "client_computed",
+            "title": "Origin",
+            "type": "string"
+          },
+          "predicate_ordinal": {
+            "maximum": 15.0,
+            "minimum": 0.0,
+            "title": "Predicate Ordinal",
+            "type": "integer"
+          },
+          "predicate_path": {
+            "items": {
+              "maximum": 30.0,
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "maxItems": 8,
+            "minItems": 1,
+            "title": "Predicate Path",
+            "type": "array"
+          },
+          "result": {
+            "$ref": "#/components/schemas/DiagnosticPredicateResult"
+          },
+          "target_document_id": {
+            "format": "uuid",
+            "title": "Target Document Id",
+            "type": "string"
+          },
+          "trace_id": {
+            "format": "uuid",
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "config_id",
+          "target_document_id",
+          "observed_at",
+          "trace_id",
+          "predicate_ordinal",
+          "predicate_path",
+          "field",
+          "operator",
+          "result",
+          "certainty"
+        ],
+        "title": "FilterPredicateEvidence",
         "type": "object"
       },
       "FilterPredicateEvidenceValue": {
@@ -2484,6 +3120,166 @@
           "relevance_grade"
         ],
         "title": "Qrel",
+        "type": "object"
+      },
+      "QualifiedRrfEvidence": {
+        "additionalProperties": false,
+        "properties": {
+          "ann_rank": {
+            "anyOf": [
+              {
+                "maximum": 100.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ann Rank"
+          },
+          "ann_weight": {
+            "exclusiveMinimum": 0.0,
+            "maximum": 100.0,
+            "title": "Ann Weight",
+            "type": "number"
+          },
+          "bm25_rank": {
+            "anyOf": [
+              {
+                "maximum": 100.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bm25 Rank"
+          },
+          "bm25_weight": {
+            "exclusiveMinimum": 0.0,
+            "maximum": 100.0,
+            "title": "Bm25 Weight",
+            "type": "number"
+          },
+          "boundary_score": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ObservedScore"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "certainty": {
+            "$ref": "#/components/schemas/EvidenceCertainty"
+          },
+          "config_id": {
+            "format": "uuid",
+            "title": "Config Id",
+            "type": "string"
+          },
+          "cutoff": {
+            "const": 50,
+            "default": 50,
+            "title": "Cutoff",
+            "type": "integer"
+          },
+          "observed_at": {
+            "format": "date-time",
+            "title": "Observed At",
+            "type": "string"
+          },
+          "origin": {
+            "const": "client_computed",
+            "default": "client_computed",
+            "title": "Origin",
+            "type": "string"
+          },
+          "rank_constant": {
+            "maximum": 10000.0,
+            "minimum": 1.0,
+            "title": "Rank Constant",
+            "type": "integer"
+          },
+          "relation": {
+            "enum": [
+              "target_present",
+              "outside_candidates",
+              "not_observable"
+            ],
+            "title": "Relation",
+            "type": "string"
+          },
+          "returned_count": {
+            "maximum": 50.0,
+            "minimum": 0.0,
+            "title": "Returned Count",
+            "type": "integer"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/DiagnosticCandidateScope"
+          },
+          "stored_filter_result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DiagnosticPredicateResult"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "target_document_id": {
+            "format": "uuid",
+            "title": "Target Document Id",
+            "type": "string"
+          },
+          "target_present": {
+            "title": "Target Present",
+            "type": "boolean"
+          },
+          "target_rank": {
+            "anyOf": [
+              {
+                "maximum": 50.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Rank"
+          },
+          "target_score": {
+            "$ref": "#/components/schemas/ObservedScore"
+          },
+          "trace_id": {
+            "format": "uuid",
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "config_id",
+          "target_document_id",
+          "observed_at",
+          "trace_id",
+          "scope",
+          "stored_filter_result",
+          "bm25_weight",
+          "ann_weight",
+          "rank_constant",
+          "returned_count",
+          "target_present",
+          "target_score",
+          "relation",
+          "certainty"
+        ],
+        "title": "QualifiedRrfEvidence",
         "type": "object"
       },
       "QuerySet": {
@@ -4473,6 +5269,119 @@
           }
         },
         "summary": "Get Evaluation Run Query",
+        "tags": [
+          "evaluation runs"
+        ]
+      }
+    },
+    "/api/v1/eval-runs/{run_id}/queries/{query_id}/documents/{document_id}/diagnostic": {
+      "post": {
+        "operationId": "diagnose_expected_document",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "query_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Query Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "document_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Document Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExpectedDocumentDiagnosticRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExpectedDocumentDiagnosticResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "The requested evaluation record was not found."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "The requested evaluation action conflicts."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "The evaluation request is invalid."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "The request failed unexpectedly."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorDetail"
+                }
+              }
+            },
+            "description": "Evaluation data or runtime is unavailable."
+          }
+        },
+        "summary": "Diagnose Expected Document",
         "tags": [
           "evaluation runs"
         ]

@@ -4,11 +4,11 @@ import asyncio
 import sqlite3
 import threading
 import traceback
-from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Iterator
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from uuid import UUID, uuid5
 
 import pytest
@@ -33,7 +33,13 @@ from pufferlab.contracts.evals import (
     QuerySet,
     RunEnvironment,
 )
-from pufferlab.contracts.forensics import EvalRunQueryReplayRequest, ForensicCode
+from pufferlab.contracts.filters import FilterPredicate, PredicateOp
+from pufferlab.contracts.forensics import (
+    DiagnosticSubqueryRole,
+    EvalRunQueryReplayRequest,
+    ExpectedDocumentDiagnosticRequest,
+    ForensicCode,
+)
 from pufferlab.contracts.retrieval import (
     RetrievalConfig,
     RetrievalConfigSummary,
@@ -67,18 +73,29 @@ from pufferlab.persistence import Database, PufferLabRepository
 from pufferlab.persistence.errors import PersistenceValidationError, RecordNotFoundError
 from pufferlab.providers.errors import ProviderError, ProviderErrorDetails
 from pufferlab.retrieval.config import BoundSearchCatalog, derive_bound_retrieval_configs
+from pufferlab.retrieval.diagnostic_types import (
+    DiagnosticAttributeState,
+    DiagnosticAttributeValue,
+    DiagnosticCandidateList,
+    DiagnosticCandidateRow,
+    DiagnosticProviderRequest,
+    DiagnosticProviderResult,
+    DiagnosticTargetObservation,
+)
 from pufferlab.retrieval.errors import provider_failed
 from pufferlab.retrieval.types import (
     HybridProbeCandidate,
     HybridProbeExecuteRequest,
     HybridProbeExecuteResult,
     HybridProbeStageMembership,
+    QueryEmbedding,
     ReplaySearchBackend,
     SearchExecuteRequest,
     SearchExecuteResult,
 )
 from pufferlab.synthetic_demo import AUTHORED_SYNTHETIC_DEMO
 from pufferlab.synthetic_demo.seeder import materialize_synthetic_demo
+from pydantic import SecretStr
 
 _TEST_NAMESPACE = UUID("cc1bc5f7-0f4e-4b99-a8ad-8cc647027700")
 _NOW = datetime(2026, 8, 23, 0, 0, tzinfo=UTC)
@@ -530,6 +547,7 @@ def _seed_live_suite(
     *,
     judged_queries: list[JudgedQuery] | None = None,
     curated_manifest: CuratedQueryManifest | None = None,
+    namespace: str = "pufferlab-live-runtime-test",
 ) -> _LiveSuite:
     manifest = AUTHORED_SYNTHETIC_DEMO.manifest
     write_spec = compile_namespace_write_spec(manifest)
@@ -537,7 +555,7 @@ def _seed_live_suite(
         id=_id("live-dataset"),
         slug=manifest.slug,
         version=manifest.version,
-        namespace="pufferlab-live-runtime-test",
+        namespace=namespace,
         index_profile=IndexProfile(
             id=f"{manifest.slug}-{write_spec.schema_hash[:16]}",
             embedding_provider=manifest.embedding.provider,
@@ -623,6 +641,10 @@ def _runtime(
     worker_guard_factory: Callable[[Path], Any] | None = None,
     curated_manifest: CuratedQueryManifest | None = None,
     source_lock: SourceLock | None = None,
+    diagnostic_credential_getter: Callable[[Settings], SecretStr] | None = None,
+    diagnostic_provider_factory: Callable[..., Awaitable[Any]] | None = None,
+    diagnostic_embedder_factory: Callable[..., Any] | None = None,
+    query_set_authenticator: Callable[..., None] | None = None,
 ) -> EvaluationApiRuntime:
     def load_curated(_path: Path) -> CuratedQueryManifest:
         assert curated_manifest is not None
@@ -632,6 +654,11 @@ def _runtime(
         assert source_lock is not None
         return source_lock
 
+    diagnostic_options: dict[str, object] = {}
+    if diagnostic_credential_getter is not None:
+        diagnostic_options["diagnostic_credential_getter"] = diagnostic_credential_getter
+    if diagnostic_provider_factory is not None:
+        diagnostic_options["diagnostic_provider_factory"] = diagnostic_provider_factory
     return EvaluationApiRuntime(
         settings,
         database=database,
@@ -639,7 +666,9 @@ def _runtime(
         curated_manifest_loader=load_curated,
         source_lock_loader=load_checked_source,
         query_set_authenticator=(
-            None
+            query_set_authenticator
+            if query_set_authenticator is not None
+            else None
             if curated_manifest is not None and source_lock is not None
             else lambda _dataset, _query_set, _queries: None
         ),
@@ -647,11 +676,12 @@ def _runtime(
         bound_catalog_factory=probe.make_catalog,
         search_backend_factory=probe.make_runtime,
         provider_factory=probe.provider,
-        embedder_factory=probe.embedder,
+        embedder_factory=diagnostic_embedder_factory or probe.embedder,
         reranker_factory=probe.reranker,
         worker_guard_factory=worker_guard_factory,
         git_revision_factory=lambda: "a" * 40,
         now=lambda: datetime.now(UTC),
+        **diagnostic_options,
     )
 
 
@@ -668,6 +698,31 @@ def _assert_detached_error(
     assert marker not in repr(error)
     rendered = "".join(traceback.format_exception(type(error), error, error.__traceback__))
     assert marker not in rendered
+    current = error.__traceback__
+    while current is not None:
+        if "/backend/pufferlab/" in current.tb_frame.f_code.co_filename:
+            assert marker not in repr(current.tb_frame.f_locals)
+        current = current.tb_next
+
+
+def _assert_fresh_process_control(
+    error: BaseException,
+    *,
+    original: BaseException,
+    marker: str,
+) -> None:
+    assert error is not original
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    assert marker not in str(error)
+    assert marker not in repr(error)
+    rendered = "".join(traceback.format_exception(type(error), error, error.__traceback__))
+    assert marker not in rendered
+    current = error.__traceback__
+    while current is not None:
+        if "/backend/pufferlab/" in current.tb_frame.f_code.co_filename:
+            assert marker not in repr(current.tb_frame.f_locals)
+        current = current.tb_next
 
 
 async def _assert_detached_async_error(
@@ -1935,5 +1990,1282 @@ async def test_tampered_run_config_fails_after_manifest_before_provider_capable_
         "reranker": 0,
     }
     assert probe.replay_backends == []
+    await runtime.shutdown_execution()
+    runtime.dispose()
+
+
+def _diagnostic_observed_score(
+    kind: ScoreKind,
+    value: float,
+    *,
+    direct: bool,
+) -> ObservedScore:
+    return ObservedScore(
+        kind=kind,
+        value=value,
+        direction=(
+            ScoreDirection.HIGHER_IS_BETTER
+            if kind is ScoreKind.BM25
+            else ScoreDirection.LOWER_IS_BETTER
+        ),
+        source=(ScoreSource.COMPUTE_ATTRIBUTE if direct else ScoreSource.TURBOPUFFER_DIST),
+    )
+
+
+class _DiagnosticRuntimeEmbedder:
+    def __init__(
+        self,
+        *,
+        model: str,
+        revision: str,
+        dimensions: int,
+        events: list[str],
+        error: BaseException | None = None,
+        block: bool = False,
+    ) -> None:
+        self.model = model
+        self.revision = revision
+        self.dimensions = dimensions
+        self._events = events
+        self.error = error
+        self.block = block
+        self.calls = 0
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def embed_query(self, query_text: str) -> QueryEmbedding:
+        assert query_text
+        self.calls += 1
+        self.started.set()
+        if self.block:
+            await self.release.wait()
+        if self.error is not None:
+            raise self.error
+        return QueryEmbedding(vector=(0.0,) * self.dimensions, client_duration_ms=0.0)
+
+
+class _DiagnosticRuntimeProvider:
+    def __init__(
+        self,
+        *,
+        query_error: BaseException | None = None,
+        close_error: BaseException | None = None,
+        block_query: bool = False,
+        result_mutation: str | None = None,
+    ) -> None:
+        self.requests: list[DiagnosticProviderRequest] = []
+        self.close_calls = 0
+        self.query_error = query_error
+        self.close_error = close_error
+        self.block_query = block_query
+        self.result_mutation = result_mutation
+        self.query_started = asyncio.Event()
+
+    async def query(self, request: DiagnosticProviderRequest) -> DiagnosticProviderResult:
+        self.requests.append(request)
+        self.query_started.set()
+        if self.block_query:
+            await asyncio.Event().wait()
+        if self.query_error is not None:
+            raise self.query_error
+        target = DiagnosticTargetObservation(
+            target_document_id=request.target_document_id,
+            available=True,
+            bm25_score=(
+                _diagnostic_observed_score(ScoreKind.BM25, 5.0, direct=True)
+                if request.lexical_fields is not None
+                else None
+            ),
+            vector_distance=(
+                _diagnostic_observed_score(
+                    ScoreKind.VECTOR_DISTANCE,
+                    0.25,
+                    direct=True,
+                )
+                if request.query_vector is not None
+                else None
+            ),
+            attributes=tuple(
+                DiagnosticAttributeValue(
+                    field=field,
+                    state=DiagnosticAttributeState.PRESENT_VALUE,
+                    value="doc-1",
+                )
+                for field in request.filter_fields
+            ),
+        )
+        candidates = tuple(
+            DiagnosticCandidateList(
+                role=role,
+                requested_limit=request.candidate_limit,
+                rows=(
+                    DiagnosticCandidateRow(
+                        document_id=request.target_document_id,
+                        rank=1,
+                        score=(
+                            _diagnostic_observed_score(
+                                ScoreKind.BM25,
+                                5.0,
+                                direct=False,
+                            )
+                            if "bm25" in role.value
+                            else _diagnostic_observed_score(
+                                ScoreKind.VECTOR_DISTANCE,
+                                0.25,
+                                direct=False,
+                            )
+                        ),
+                    ),
+                ),
+            )
+            for role in request.roles[1:]
+        )
+        result = DiagnosticProviderResult(
+            namespace=request.namespace,
+            target=target,
+            candidate_lists=candidates,
+            client_duration_ms=0.0,
+        )
+        if self.result_mutation == "namespace":
+            return replace(result, namespace="forged-diagnostic-namespace")
+        if self.result_mutation == "role":
+            candidate = result.candidate_lists[0]
+            return replace(
+                result,
+                candidate_lists=(
+                    replace(
+                        candidate,
+                        role=DiagnosticSubqueryRole.NO_FILTER_COUNTERFACTUAL_BM25_CANDIDATES,
+                    ),
+                    *result.candidate_lists[1:],
+                ),
+            )
+        if self.result_mutation == "limit":
+            candidate = result.candidate_lists[0]
+            return replace(
+                result,
+                candidate_lists=(
+                    replace(candidate, requested_limit=candidate.requested_limit + 1),
+                    *result.candidate_lists[1:],
+                ),
+            )
+        return result
+
+    async def close(self) -> None:
+        self.close_calls += 1
+        if self.close_error is not None:
+            raise self.close_error
+
+
+class _DiagnosticRuntimeProbe(_FactoryProbe):
+    def __init__(self, manifest: DatasetManifest) -> None:
+        super().__init__(manifest)
+        self.events: list[str] = []
+        self.providers: list[_DiagnosticRuntimeProvider] = []
+        self.embedders: list[_DiagnosticRuntimeEmbedder] = []
+        self.provider_bindings: list[tuple[str, str]] = []
+        self.catalog_mutation: str | None = None
+        self.catalog_error: BaseException | None = None
+        self.forged_mode: RetrievalMode | None = None
+        self.provider_factory_error: BaseException | None = None
+        self.provider_query_error: BaseException | None = None
+        self.provider_close_error: BaseException | None = None
+        self.provider_result_mutation: str | None = None
+        self.block_provider_query = False
+        self.embedder_factory_error: BaseException | None = None
+        self.embedder_error: BaseException | None = None
+        self.block_embedder = False
+
+    def load_manifest(self, path: Path) -> DatasetManifest:
+        self.events.append("manifest")
+        return super().load_manifest(path)
+
+    def diagnostic_credential(self, settings: Settings) -> SecretStr:
+        self.events.append("credential")
+        credential = settings.turbopuffer_api_key
+        assert credential is not None
+        return credential
+
+    def make_catalog(
+        self,
+        dataset: DatasetVersion,
+        manifest: DatasetManifest,
+        configs: tuple[RetrievalConfig, ...],
+    ) -> BoundSearchCatalog:
+        self.events.append("catalog")
+        if self.catalog_error is not None:
+            raise self.catalog_error
+        bound = super().make_catalog(dataset, manifest, configs)
+        if self.catalog_mutation == "namespace":
+            object.__setattr__(dataset, "namespace", "mutated-catalog-namespace")
+        elif self.catalog_mutation == "extra":
+            bound.catalog._configs = (  # type: ignore[attr-defined]
+                *bound.catalog.configs,
+                bound.catalog.configs[0],
+            )
+        elif self.catalog_mutation == "missing":
+            bound.catalog._configs = bound.catalog.configs[:-1]  # type: ignore[attr-defined]
+        elif self.catalog_mutation == "reordered":
+            bound.catalog._configs = tuple(  # type: ignore[attr-defined]
+                reversed(bound.catalog.configs)
+            )
+        elif self.catalog_mutation == "getter":
+            bound.catalog.get = lambda _config_id: bound.catalog.configs[0]  # type: ignore[method-assign]
+        if self.forged_mode is not None:
+            executable = list(bound.catalog.configs)
+            index = next(
+                value for value, config in enumerate(executable) if config.mode is self.forged_mode
+            )
+            config = executable[index]
+            changes: dict[str, object] = {
+                RetrievalMode.BM25.value: {"lexical_fields": (("title", 99.0),)},
+                RetrievalMode.VECTOR.value: {"vector_attribute": "forged_vector"},
+                RetrievalMode.HYBRID_RRF.value: {"rrf_weights": (2.0, 1.0)},
+                RetrievalMode.HYBRID_RERANK.value: {"reranker_depth": 49},
+            }[self.forged_mode.value]
+            executable[index] = replace(config, **changes)
+            bound.catalog._configs = tuple(executable)  # type: ignore[attr-defined]
+        return bound
+
+    def make_embedder(
+        self,
+        *,
+        model: str,
+        revision: str,
+        dimensions: int,
+    ) -> _DiagnosticRuntimeEmbedder:
+        self.events.append("embedder")
+        if self.embedder_factory_error is not None:
+            raise self.embedder_factory_error
+        embedder = _DiagnosticRuntimeEmbedder(
+            model=model,
+            revision=revision,
+            dimensions=dimensions,
+            events=self.events,
+            error=self.embedder_error,
+            block=self.block_embedder,
+        )
+        self.embedders.append(embedder)
+        return embedder
+
+    async def make_provider(
+        self,
+        *,
+        api_key: str,
+        region: str,
+        namespace: str,
+    ) -> _DiagnosticRuntimeProvider:
+        assert api_key == "test-only-secret"
+        self.events.append("provider")
+        if self.provider_factory_error is not None:
+            raise self.provider_factory_error
+        self.provider_bindings.append((region, namespace))
+        provider = _DiagnosticRuntimeProvider(
+            query_error=self.provider_query_error,
+            close_error=self.provider_close_error,
+            block_query=self.block_provider_query,
+            result_mutation=self.provider_result_mutation,
+        )
+        self.providers.append(provider)
+        return provider
+
+
+def _diagnostic_runtime(
+    settings: Settings,
+    database: Database,
+    probe: _DiagnosticRuntimeProbe,
+) -> EvaluationApiRuntime:
+    def authenticate(*_values: object) -> None:
+        probe.events.append("auth")
+
+    return _runtime(
+        settings,
+        database,
+        probe,
+        diagnostic_credential_getter=probe.diagnostic_credential,
+        diagnostic_provider_factory=probe.make_provider,
+        diagnostic_embedder_factory=probe.make_embedder,
+        query_set_authenticator=authenticate,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", list(RetrievalMode))
+@pytest.mark.parametrize("target_index", [0, 1])
+async def test_diagnostic_runtime_all_modes_accept_positive_grades_and_are_read_only(
+    tmp_path: Path,
+    mode: RetrievalMode,
+    target_index: int,
+) -> None:
+    settings = _settings(tmp_path).model_copy(
+        update={"pufferlab_search_namespace": "foreign-playground-setting"}
+    )
+    database = Database.from_settings(settings)
+    database.migrate()
+    repository = PufferLabRepository(database.session_factory)
+    queries, document_ids = _replay_queries()
+    suite = _seed_live_suite(repository, judged_queries=queries)
+    probe = _DiagnosticRuntimeProbe(suite.manifest)
+    runtime = _diagnostic_runtime(settings, database, probe)
+    await runtime.start()
+    run = _create_replay_run(repository, suite, f"diagnostic-{mode.value}-{target_index}")
+    config = _config_for_mode(suite, mode)
+    before = database.path.read_bytes()
+
+    response = await runtime.diagnose_expected_document(
+        run.id,
+        queries[0].id,
+        document_ids[target_index],
+        ExpectedDocumentDiagnosticRequest(config_id=config.id),
+    )
+
+    expected_events = ["auth", "manifest", "credential", "catalog"]
+    if mode is not RetrievalMode.BM25:
+        expected_events.append("embedder")
+    expected_events.append("provider")
+    assert probe.events == expected_events
+    assert response.config_mode is mode
+    assert response.target_document_id == document_ids[target_index]
+    assert response.stored_filter_result is None
+    assert probe.provider_bindings == [("gcp-us-west1", "pufferlab-live-runtime-test")]
+    assert len(probe.providers) == 1
+    assert probe.providers[0].close_calls == 1
+    assert len(probe.embedders) == (0 if mode is RetrievalMode.BM25 else 1)
+    assert probe.calls["runtime"] == probe.calls["reranker"] == 0
+    assert database.path.read_bytes() == before
+    await runtime.shutdown_execution()
+    runtime.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("include_no_filter", [False, True])
+async def test_diagnostic_runtime_authenticates_filtered_suite_with_unrelated_schema_fields(
+    tmp_path: Path,
+    include_no_filter: bool,
+) -> None:
+    settings = _settings(tmp_path)
+    database = Database.from_settings(settings)
+    database.migrate()
+    repository = PufferLabRepository(database.session_factory)
+    queries, document_ids = _replay_queries()
+    queries[0] = queries[0].model_copy(
+        update={
+            "filters": FilterPredicate(
+                field="external_id",
+                op=PredicateOp.EQ,
+                value="doc-1",
+            )
+        }
+    )
+    suite = _seed_live_suite(repository, judged_queries=queries)
+    probe = _DiagnosticRuntimeProbe(suite.manifest)
+    runtime = _diagnostic_runtime(settings, database, probe)
+    await runtime.start()
+    run = _create_replay_run(repository, suite, f"filtered-{include_no_filter}")
+    config = _config_for_mode(suite, RetrievalMode.HYBRID_RRF)
+
+    response = await runtime.diagnose_expected_document(
+        run.id,
+        queries[0].id,
+        document_ids[0],
+        ExpectedDocumentDiagnosticRequest(
+            config_id=config.id,
+            include_no_filter_counterfactual=include_no_filter,
+        ),
+    )
+
+    assert response.stored_filter_result is not None
+    assert response.stored_filter_result.value == "matched"
+    assert response.included_no_filter_counterfactual is include_no_filter
+    assert [item.field for item in response.filter_evidence] == ["external_id"]
+    assert len(response.subqueries) == (5 if include_no_filter else 3)
+    assert probe.events == [
+        "auth",
+        "manifest",
+        "credential",
+        "catalog",
+        "embedder",
+        "provider",
+    ]
+    await runtime.shutdown_execution()
+    runtime.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target_kind", ["grade_zero", "unjudged"])
+async def test_diagnostic_runtime_rejects_nonpositive_or_unjudged_target_before_sensitive_work(
+    tmp_path: Path,
+    target_kind: str,
+) -> None:
+    settings = _settings(tmp_path)
+    database = Database.from_settings(settings)
+    database.migrate()
+    repository = PufferLabRepository(database.session_factory)
+    queries, document_ids = _replay_queries()
+    suite = _seed_live_suite(repository, judged_queries=queries)
+    probe = _DiagnosticRuntimeProbe(suite.manifest)
+    runtime = _diagnostic_runtime(settings, database, probe)
+    await runtime.start()
+    run = _create_replay_run(repository, suite, f"invalid-target-{target_kind}")
+    target = document_ids[2 if target_kind == "grade_zero" else 3]
+
+    with pytest.raises(EvaluationViewError) as raised:
+        await runtime.diagnose_expected_document(
+            run.id,
+            queries[0].id,
+            target,
+            ExpectedDocumentDiagnosticRequest(config_id=suite.configs[0].id),
+        )
+
+    assert raised.value.http_status == 422
+    assert raised.value.operation == "diagnose_expected_document"
+    assert probe.events == ["auth", "manifest"]
+    assert probe.providers == probe.embedders == []
+    await runtime.shutdown_execution()
+    runtime.dispose()
+
+
+@pytest.mark.asyncio
+async def test_diagnostic_runtime_rejects_unchecked_direct_request_values_before_repository_work(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    database = Database.from_settings(settings)
+    database.migrate()
+    probe = _DiagnosticRuntimeProbe(AUTHORED_SYNTHETIC_DEMO.manifest)
+    runtime = _diagnostic_runtime(settings, database, probe)
+    await runtime.start()
+    malformed = ExpectedDocumentDiagnosticRequest.model_construct(
+        config_id="forged-config",
+        include_no_filter_counterfactual=False,
+    )
+
+    with pytest.raises(EvaluationViewError) as raised:
+        await runtime.diagnose_expected_document(  # type: ignore[arg-type]
+            _id("run"),
+            _id("query"),
+            _id("document"),
+            malformed,
+        )
+
+    assert raised.value.http_status == 422
+    assert probe.events == []
+    await runtime.shutdown_execution()
+    runtime.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("attack", ["run", "query", "document", "request"])
+async def test_diagnostic_runtime_rejects_path_or_request_subclasses_before_repository_work(
+    tmp_path: Path,
+    attack: str,
+) -> None:
+    class _UuidSubclass(UUID):
+        pass
+
+    class _RequestSubclass(ExpectedDocumentDiagnosticRequest):
+        pass
+
+    settings = _settings(tmp_path)
+    database = Database.from_settings(settings)
+    database.migrate()
+    probe = _DiagnosticRuntimeProbe(AUTHORED_SYNTHETIC_DEMO.manifest)
+    runtime = _diagnostic_runtime(settings, database, probe)
+    await runtime.start()
+    run_id: UUID = _id("subclass-run")
+    query_id: UUID = _id("subclass-query")
+    document_id: UUID = _id("subclass-document")
+    request: ExpectedDocumentDiagnosticRequest = ExpectedDocumentDiagnosticRequest(
+        config_id=_id("subclass-config")
+    )
+    if attack == "run":
+        run_id = _UuidSubclass(str(run_id))
+    elif attack == "query":
+        query_id = _UuidSubclass(str(query_id))
+    elif attack == "document":
+        document_id = _UuidSubclass(str(document_id))
+    else:
+        request = _RequestSubclass(config_id=request.config_id)
+
+    with pytest.raises(EvaluationViewError) as raised:
+        await runtime.diagnose_expected_document(run_id, query_id, document_id, request)
+
+    assert raised.value.http_status == 422
+    assert raised.value.operation == "diagnose_expected_document"
+    assert probe.events == []
+    assert probe.providers == probe.embedders == []
+    await runtime.shutdown_execution()
+    runtime.dispose()
+
+
+@pytest.mark.asyncio
+async def test_diagnostic_runtime_uses_region_captured_before_credential_mutation(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    database = Database.from_settings(settings)
+    database.migrate()
+    repository = PufferLabRepository(database.session_factory)
+    queries, document_ids = _replay_queries()
+    suite = _seed_live_suite(repository, judged_queries=queries)
+    probe = _DiagnosticRuntimeProbe(suite.manifest)
+
+    def mutate_region(current: Settings) -> SecretStr:
+        probe.events.append("credential")
+        credential = current.turbopuffer_api_key
+        assert credential is not None
+        current.turbopuffer_region = "gcp-us-east1"
+        return credential
+
+    def authenticate(*_values: object) -> None:
+        probe.events.append("auth")
+
+    runtime = _runtime(
+        settings,
+        database,
+        probe,
+        diagnostic_credential_getter=mutate_region,
+        diagnostic_provider_factory=probe.make_provider,
+        diagnostic_embedder_factory=probe.make_embedder,
+        query_set_authenticator=authenticate,
+    )
+    await runtime.start()
+    run = _create_replay_run(repository, suite, "captured-region")
+    response = await runtime.diagnose_expected_document(
+        run.id,
+        queries[0].id,
+        document_ids[0],
+        ExpectedDocumentDiagnosticRequest(config_id=suite.configs[0].id),
+    )
+
+    assert response.target_document_id == document_ids[0]
+    assert probe.provider_bindings == [("gcp-us-west1", "pufferlab-live-runtime-test")]
+    await runtime.shutdown_execution()
+    runtime.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mutation", "forged_mode", "selected_mode"),
+    [
+        ("namespace", None, RetrievalMode.BM25),
+        ("extra", None, RetrievalMode.BM25),
+        ("missing", None, RetrievalMode.BM25),
+        ("reordered", None, RetrievalMode.BM25),
+        ("getter", None, RetrievalMode.BM25),
+        ("forged", RetrievalMode.BM25, RetrievalMode.BM25),
+        ("forged", RetrievalMode.VECTOR, RetrievalMode.VECTOR),
+        ("forged", RetrievalMode.HYBRID_RRF, RetrievalMode.HYBRID_RRF),
+        ("forged", RetrievalMode.HYBRID_RERANK, RetrievalMode.HYBRID_RERANK),
+        ("forged", RetrievalMode.VECTOR, RetrievalMode.BM25),
+    ],
+)
+async def test_diagnostic_runtime_rejects_catalog_alias_and_internal_config_forgery(
+    tmp_path: Path,
+    mutation: str,
+    forged_mode: RetrievalMode | None,
+    selected_mode: RetrievalMode,
+) -> None:
+    settings = _settings(tmp_path)
+    database = Database.from_settings(settings)
+    database.migrate()
+    repository = PufferLabRepository(database.session_factory)
+    queries, document_ids = _replay_queries()
+    suite = _seed_live_suite(repository, judged_queries=queries)
+    probe = _DiagnosticRuntimeProbe(suite.manifest)
+    if forged_mode is None:
+        probe.catalog_mutation = mutation
+    else:
+        probe.forged_mode = forged_mode
+    runtime = _diagnostic_runtime(settings, database, probe)
+    await runtime.start()
+    run = _create_replay_run(
+        repository,
+        suite,
+        f"catalog-{mutation}-{forged_mode}-{selected_mode.value}",
+    )
+
+    with pytest.raises(EvaluationViewError) as raised:
+        await runtime.diagnose_expected_document(
+            run.id,
+            queries[0].id,
+            document_ids[0],
+            ExpectedDocumentDiagnosticRequest(config_id=_config_for_mode(suite, selected_mode).id),
+        )
+
+    assert raised.value.http_status == 503
+    assert probe.events == ["auth", "manifest", "credential", "catalog"]
+    assert probe.providers == probe.embedders == []
+    await runtime.shutdown_execution()
+    runtime.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_stage", ["catalog", "embedder_factory"])
+async def test_diagnostic_runtime_factory_failures_are_fixed_before_provider_construction(
+    tmp_path: Path,
+    failure_stage: str,
+) -> None:
+    marker = f"PRIVATE_DIAGNOSTIC_{failure_stage.upper()}_MARKER"
+    settings = _settings(tmp_path)
+    database = Database.from_settings(settings)
+    database.migrate()
+    repository = PufferLabRepository(database.session_factory)
+    queries, document_ids = _replay_queries()
+    suite = _seed_live_suite(repository, judged_queries=queries)
+    probe = _DiagnosticRuntimeProbe(suite.manifest)
+    if failure_stage == "catalog":
+        probe.catalog_error = RuntimeError(marker)
+    else:
+        probe.embedder_factory_error = RuntimeError(marker)
+    runtime = _diagnostic_runtime(settings, database, probe)
+    await runtime.start()
+    run = _create_replay_run(repository, suite, f"factory-{failure_stage}")
+    config = _config_for_mode(
+        suite,
+        RetrievalMode.BM25 if failure_stage == "catalog" else RetrievalMode.VECTOR,
+    )
+    before = database.path.read_bytes()
+
+    with pytest.raises(EvaluationViewError) as raised:
+        await runtime.diagnose_expected_document(
+            run.id,
+            queries[0].id,
+            document_ids[0],
+            ExpectedDocumentDiagnosticRequest(config_id=config.id),
+        )
+
+    _assert_detached_error(raised.value, marker=marker, http_status=503)
+    expected = ["auth", "manifest", "credential", "catalog"]
+    if failure_stage == "embedder_factory":
+        expected.append("embedder")
+    assert probe.events == expected
+    assert probe.providers == probe.embedders == []
+    assert database.path.read_bytes() == before
+    await runtime.shutdown_execution()
+    runtime.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        "source",
+        "duplicate_qrel",
+        "foreign_config",
+        "missing_filter_field",
+        "nonfilterable_field",
+        "wrong_filter_type",
+        "ineligible_no_filter",
+        "namespace",
+        "region",
+    ],
+)
+async def test_diagnostic_runtime_tamper_matrix_reaches_zero_sensitive_factories(
+    tmp_path: Path,
+    tamper: str,
+) -> None:
+    settings = _settings(tmp_path)
+    if tamper == "region":
+        settings.turbopuffer_region = "gcp-us-east1"
+    database = Database.from_settings(settings)
+    database.migrate()
+    repository = PufferLabRepository(database.session_factory)
+    queries, document_ids = _replay_queries()
+    if tamper == "duplicate_qrel":
+        queries[0] = queries[0].model_copy(
+            update={"qrels": [*queries[0].qrels, queries[0].qrels[0]]}
+        )
+    filter_by_tamper = {
+        "missing_filter_field": FilterPredicate(
+            field="missing_field",
+            op=PredicateOp.EQ,
+            value="doc-1",
+        ),
+        "nonfilterable_field": FilterPredicate(
+            field="body",
+            op=PredicateOp.EQ,
+            value="doc-1",
+        ),
+        "wrong_filter_type": FilterPredicate(
+            field="external_id",
+            op=PredicateOp.EQ,
+            value=7,
+        ),
+    }
+    if tamper in filter_by_tamper:
+        queries[0] = queries[0].model_copy(update={"filters": filter_by_tamper[tamper]})
+    suite = _seed_live_suite(
+        repository,
+        judged_queries=queries,
+        namespace="invalid namespace" if tamper == "namespace" else "pufferlab-live-runtime-test",
+    )
+    probe = _DiagnosticRuntimeProbe(suite.manifest)
+
+    def authenticate(*_values: object) -> None:
+        probe.events.append("auth")
+        if tamper == "source":
+            raise PersistenceValidationError("PRIVATE_SOURCE_AUTH_MARKER")
+
+    runtime = _runtime(
+        settings,
+        database,
+        probe,
+        diagnostic_credential_getter=probe.diagnostic_credential,
+        diagnostic_provider_factory=probe.make_provider,
+        diagnostic_embedder_factory=probe.make_embedder,
+        query_set_authenticator=authenticate,
+    )
+    await runtime.start()
+    run = _create_replay_run(repository, suite, f"tamper-{tamper}")
+    config_id = (
+        _id("foreign-diagnostic-config") if tamper == "foreign_config" else suite.configs[0].id
+    )
+    request = ExpectedDocumentDiagnosticRequest(
+        config_id=config_id,
+        include_no_filter_counterfactual=tamper == "ineligible_no_filter",
+    )
+    before = database.path.read_bytes()
+
+    with pytest.raises(EvaluationViewError) as raised:
+        await runtime.diagnose_expected_document(
+            run.id,
+            queries[0].id,
+            document_ids[0],
+            request,
+        )
+
+    assert raised.value.http_status == 422
+    assert probe.events == (["auth"] if tamper == "source" else ["auth", "manifest"])
+    assert probe.calls["credential"] == 0
+    assert probe.calls["catalog"] == 0
+    assert probe.providers == probe.embedders == []
+    assert database.path.read_bytes() == before
+    await runtime.shutdown_execution()
+    runtime.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "credential",
+    [None, "", "contains space", "line\nbreak"],
+)
+async def test_diagnostic_runtime_rejects_missing_or_malformed_credentials_before_catalog(
+    tmp_path: Path,
+    credential: str | None,
+) -> None:
+    settings = Settings(
+        pufferlab_data_dir=tmp_path,
+        turbopuffer_api_key=credential,
+        turbopuffer_region="gcp-us-west1",
+    )
+    database = Database.from_settings(settings)
+    database.migrate()
+    repository = PufferLabRepository(database.session_factory)
+    queries, document_ids = _replay_queries()
+    suite = _seed_live_suite(repository, judged_queries=queries)
+    probe = _DiagnosticRuntimeProbe(suite.manifest)
+    runtime = _diagnostic_runtime(settings, database, probe)
+    await runtime.start()
+    run = _create_replay_run(repository, suite, f"credential-{credential!r}")
+
+    with pytest.raises(EvaluationViewError) as raised:
+        await runtime.diagnose_expected_document(
+            run.id,
+            queries[0].id,
+            document_ids[0],
+            ExpectedDocumentDiagnosticRequest(config_id=suite.configs[0].id),
+        )
+
+    assert raised.value.http_status == 503
+    assert probe.events == ["auth", "manifest", "credential"]
+    assert probe.calls["catalog"] == 0
+    assert probe.providers == probe.embedders == []
+    await runtime.shutdown_execution()
+    runtime.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "credential_kind",
+    ["none", "wrong_type", "empty", "space", "control", "oversize", "forged_subclass"],
+)
+async def test_diagnostic_runtime_independently_validates_injected_credential_getter(
+    tmp_path: Path,
+    credential_kind: str,
+) -> None:
+    marker = "PRIVATE_FORGED_CREDENTIAL_MARKER"
+
+    class _ForgedCredentialString(str):
+        def __len__(self) -> int:
+            raise AssertionError(marker)
+
+        def __iter__(self) -> Iterator[str]:
+            raise AssertionError(marker)
+
+    settings = _settings(tmp_path)
+    database = Database.from_settings(settings)
+    database.migrate()
+    repository = PufferLabRepository(database.session_factory)
+    queries, document_ids = _replay_queries()
+    suite = _seed_live_suite(repository, judged_queries=queries)
+    probe = _DiagnosticRuntimeProbe(suite.manifest)
+    credential: object = {
+        "none": None,
+        "wrong_type": "test-only-secret",
+        "empty": SecretStr(""),
+        "space": SecretStr("contains space"),
+        "control": SecretStr("line\nbreak"),
+        "oversize": SecretStr("x" * 4097),
+        "forged_subclass": SecretStr("temporary"),
+    }[credential_kind]
+    if credential_kind == "forged_subclass":
+        object.__setattr__(credential, "_secret_value", _ForgedCredentialString(marker))
+
+    def injected_getter(_settings: Settings) -> SecretStr:
+        probe.events.append("credential")
+        return cast(SecretStr, credential)
+
+    def authenticate(*_values: object) -> None:
+        probe.events.append("auth")
+
+    runtime = _runtime(
+        settings,
+        database,
+        probe,
+        diagnostic_credential_getter=injected_getter,
+        diagnostic_provider_factory=probe.make_provider,
+        diagnostic_embedder_factory=probe.make_embedder,
+        query_set_authenticator=authenticate,
+    )
+    await runtime.start()
+    run = _create_replay_run(repository, suite, f"credential-getter-{credential_kind}")
+
+    with pytest.raises(EvaluationViewError) as raised:
+        await runtime.diagnose_expected_document(
+            run.id,
+            queries[0].id,
+            document_ids[0],
+            ExpectedDocumentDiagnosticRequest(config_id=suite.configs[0].id),
+        )
+
+    _assert_detached_error(raised.value, marker=marker, http_status=503)
+    assert probe.events == ["auth", "manifest", "credential"]
+    assert probe.calls["catalog"] == 0
+    assert probe.providers == probe.embedders == []
+    await runtime.shutdown_execution()
+    runtime.dispose()
+
+
+@pytest.mark.asyncio
+async def test_diagnostic_runtime_uses_fresh_credential_copy_after_catalog_callback_mutation(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    database = Database.from_settings(settings)
+    database.migrate()
+    repository = PufferLabRepository(database.session_factory)
+    queries, document_ids = _replay_queries()
+    suite = _seed_live_suite(repository, judged_queries=queries)
+    probe = _DiagnosticRuntimeProbe(suite.manifest)
+    original = settings.turbopuffer_api_key
+    assert original is not None
+
+    def mutating_catalog(
+        dataset: DatasetVersion,
+        manifest: DatasetManifest,
+        configs: tuple[RetrievalConfig, ...],
+    ) -> BoundSearchCatalog:
+        bound = probe.make_catalog(dataset, manifest, configs)
+        object.__setattr__(original, "_secret_value", "changed-after-validation")
+        return bound
+
+    def authenticate(*_values: object) -> None:
+        probe.events.append("auth")
+
+    runtime = _runtime(
+        settings,
+        database,
+        probe,
+        diagnostic_credential_getter=probe.diagnostic_credential,
+        diagnostic_provider_factory=probe.make_provider,
+        diagnostic_embedder_factory=probe.make_embedder,
+        query_set_authenticator=authenticate,
+    )
+    runtime._bound_catalog_factory = mutating_catalog
+    await runtime.start()
+    run = _create_replay_run(repository, suite, "credential-copy")
+
+    response = await runtime.diagnose_expected_document(
+        run.id,
+        queries[0].id,
+        document_ids[0],
+        ExpectedDocumentDiagnosticRequest(config_id=suite.configs[0].id),
+    )
+
+    assert response.target_document_id == document_ids[0]
+    assert probe.events == ["auth", "manifest", "credential", "catalog", "provider"]
+    assert probe.providers[0].close_calls == 1
+    await runtime.shutdown_execution()
+    runtime.dispose()
+
+
+@pytest.mark.asyncio
+async def test_diagnostic_runtime_rejects_synthetic_before_every_sensitive_factory(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    database = Database.from_settings(settings)
+    database.migrate()
+    repository = PufferLabRepository(database.session_factory)
+    synthetic = materialize_synthetic_demo()
+    repository.put_dataset_version(synthetic.dataset_version)
+    for config in synthetic.configs:
+        repository.put_retrieval_config(config)
+    repository.put_query_set(
+        synthetic.query_set,
+        [item.judged_query for item in AUTHORED_SYNTHETIC_DEMO.queries],
+    )
+    repository.create_run(synthetic.queued_run)
+    probe = _DiagnosticRuntimeProbe(AUTHORED_SYNTHETIC_DEMO.manifest)
+    runtime = _diagnostic_runtime(settings, database, probe)
+    await runtime.start()
+    query = AUTHORED_SYNTHETIC_DEMO.queries[0].judged_query
+
+    with pytest.raises(EvaluationViewError) as raised:
+        await runtime.diagnose_expected_document(
+            synthetic.queued_run.id,
+            query.id,
+            query.qrels[0].document_id,
+            ExpectedDocumentDiagnosticRequest(config_id=synthetic.configs[0].id),
+        )
+
+    assert raised.value.http_status == 409
+    assert raised.value.operation == "diagnose_expected_document"
+    assert probe.events == []
+    assert probe.providers == probe.embedders == []
+    await runtime.shutdown_execution()
+    runtime.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("missing", ["run", "query"])
+async def test_diagnostic_runtime_missing_run_or_query_is_fixed_404_and_zero_sensitive_work(
+    tmp_path: Path,
+    missing: str,
+) -> None:
+    settings = _settings(tmp_path)
+    database = Database.from_settings(settings)
+    database.migrate()
+    repository = PufferLabRepository(database.session_factory)
+    queries, document_ids = _replay_queries()
+    suite = _seed_live_suite(repository, judged_queries=queries)
+    probe = _DiagnosticRuntimeProbe(suite.manifest)
+    runtime = _diagnostic_runtime(settings, database, probe)
+    await runtime.start()
+    run = _create_replay_run(repository, suite, f"missing-{missing}")
+
+    with pytest.raises(EvaluationViewError) as raised:
+        await runtime.diagnose_expected_document(
+            _id("absent-diagnostic-run") if missing == "run" else run.id,
+            _id("missing-query") if missing == "query" else queries[0].id,
+            document_ids[0],
+            ExpectedDocumentDiagnosticRequest(config_id=suite.configs[0].id),
+        )
+
+    assert raised.value.http_status == 404
+    assert probe.events == ([] if missing == "run" else ["auth", "manifest"])
+    assert probe.providers == probe.embedders == []
+    await runtime.shutdown_execution()
+    runtime.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_stage", ["factory", "query", "close"])
+async def test_diagnostic_runtime_late_failures_are_fixed_detached_and_read_only(
+    tmp_path: Path,
+    failure_stage: str,
+) -> None:
+    marker = f"PRIVATE_DIAGNOSTIC_{failure_stage.upper()}_MARKER"
+    settings = _settings(tmp_path)
+    database = Database.from_settings(settings)
+    database.migrate()
+    repository = PufferLabRepository(database.session_factory)
+    queries, document_ids = _replay_queries()
+    queries[0] = queries[0].model_copy(update={"text": f"query-{marker}"})
+    suite = _seed_live_suite(repository, judged_queries=queries)
+    probe = _DiagnosticRuntimeProbe(suite.manifest)
+    error = RuntimeError(marker)
+    if failure_stage == "factory":
+        probe.provider_factory_error = error
+    elif failure_stage == "query":
+        probe.provider_query_error = error
+    else:
+        probe.provider_close_error = error
+    runtime = _diagnostic_runtime(settings, database, probe)
+    await runtime.start()
+    run = _create_replay_run(repository, suite, f"late-{failure_stage}")
+    before = database.path.read_bytes()
+
+    with pytest.raises(EvaluationViewError) as raised:
+        await runtime.diagnose_expected_document(
+            run.id,
+            queries[0].id,
+            document_ids[0],
+            ExpectedDocumentDiagnosticRequest(config_id=suite.configs[0].id),
+        )
+
+    _assert_detached_error(raised.value, marker=marker, http_status=503)
+    assert raised.value.operation == "diagnose_expected_document"
+    assert len(probe.providers) == (0 if failure_stage == "factory" else 1)
+    if probe.providers:
+        assert probe.providers[0].close_calls == 1
+    assert database.path.read_bytes() == before
+    await runtime.shutdown_execution()
+    runtime.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mutation", ["namespace", "role", "limit"])
+async def test_diagnostic_runtime_maps_forged_provider_result_echoes_to_fixed_failure(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    settings = _settings(tmp_path)
+    database = Database.from_settings(settings)
+    database.migrate()
+    repository = PufferLabRepository(database.session_factory)
+    queries, document_ids = _replay_queries()
+    suite = _seed_live_suite(repository, judged_queries=queries)
+    probe = _DiagnosticRuntimeProbe(suite.manifest)
+    probe.provider_result_mutation = mutation
+    runtime = _diagnostic_runtime(settings, database, probe)
+    await runtime.start()
+    run = _create_replay_run(repository, suite, f"forged-provider-result-{mutation}")
+    before = database.path.read_bytes()
+
+    with pytest.raises(EvaluationViewError) as raised:
+        await runtime.diagnose_expected_document(
+            run.id,
+            queries[0].id,
+            document_ids[0],
+            ExpectedDocumentDiagnosticRequest(config_id=suite.configs[0].id),
+        )
+
+    assert raised.value.http_status == 503
+    assert raised.value.operation == "diagnose_expected_document"
+    assert len(probe.providers) == 1
+    assert probe.providers[0].close_calls == 1
+    assert database.path.read_bytes() == before
+    await runtime.shutdown_execution()
+    runtime.dispose()
+
+
+@pytest.mark.asyncio
+async def test_diagnostic_runtime_embedding_failure_is_fixed_before_provider_construction(
+    tmp_path: Path,
+) -> None:
+    marker = "PRIVATE_DIAGNOSTIC_EMBEDDING_MARKER"
+    settings = _settings(tmp_path)
+    database = Database.from_settings(settings)
+    database.migrate()
+    repository = PufferLabRepository(database.session_factory)
+    queries, document_ids = _replay_queries()
+    suite = _seed_live_suite(repository, judged_queries=queries)
+    probe = _DiagnosticRuntimeProbe(suite.manifest)
+    probe.embedder_error = RuntimeError(marker)
+    runtime = _diagnostic_runtime(settings, database, probe)
+    await runtime.start()
+    run = _create_replay_run(repository, suite, "embedding-failure")
+    vector = _config_for_mode(suite, RetrievalMode.VECTOR)
+    before = database.path.read_bytes()
+
+    with pytest.raises(EvaluationViewError) as raised:
+        await runtime.diagnose_expected_document(
+            run.id,
+            queries[0].id,
+            document_ids[0],
+            ExpectedDocumentDiagnosticRequest(config_id=vector.id),
+        )
+
+    _assert_detached_error(raised.value, marker=marker, http_status=503)
+    assert probe.events == ["auth", "manifest", "credential", "catalog", "embedder"]
+    assert len(probe.embedders) == 1
+    assert probe.embedders[0].calls == 1
+    assert probe.providers == []
+    assert database.path.read_bytes() == before
+    await runtime.shutdown_execution()
+    runtime.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("original", "expected_type"),
+    [
+        (KeyboardInterrupt("PRIVATE_DIAGNOSTIC_EMBED_CONTROL"), KeyboardInterrupt),
+        (SystemExit("PRIVATE_DIAGNOSTIC_EMBED_CONTROL"), SystemExit),
+    ],
+)
+async def test_diagnostic_runtime_embedding_process_control_is_fresh_and_provider_free(
+    tmp_path: Path,
+    original: BaseException,
+    expected_type: type[BaseException],
+) -> None:
+    marker = "PRIVATE_DIAGNOSTIC_EMBED_CONTROL"
+    settings = _settings(tmp_path)
+    database = Database.from_settings(settings)
+    database.migrate()
+    repository = PufferLabRepository(database.session_factory)
+    queries, document_ids = _replay_queries()
+    suite = _seed_live_suite(repository, judged_queries=queries)
+    probe = _DiagnosticRuntimeProbe(suite.manifest)
+    probe.embedder_error = original
+    runtime = _diagnostic_runtime(settings, database, probe)
+    await runtime.start()
+    run = _create_replay_run(repository, suite, f"embed-control-{expected_type.__name__}")
+    vector = _config_for_mode(suite, RetrievalMode.VECTOR)
+    before = database.path.read_bytes()
+
+    with pytest.raises(expected_type) as raised:
+        await runtime.diagnose_expected_document(
+            run.id,
+            queries[0].id,
+            document_ids[0],
+            ExpectedDocumentDiagnosticRequest(config_id=vector.id),
+        )
+
+    _assert_fresh_process_control(raised.value, original=original, marker=marker)
+    assert len(probe.embedders) == 1
+    assert probe.embedders[0].calls == 1
+    assert probe.providers == []
+    assert database.path.read_bytes() == before
+    await runtime.shutdown_execution()
+    runtime.dispose()
+
+
+@pytest.mark.asyncio
+async def test_diagnostic_runtime_cancellation_during_embedding_constructs_no_provider(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    database = Database.from_settings(settings)
+    database.migrate()
+    repository = PufferLabRepository(database.session_factory)
+    queries, document_ids = _replay_queries()
+    suite = _seed_live_suite(repository, judged_queries=queries)
+    probe = _DiagnosticRuntimeProbe(suite.manifest)
+    probe.block_embedder = True
+    runtime = _diagnostic_runtime(settings, database, probe)
+    await runtime.start()
+    run = _create_replay_run(repository, suite, "blocked-embedding")
+    vector = _config_for_mode(suite, RetrievalMode.VECTOR)
+    before = database.path.read_bytes()
+    task = asyncio.create_task(
+        runtime.diagnose_expected_document(
+            run.id,
+            queries[0].id,
+            document_ids[0],
+            ExpectedDocumentDiagnosticRequest(config_id=vector.id),
+        )
+    )
+    for _ in range(500):
+        if probe.embedders and probe.embedders[0].started.is_set():
+            break
+        await asyncio.sleep(0.002)
+    assert probe.embedders and probe.embedders[0].started.is_set()
+    task.cancel()
+    await asyncio.sleep(0)
+    assert not task.done()
+    assert probe.providers == []
+    probe.embedders[0].release.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert probe.providers == []
+    assert database.path.read_bytes() == before
+    await runtime.shutdown_execution()
+    runtime.dispose()
+
+
+@pytest.mark.asyncio
+async def test_diagnostic_runtime_cancellation_drains_provider_close_without_partial_response(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    database = Database.from_settings(settings)
+    database.migrate()
+    repository = PufferLabRepository(database.session_factory)
+    queries, document_ids = _replay_queries()
+    suite = _seed_live_suite(repository, judged_queries=queries)
+    probe = _DiagnosticRuntimeProbe(suite.manifest)
+    probe.block_provider_query = True
+    runtime = _diagnostic_runtime(settings, database, probe)
+    await runtime.start()
+    run = _create_replay_run(repository, suite, "cancelled-diagnostic")
+    before = database.path.read_bytes()
+    task = asyncio.create_task(
+        runtime.diagnose_expected_document(
+            run.id,
+            queries[0].id,
+            document_ids[0],
+            ExpectedDocumentDiagnosticRequest(config_id=suite.configs[0].id),
+        )
+    )
+    for _ in range(500):
+        if probe.providers and probe.providers[0].query_started.is_set():
+            break
+        await asyncio.sleep(0.002)
+    assert probe.providers and probe.providers[0].query_started.is_set()
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert probe.providers[0].close_calls == 1
+    assert database.path.read_bytes() == before
+    await runtime.shutdown_execution()
+    runtime.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("original", "expected_type"),
+    [
+        (KeyboardInterrupt("PRIVATE_DIAGNOSTIC_CONTROL_MARKER"), KeyboardInterrupt),
+        (SystemExit("PRIVATE_DIAGNOSTIC_CONTROL_MARKER"), SystemExit),
+    ],
+)
+async def test_diagnostic_runtime_original_process_control_wins_after_one_close(
+    tmp_path: Path,
+    original: BaseException,
+    expected_type: type[BaseException],
+) -> None:
+    marker = "PRIVATE_DIAGNOSTIC_CONTROL_MARKER"
+    settings = _settings(tmp_path)
+    database = Database.from_settings(settings)
+    database.migrate()
+    repository = PufferLabRepository(database.session_factory)
+    queries, document_ids = _replay_queries()
+    suite = _seed_live_suite(repository, judged_queries=queries)
+    probe = _DiagnosticRuntimeProbe(suite.manifest)
+    probe.provider_query_error = original
+    probe.provider_close_error = RuntimeError("PRIVATE_DIAGNOSTIC_CLOSE_MARKER")
+    runtime = _diagnostic_runtime(settings, database, probe)
+    await runtime.start()
+    run = _create_replay_run(repository, suite, f"control-{expected_type.__name__}")
+    before = database.path.read_bytes()
+
+    with pytest.raises(expected_type) as raised:
+        await runtime.diagnose_expected_document(
+            run.id,
+            queries[0].id,
+            document_ids[0],
+            ExpectedDocumentDiagnosticRequest(config_id=suite.configs[0].id),
+        )
+
+    _assert_fresh_process_control(raised.value, original=original, marker=marker)
+    assert probe.providers[0].close_calls == 1
+    assert database.path.read_bytes() == before
     await runtime.shutdown_execution()
     runtime.dispose()

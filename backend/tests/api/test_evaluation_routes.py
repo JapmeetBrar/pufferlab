@@ -55,6 +55,8 @@ from pufferlab.contracts.evals import (
 from pufferlab.contracts.forensics import (
     EvalRunQueryReplayRequest,
     EvalRunQueryReplayResponse,
+    ExpectedDocumentDiagnosticRequest,
+    ExpectedDocumentDiagnosticResponse,
 )
 from pufferlab.contracts.retrieval import RetrievalConfigSummary, RetrievalMode
 from pufferlab.contracts.search import SearchCompareRequest, SearchCompareResponse
@@ -316,6 +318,26 @@ class _EvaluationControls:
             operation="replay_eval_query",
         )
 
+    async def diagnose_expected_document(
+        self,
+        run_id: UUID,
+        query_id: UUID,
+        document_id: UUID,
+        request: ExpectedDocumentDiagnosticRequest,
+    ) -> ExpectedDocumentDiagnosticResponse:
+        self.calls.append(
+            (
+                "diagnose_expected_document",
+                (run_id, query_id, document_id, request),
+            )
+        )
+        raise EvaluationViewError(
+            code=ApiErrorCode.INTERNAL_ERROR,
+            message="evaluation control runtime is not available",
+            http_status=503,
+            operation="diagnose_expected_document",
+        )
+
 
 def _create_body(views: _EvaluationViews) -> dict[str, object]:
     return {
@@ -362,6 +384,17 @@ def test_evaluation_catalog_and_read_routes_delegate_to_injected_facades() -> No
             f"/api/v1/eval-runs/{views.view.run.id}/queries/{views.query.id}/replay",
             json={"config_ids": [str(views.configs[0].id), str(views.configs[1].id)]},
         )
+        diagnosed = client.post(
+            (
+                f"/api/v1/eval-runs/{views.view.run.id}/queries/{views.query.id}"
+                f"/documents/{views.query.qrels[0].document_id}/diagnostic"
+            ),
+            json={
+                "contract_version": 1,
+                "config_id": str(views.configs[0].id),
+                "include_no_filter_counterfactual": False,
+            },
+        )
 
     assert scoped.status_code == unscoped.status_code == 200
     assert [item["mode"] for item in scoped.json()["configs"]] == [
@@ -377,11 +410,14 @@ def test_evaluation_catalog_and_read_routes_delegate_to_injected_facades() -> No
     assert cancelled.status_code == 200
     assert replayed.status_code == 503
     assert replayed.json()["details"] == {"operation": "replay_eval_query"}
+    assert diagnosed.status_code == 503
+    assert diagnosed.json()["details"] == {"operation": "diagnose_expected_document"}
     assert ("list_eval_runs", EvalRunListQuery(limit=7)) in views.calls
     assert [name for name, _value in controls.calls] == [
         "create_eval_run",
         "cancel_eval_run",
         "replay_eval_query",
+        "diagnose_expected_document",
     ]
     assert search.closed
 
@@ -414,6 +450,17 @@ def test_evaluation_errors_are_direct_redacted_and_validation_precedes_facade() 
     calls_before_invalid = list(views.calls)
     invalid = client.get("/api/v1/eval-runs/not-a-uuid")
     invalid_limit = client.get("/api/v1/eval-runs?limit=101")
+    controls_before_invalid_diagnostic = list(controls.calls)
+    invalid_diagnostic = client.post(
+        (
+            f"/api/v1/eval-runs/{views.view.run.id}/queries/{views.query.id}"
+            f"/documents/{views.query.qrels[0].document_id}/diagnostic"
+        ),
+        json={
+            "config_id": str(views.configs[0].id),
+            "include_no_filter_counterfactual": "false",
+        },
+    )
 
     assert missing.status_code == 404
     assert missing.json()["code"] == "not_found"
@@ -434,6 +481,9 @@ def test_evaluation_errors_are_direct_redacted_and_validation_precedes_facade() 
     assert invalid.json()["message"] == "request validation failed"
     assert invalid_limit.status_code == 422
     assert invalid_limit.json()["message"] == "request validation failed"
+    assert invalid_diagnostic.status_code == 422
+    assert invalid_diagnostic.json()["message"] == "request validation failed"
+    assert controls.calls == controls_before_invalid_diagnostic
     assert views.calls == calls_before_invalid
 
 
@@ -454,6 +504,7 @@ def test_openapi_freezes_all_evaluation_routes_and_contract_schemas() -> None:
         "/api/v1/eval-runs/{run_id}/queries/{query_id}",
         "/api/v1/eval-runs/{run_id}/export",
         "/api/v1/eval-runs/{run_id}/queries/{query_id}/replay",
+        ("/api/v1/eval-runs/{run_id}/queries/{query_id}/documents/{document_id}/diagnostic"),
     }
 
     assert expected_paths <= schema["paths"].keys()
@@ -468,5 +519,7 @@ def test_openapi_freezes_all_evaluation_routes_and_contract_schemas() -> None:
         "EvalRunExportResponse",
         "EvalRunQueryReplayRequest",
         "EvalRunQueryReplayResponse",
+        "ExpectedDocumentDiagnosticRequest",
+        "ExpectedDocumentDiagnosticResponse",
     ):
         assert component in schema["components"]["schemas"]

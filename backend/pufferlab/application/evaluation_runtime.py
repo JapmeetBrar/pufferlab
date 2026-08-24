@@ -13,10 +13,18 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Protocol
+from time import perf_counter
+from typing import NoReturn, Protocol, cast
 from uuid import UUID, uuid4
 
+from pydantic import SecretStr
+
 from pufferlab.application.evaluation_controls import ProviderFreeEvaluationControls
+from pufferlab.application.evaluation_diagnostics import (
+    ExpectedDocumentDiagnosticBinding,
+    ExpectedDocumentDiagnosticFailure,
+    compose_expected_document_diagnostic,
+)
 from pufferlab.application.evaluation_forensics import (
     CounterfactualProbeAnalysis,
     analyze_counterfactual_probe,
@@ -51,9 +59,12 @@ from pufferlab.contracts.evals import (
     QuerySetSummary,
     RunEnvironment,
 )
+from pufferlab.contracts.filters import FilterNode
 from pufferlab.contracts.forensics import (
     EvalRunQueryReplayRequest,
     EvalRunQueryReplayResponse,
+    ExpectedDocumentDiagnosticRequest,
+    ExpectedDocumentDiagnosticResponse,
     ReplayFailedCounterfactualProbe,
 )
 from pufferlab.contracts.retrieval import (
@@ -71,7 +82,15 @@ from pufferlab.datasets.cqadupstack import (
     load_source_lock,
 )
 from pufferlab.datasets.models import DatasetManifest
+from pufferlab.datasets.schema import compile_namespace_write_spec
 from pufferlab.datasets.unix_application import authenticate_persisted_unix_query_set
+from pufferlab.evals.diagnostic_analysis import preflight_filter_definition
+from pufferlab.evals.diagnostic_models import (
+    DiagnosticAnalysisError,
+    FilterDefinitionInput,
+    FilterFieldSchema,
+    FilterValueType,
+)
 from pufferlab.jobs import RunJobManager
 from pufferlab.persistence import Database, PufferLabRepository
 from pufferlab.persistence.errors import (
@@ -82,9 +101,19 @@ from pufferlab.persistence.errors import (
 from pufferlab.providers.errors import ProviderError
 from pufferlab.providers.rerankers import Reranker, SentenceTransformersReranker
 from pufferlab.providers.turbopuffer import TurbopufferProvider
+from pufferlab.providers.turbopuffer_diagnostic import TurbopufferDiagnosticProvider
 from pufferlab.retrieval.config import (
     BoundSearchCatalog,
+    SearchConfigCatalog,
+    SeededSearchConfig,
     derive_bound_retrieval_configs,
+)
+from pufferlab.retrieval.diagnostic import DiagnosticProviderFactory
+from pufferlab.retrieval.diagnostic_types import (
+    DiagnosticProvider,
+    diagnostic_filter_fields,
+    is_valid_diagnostic_namespace,
+    is_valid_diagnostic_region,
 )
 from pufferlab.retrieval.embeddings import SentenceTransformerQueryEmbedder
 from pufferlab.retrieval.errors import SearchError
@@ -124,6 +153,20 @@ class _EmbedderFactory(Protocol):
 
 class _RerankerFactory(Protocol):
     def __call__(self, *, model: str, revision: str) -> Reranker: ...
+
+
+class _DiagnosticProviderFactory(Protocol):
+    async def __call__(
+        self,
+        *,
+        api_key: str,
+        region: str,
+        namespace: str,
+    ) -> DiagnosticProvider: ...
+
+
+class _CredentialGetter(Protocol):
+    def __call__(self, settings: Settings) -> SecretStr: ...
 
 
 class _BoundCatalogFactory(Protocol):
@@ -179,6 +222,20 @@ class _ReplayBinding:
     grades: dict[UUID, int]
 
 
+@dataclass(frozen=True, slots=True, repr=False)
+class _DiagnosticSourceBinding:
+    dataset: DatasetVersion
+    manifest: DatasetManifest
+    configs: tuple[RetrievalConfig, ...]
+    selected_config: RetrievalConfig
+    query_text: str
+    stored_filter: FilterNode | None
+    target_document_id: UUID
+    filter_schema: tuple[FilterFieldSchema, ...]
+    namespace: str
+    region: str
+
+
 class EvaluationApiRuntime:
     """Compose SQLite views and one bounded local evaluation execution owner."""
 
@@ -202,10 +259,15 @@ class EvaluationApiRuntime:
         provider_factory: _ProviderFactory = TurbopufferProvider,
         embedder_factory: _EmbedderFactory = SentenceTransformerQueryEmbedder,
         reranker_factory: _RerankerFactory = SentenceTransformersReranker,
+        diagnostic_credential_getter: _CredentialGetter | None = None,
+        diagnostic_provider_factory: _DiagnosticProviderFactory = (
+            TurbopufferDiagnosticProvider.create
+        ),
         worker_guard_factory: Callable[[Path], _WorkerGuard] | None = None,
         git_revision_factory: Callable[[], str] | None = None,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
         trace_id_factory: Callable[[], UUID] = uuid4,
+        monotonic: Callable[[], float] = perf_counter,
     ) -> None:
         self._settings = settings
         self._database = database or Database.from_settings(settings)
@@ -228,12 +290,15 @@ class EvaluationApiRuntime:
         self._provider_factory = provider_factory
         self._embedder_factory = embedder_factory
         self._reranker_factory = reranker_factory
+        self._diagnostic_credential_getter = diagnostic_credential_getter or _get_live_credential
+        self._diagnostic_provider_factory = diagnostic_provider_factory
         self._worker_guard = (worker_guard_factory or _FileWorkerGuard)(
             settings.pufferlab_data_dir.resolve() / ".pufferlab-api.lock"
         )
         self._git_revision_factory = git_revision_factory or _git_revision
         self._now = now
         self._trace_id_factory = trace_id_factory
+        self._monotonic = monotonic
         self._control_lock = asyncio.Lock()
         self._drivers: dict[UUID, asyncio.Task[None]] = {}
         self._services: dict[UUID, EvaluationApplicationService] = {}
@@ -435,6 +500,194 @@ class EvaluationApiRuntime:
             request=request,
             binding=binding,
         )
+
+    async def diagnose_expected_document(
+        self,
+        run_id: UUID,
+        query_id: UUID,
+        document_id: UUID,
+        request: ExpectedDocumentDiagnosticRequest,
+    ) -> ExpectedDocumentDiagnosticResponse:
+        operation = "diagnose_expected_document"
+        source: _DiagnosticSourceBinding | None = None
+        application_binding: ExpectedDocumentDiagnosticBinding | None = None
+        query_embedder: QueryEmbedder | None = None
+        provider_factory: DiagnosticProviderFactory | None = None
+        bound: BoundSearchCatalog | None = None
+        executable: SeededSearchConfig | None = None
+        catalog_dataset: DatasetVersion | None = None
+        catalog_manifest: DatasetManifest | None = None
+        catalog_configs: tuple[RetrievalConfig, ...] | None = None
+        public_error: EvaluationViewError | None = None
+        control: str | None = None
+        credential_box: list[SecretStr | None] = [None]
+
+        async with self._control_lock:
+            try:
+                self._require_started(operation)
+                run_id, query_id, document_id, request = _validated_diagnostic_request(
+                    run_id,
+                    query_id,
+                    document_id,
+                    request,
+                )
+                source = self._resolve_diagnostic_binding(
+                    run_id,
+                    query_id,
+                    document_id,
+                    request,
+                )
+            except EvaluationViewError as caught:
+                public_error = _copy_view_error(caught)
+                _detach_exception(caught)
+            except RecordNotFoundError as caught:
+                public_error = evaluation_not_found(
+                    message="evaluation run or query was not found",
+                    operation=operation,
+                )
+                _detach_exception(caught)
+            except (
+                DatasetPreparationError,
+                PersistenceValidationError,
+                DiagnosticAnalysisError,
+                ValueError,
+            ) as caught:
+                public_error = evaluation_invalid(
+                    message="diagnostic request does not match the immutable stored run",
+                    operation=operation,
+                )
+                _detach_exception(caught)
+            except asyncio.CancelledError as caught:
+                control = "cancelled"
+                _detach_exception(caught)
+            except KeyboardInterrupt as caught:
+                control = "keyboard"
+                _detach_exception(caught)
+            except SystemExit as caught:
+                control = "system"
+                _detach_exception(caught)
+            except BaseException as caught:
+                public_error = evaluation_unavailable(operation=operation)
+                _detach_exception(caught)
+
+            if source is not None and public_error is None and control is None:
+                try:
+                    credential_box[0] = _validated_diagnostic_credential(
+                        self._diagnostic_credential_getter(self._settings)
+                    )
+                    catalog_dataset, catalog_manifest, catalog_configs = _diagnostic_catalog_copies(
+                        source
+                    )
+                    bound = self._bound_catalog_factory(
+                        catalog_dataset,
+                        catalog_manifest,
+                        catalog_configs,
+                    )
+                    catalog_dataset = cast(DatasetVersion, None)
+                    catalog_manifest = cast(DatasetManifest, None)
+                    catalog_configs = cast(tuple[RetrievalConfig, ...], None)
+                    executable = _selected_diagnostic_config(bound, source)
+                    if executable.mode is RetrievalMode.BM25:
+                        query_embedder = None
+                    else:
+                        if (
+                            executable.embedding_model is None
+                            or executable.embedding_revision is None
+                            or executable.embedding_dimensions is None
+                        ):
+                            raise ValueError("diagnostic config is missing embedding inputs")
+                        query_embedder = self._embedder_factory(
+                            model=executable.embedding_model,
+                            revision=executable.embedding_revision,
+                            dimensions=executable.embedding_dimensions,
+                        )
+                    application_binding = ExpectedDocumentDiagnosticBinding(
+                        run_id=run_id,
+                        query_id=query_id,
+                        query_text=source.query_text,
+                        config=executable,
+                        target_document_id=document_id,
+                        namespace=source.namespace,
+                        stored_filter=source.stored_filter,
+                        filter_schema=source.filter_schema,
+                        include_no_filter_counterfactual=(request.include_no_filter_counterfactual),
+                    )
+                    provider_factory = _delayed_diagnostic_provider_factory(
+                        credential_box,
+                        factory=self._diagnostic_provider_factory,
+                        region=source.region,
+                        namespace=source.namespace,
+                    )
+                except asyncio.CancelledError as caught:
+                    control = "cancelled"
+                    _detach_exception(caught)
+                except KeyboardInterrupt as caught:
+                    control = "keyboard"
+                    _detach_exception(caught)
+                except SystemExit as caught:
+                    control = "system"
+                    _detach_exception(caught)
+                except BaseException as caught:
+                    public_error = evaluation_unavailable(operation=operation)
+                    _detach_exception(caught)
+
+            bound = None
+            executable = None
+            catalog_dataset = None
+            catalog_manifest = None
+            catalog_configs = None
+
+        source = None
+        if control is not None or public_error is not None:
+            credential_box[0] = None
+            application_binding = None
+            query_embedder = None
+            provider_factory = None
+            if control is not None:
+                _raise_runtime_control(control)
+            assert public_error is not None
+            raise public_error from None
+        assert application_binding is not None
+        assert provider_factory is not None
+
+        response: ExpectedDocumentDiagnosticResponse | None = None
+        execution_error: EvaluationViewError | None = None
+        try:
+            response = await compose_expected_document_diagnostic(
+                application_binding,
+                provider_factory=provider_factory,
+                query_embedder=query_embedder,
+                now=self._now,
+                trace_id_factory=self._trace_id_factory,
+                monotonic=self._monotonic,
+            )
+        except asyncio.CancelledError as caught:
+            control = "cancelled"
+            _detach_exception(caught)
+        except KeyboardInterrupt as caught:
+            control = "keyboard"
+            _detach_exception(caught)
+        except SystemExit as caught:
+            control = "system"
+            _detach_exception(caught)
+        except ExpectedDocumentDiagnosticFailure as caught:
+            execution_error = evaluation_unavailable(operation=operation)
+            _detach_exception(caught)
+        except BaseException as caught:
+            execution_error = evaluation_unavailable(operation=operation)
+            _detach_exception(caught)
+
+        credential_box[0] = None
+        application_binding = None
+        query_embedder = None
+        provider_factory = None
+        if control is not None:
+            _raise_runtime_control(control)
+        if execution_error is not None:
+            raise execution_error from None
+        if response is None:  # pragma: no cover - every path selects a response or failure
+            raise evaluation_unavailable(operation=operation) from None
+        return response
 
     async def _execute_replay(
         self,
@@ -713,6 +966,109 @@ class EvaluationApiRuntime:
             grades=grades,
         )
 
+    def _resolve_diagnostic_binding(
+        self,
+        run_id: UUID,
+        query_id: UUID,
+        document_id: UUID,
+        request: ExpectedDocumentDiagnosticRequest,
+    ) -> _DiagnosticSourceBinding:
+        run = self._repository.get_run(run_id)
+        query_set, judged_queries = self._repository.get_query_set(run.query_set.id)
+        expected_summary = QuerySetSummary(
+            id=query_set.id,
+            name=query_set.name,
+            version=query_set.version,
+            query_count=query_set.query_count,
+            content_hash=query_set.content_hash,
+        )
+        if run.query_set != expected_summary or run.total_queries != query_set.query_count:
+            raise PersistenceValidationError(
+                "durable run does not match its immutable query-set revision"
+            )
+        dataset = self._repository.get_dataset_version(query_set.dataset_version_id)
+        self._reject_non_live(dataset, operation="diagnose_expected_document")
+        self._query_set_authenticator(dataset, query_set, tuple(judged_queries))
+
+        manifest = self._manifest_loader(self._unix_manifest_path)
+        expected_configs = derive_bound_retrieval_configs(
+            dataset,
+            manifest,
+            namespace=dataset.namespace,
+        )
+        configs = tuple(self._repository.list_run_configs(run.id))
+        if configs != expected_configs or len(configs) != 4:
+            raise PersistenceValidationError(
+                "durable diagnostic configs differ from the exact dataset-bound suite"
+            )
+        selected_configs = [config for config in configs if config.id == request.config_id]
+        if len(selected_configs) != 1:
+            raise PersistenceValidationError(
+                "diagnostic config must belong exactly once to the immutable stored run"
+            )
+
+        selected_queries = [query for query in judged_queries if query.id == query_id]
+        if not selected_queries:
+            raise RecordNotFoundError("judged query was not found in the requested query set")
+        if len(selected_queries) != 1:
+            raise PersistenceValidationError("diagnostic query identity is not unique")
+        query = selected_queries[0]
+        target_qrels = [qrel for qrel in query.qrels if qrel.document_id == document_id]
+        if len(target_qrels) != 1 or target_qrels[0].relevance_grade <= 0:
+            raise PersistenceValidationError(
+                "diagnostic target must be one exact positive judgment"
+            )
+
+        filter_schema = _diagnostic_filter_schema(manifest, query.filters)
+        if query.filters is not None:
+            preflight_filter_definition(
+                FilterDefinitionInput(node=query.filters, schema=filter_schema)
+            )
+        if request.include_no_filter_counterfactual and query.filters is None:
+            raise PersistenceValidationError(
+                "no-filter diagnostic requires one authenticated stored query filter"
+            )
+        if not is_valid_diagnostic_namespace(dataset.namespace):
+            raise PersistenceValidationError("diagnostic dataset namespace is invalid")
+        stored_region = run.environment.turbopuffer_region
+        current_region = self._settings.turbopuffer_region
+        if (
+            not is_valid_diagnostic_region(stored_region)
+            or not is_valid_diagnostic_region(current_region)
+            or stored_region != current_region
+        ):
+            raise PersistenceValidationError(
+                "diagnostic region does not match the immutable stored run"
+            )
+        canonical_dataset = DatasetVersion.model_validate(
+            dataset.model_dump(mode="python", warnings=False)
+        )
+        canonical_manifest = DatasetManifest.model_validate(
+            manifest.model_dump(mode="python", warnings=False)
+        )
+        canonical_configs = tuple(
+            RetrievalConfig.model_validate(config.model_dump(mode="python", warnings=False))
+            for config in configs
+        )
+        canonical_selected = next(
+            config for config in canonical_configs if config.id == request.config_id
+        )
+        canonical_query = JudgedQuery.model_validate(
+            query.model_dump(mode="python", warnings=False)
+        )
+        return _DiagnosticSourceBinding(
+            dataset=canonical_dataset,
+            manifest=canonical_manifest,
+            configs=canonical_configs,
+            selected_config=canonical_selected,
+            query_text=canonical_query.text,
+            stored_filter=canonical_query.filters,
+            target_document_id=document_id,
+            filter_schema=filter_schema,
+            namespace=dataset.namespace,
+            region=current_region,
+        )
+
     def _authenticate_persisted_query_set(
         self,
         dataset: DatasetVersion,
@@ -892,6 +1248,208 @@ def _require_live_credential(settings: Settings) -> None:
     api_key = settings.turbopuffer_api_key
     if api_key is None or not api_key.get_secret_value():
         raise RuntimeError("live evaluation credentials are unavailable")
+
+
+def _get_live_credential(settings: Settings) -> SecretStr:
+    return _validated_diagnostic_credential(settings.turbopuffer_api_key)
+
+
+def _validated_diagnostic_credential(credential: object) -> SecretStr:
+    raw: object = None
+    try:
+        if type(credential) is not SecretStr:
+            raise RuntimeError("live diagnostic credentials are unavailable")
+        raw = credential.get_secret_value()
+        if (
+            type(raw) is not str
+            or not 1 <= len(raw) <= 4096
+            or not all(0x21 <= ord(character) <= 0x7E for character in raw)
+        ):
+            raise RuntimeError("live diagnostic credentials are unavailable")
+        return SecretStr(raw)
+    finally:
+        raw = None
+
+
+def _validated_diagnostic_request(
+    run_id: object,
+    query_id: object,
+    document_id: object,
+    request: object,
+) -> tuple[UUID, UUID, UUID, ExpectedDocumentDiagnosticRequest]:
+    if (
+        type(run_id) is not UUID
+        or type(query_id) is not UUID
+        or type(document_id) is not UUID
+        or type(request) is not ExpectedDocumentDiagnosticRequest
+    ):
+        raise ValueError("diagnostic runtime request is invalid")
+    version = request.contract_version
+    config_id = request.config_id
+    include_no_filter = request.include_no_filter_counterfactual
+    if (
+        type(version) is not int
+        or version != 1
+        or type(config_id) is not UUID
+        or type(include_no_filter) is not bool
+    ):
+        raise ValueError("diagnostic runtime request is invalid")
+    checked = ExpectedDocumentDiagnosticRequest.model_validate(
+        {
+            "contract_version": version,
+            "config_id": config_id,
+            "include_no_filter_counterfactual": include_no_filter,
+        }
+    )
+    if type(checked) is not ExpectedDocumentDiagnosticRequest:
+        raise ValueError("diagnostic runtime request is invalid")
+    return run_id, query_id, document_id, checked
+
+
+def _selected_diagnostic_config(
+    bound: BoundSearchCatalog,
+    source: _DiagnosticSourceBinding,
+) -> SeededSearchConfig:
+    if (
+        type(bound) is not BoundSearchCatalog
+        or bound.dataset_version != source.dataset
+        or bound.manifest != source.manifest
+        or bound.configs != source.configs
+        or type(bound.catalog) is not SearchConfigCatalog
+    ):
+        raise ValueError("diagnostic executable catalog does not match its authenticated source")
+    executable_configs = bound.catalog.configs
+    if type(executable_configs) is not tuple or len(executable_configs) != 4:
+        raise ValueError("diagnostic executable catalog must contain the exact four configs")
+    catalog_state = vars(bound.catalog)
+    expected_by_id = {config.summary.id: config for config in executable_configs}
+    if (
+        type(catalog_state) is not dict
+        or set(catalog_state) != {"_configs", "_by_id"}
+        or catalog_state["_configs"] is not executable_configs
+        or type(catalog_state["_by_id"]) is not dict
+        or catalog_state["_by_id"] != expected_by_id
+    ):
+        raise ValueError("diagnostic executable catalog lookup differs from its exact configs")
+    canonical_configs = BoundSearchCatalog(
+        dataset_version=source.dataset,
+        manifest=source.manifest,
+        configs=source.configs,
+    ).catalog.configs
+    if executable_configs != canonical_configs:
+        raise ValueError("diagnostic executable catalog differs from canonical compilation")
+    for executable, stored in zip(executable_configs, source.configs, strict=True):
+        if (
+            type(executable) is not SeededSearchConfig
+            or executable.summary != _retrieval_config_summary(stored)
+            or executable.mode is not stored.mode
+        ):
+            raise ValueError("diagnostic executable catalog does not match the stored suite")
+    selected = tuple(
+        executable
+        for executable in executable_configs
+        if executable.summary.id == source.selected_config.id
+    )
+    if len(selected) != 1:
+        raise ValueError("diagnostic executable config is unavailable")
+    return cast(SeededSearchConfig, selected[0])
+
+
+def _diagnostic_catalog_copies(
+    source: _DiagnosticSourceBinding,
+) -> tuple[DatasetVersion, DatasetManifest, tuple[RetrievalConfig, ...]]:
+    return (
+        DatasetVersion.model_validate(source.dataset.model_dump(mode="python", warnings=False)),
+        DatasetManifest.model_validate(source.manifest.model_dump(mode="python", warnings=False)),
+        tuple(
+            RetrievalConfig.model_validate(config.model_dump(mode="python", warnings=False))
+            for config in source.configs
+        ),
+    )
+
+
+def _delayed_diagnostic_provider_factory(
+    credential_box: list[SecretStr | None],
+    *,
+    factory: _DiagnosticProviderFactory,
+    region: str,
+    namespace: str,
+) -> DiagnosticProviderFactory:
+    async def create() -> DiagnosticProvider:
+        credential = credential_box[0]
+        if type(credential) is not SecretStr:
+            raise RuntimeError("live diagnostic credentials are unavailable")
+        api_key = credential.get_secret_value()
+        try:
+            return await factory(
+                api_key=api_key,
+                region=region,
+                namespace=namespace,
+            )
+        finally:
+            api_key = ""
+            credential = None
+
+    return create
+
+
+def _diagnostic_filter_schema(
+    manifest: DatasetManifest,
+    stored_filter: FilterNode | None,
+) -> tuple[FilterFieldSchema, ...]:
+    if stored_filter is None:
+        return ()
+    fields = diagnostic_filter_fields(stored_filter)
+    write_spec = compile_namespace_write_spec(manifest)
+    by_field = {field: specification for field, specification in write_spec.attributes}
+    schema: list[FilterFieldSchema] = []
+    for field in fields:
+        try:
+            specification = by_field[field]
+        except KeyError:
+            raise ValueError("diagnostic filter field is absent from the manifest schema") from None
+        if specification.filterable is not True:
+            raise ValueError("diagnostic filter field is not filterable")
+        value_type = _diagnostic_filter_value_type(specification.type)
+        schema.append(
+            FilterFieldSchema(
+                field=field,
+                value_type=value_type,
+                filterable=True,
+            )
+        )
+    return tuple(schema)
+
+
+def _diagnostic_filter_value_type(value: str) -> FilterValueType:
+    try:
+        return FilterValueType(value)
+    except ValueError:
+        if (
+            value.startswith("[")
+            and "]" in value
+            and value.rsplit("]", 1)[1] in {"f16", "f32", "i8"}
+        ):
+            return FilterValueType.FLOAT_ARRAY
+        raise ValueError(
+            "diagnostic manifest contains an unsupported provider field type"
+        ) from None
+
+
+def _detach_exception(error: BaseException) -> None:
+    error.__traceback__ = None
+    error.__context__ = None
+    error.__cause__ = None
+
+
+def _raise_runtime_control(control: str) -> NoReturn:
+    if control == "cancelled":
+        raise asyncio.CancelledError() from None
+    if control == "keyboard":
+        raise KeyboardInterrupt() from None
+    if control == "system":
+        raise SystemExit(1) from None
+    raise AssertionError("unreachable evaluation runtime control outcome")
 
 
 def _copy_view_error(error: EvaluationViewError) -> EvaluationViewError:

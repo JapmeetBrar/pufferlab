@@ -41,7 +41,10 @@ from pufferlab.contracts.evals import (
     RegressionQuery,
     RunEnvironment,
 )
-from pufferlab.contracts.forensics import EvalRunQueryReplayRequest
+from pufferlab.contracts.forensics import (
+    EvalRunQueryReplayRequest,
+    ExpectedDocumentDiagnosticRequest,
+)
 from pufferlab.contracts.retrieval import (
     LexicalSpec,
     RerankerSpec,
@@ -1021,6 +1024,7 @@ async def test_provider_free_controls_reject_synthetic_and_defer_live_cost_paths
         candidate_config_ids=[config.id for config in graph.configs[1:]],
     )
     replay = EvalRunQueryReplayRequest(config_ids=[graph.configs[0].id, graph.configs[1].id])
+    diagnostic = ExpectedDocumentDiagnosticRequest(config_id=graph.configs[0].id)
 
     with pytest.raises(EvaluationViewError) as synthetic_create:
         synthetic_controls = ProviderFreeEvaluationControls(_OriginViews(DataOrigin.SYNTHETIC_DEMO))
@@ -1034,6 +1038,25 @@ async def test_provider_free_controls_reject_synthetic_and_defer_live_cost_paths
     with pytest.raises(EvaluationViewError) as synthetic_cancel:
         await synthetic_controls.cancel_eval_run(_id("run"))
     assert synthetic_cancel.value.http_status == 409
+    with pytest.raises(EvaluationViewError) as synthetic_diagnostic:
+        await synthetic_controls.diagnose_expected_document(
+            _id("run"),
+            graph.queries[0].id,
+            graph.queries[0].qrels[0].document_id,
+            diagnostic,
+        )
+    assert synthetic_diagnostic.value.http_status == 409
+    assert synthetic_diagnostic.value.operation == "diagnose_expected_document"
     with pytest.raises(EvaluationViewError) as live_create:
-        await ProviderFreeEvaluationControls(_OriginViews(DataOrigin.LIVE)).create_eval_run(request)
+        live_controls = ProviderFreeEvaluationControls(_OriginViews(DataOrigin.LIVE))
+        await live_controls.create_eval_run(request)
     assert live_create.value.http_status == 503
+    with pytest.raises(EvaluationViewError) as live_diagnostic:
+        await live_controls.diagnose_expected_document(
+            _id("run"),
+            graph.queries[0].id,
+            graph.queries[0].qrels[0].document_id,
+            diagnostic,
+        )
+    assert live_diagnostic.value.http_status == 503
+    assert live_diagnostic.value.operation == "diagnose_expected_document"

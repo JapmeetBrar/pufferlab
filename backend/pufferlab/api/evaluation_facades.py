@@ -27,6 +27,8 @@ from pufferlab.contracts.evals import (
 from pufferlab.contracts.forensics import (
     EvalRunQueryReplayRequest,
     EvalRunQueryReplayResponse,
+    ExpectedDocumentDiagnosticRequest,
+    ExpectedDocumentDiagnosticResponse,
 )
 
 
@@ -66,3 +68,11 @@ class EvaluationControlFacade(Protocol):
         query_id: UUID,
         request: EvalRunQueryReplayRequest,
     ) -> EvalRunQueryReplayResponse: ...
+
+    async def diagnose_expected_document(
+        self,
+        run_id: UUID,
+        query_id: UUID,
+        document_id: UUID,
+        request: ExpectedDocumentDiagnosticRequest,
+    ) -> ExpectedDocumentDiagnosticResponse: ...
