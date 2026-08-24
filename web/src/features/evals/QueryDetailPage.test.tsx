@@ -7,17 +7,25 @@ vi.mock("../../api/evaluations", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../api/evaluations")>();
   return {
     ...actual,
+    diagnoseExpectedDocument: vi.fn(),
     getEvaluationRunQuery: vi.fn(),
     replayEvaluationRunQuery: vi.fn(),
   };
 });
 
 import { ApiRequestError } from "../../api/client";
-import { getEvaluationRunQuery, replayEvaluationRunQuery } from "../../api/evaluations";
+import {
+  diagnoseExpectedDocument,
+  getEvaluationRunQuery,
+  replayEvaluationRunQuery,
+} from "../../api/evaluations";
 import { useAppLocation } from "../../app/routing";
 import {
   baselineId,
   candidateIds,
+  diagnosticTrace,
+  documentId,
+  expectedDocumentDiagnosticResponse,
   failedProbeTrace,
   probeTrace,
   queryDetail,
@@ -55,6 +63,7 @@ function renderPage(search = `?left=${baselineId}&right=${candidateIds[0]}`) {
 beforeEach(() => {
   vi.mocked(getEvaluationRunQuery).mockResolvedValue(queryDetail());
   vi.mocked(replayEvaluationRunQuery).mockResolvedValue(replayResponse);
+  vi.mocked(diagnoseExpectedDocument).mockResolvedValue(expectedDocumentDiagnosticResponse());
 });
 
 afterEach(() => {
@@ -87,6 +96,7 @@ describe("QueryDetailPage", () => {
     expect(await screen.findByText(/Synthetic demo · replay disabled/)).toBeVisible();
     expect(screen.queryByRole("button", { name: /run live replay/i })).not.toBeInTheDocument();
     expect(replayEvaluationRunQuery).not.toHaveBeenCalled();
+    expect(diagnoseExpectedDocument).not.toHaveBeenCalled();
   });
 
   it("keeps live replay unavailable when the durable origin policy denies it", async () => {
@@ -99,6 +109,89 @@ describe("QueryDetailPage", () => {
     expect(await screen.findByText(/Replay is disabled by origin policy/)).toBeVisible();
     expect(screen.queryByRole("button", { name: /run live replay/i })).not.toBeInTheDocument();
     expect(replayEvaluationRunQuery).not.toHaveBeenCalled();
+    expect(diagnoseExpectedDocument).not.toHaveBeenCalled();
+  });
+
+  it("keeps drawer open/config/history actions provider-free until explicit diagnostic confirmation", async () => {
+    renderPage();
+    await screen.findByRole("heading", { name: "Judged documents" });
+    fireEvent.click(screen.getAllByRole("button", { name: "Inspect document" })[0]!);
+    const drawer = await screen.findByRole("dialog", { name: "Document evidence" });
+    const config = within(drawer).getByLabelText("Diagnostic configuration");
+    expect(config).toHaveValue("");
+    expect(within(drawer).getByRole("button", { name: "Run expected-document diagnostic" })).toBeDisabled();
+    expect(diagnoseExpectedDocument).not.toHaveBeenCalled();
+    const drawerHref = window.location.href;
+
+    fireEvent.change(config, { target: { value: baselineId } });
+    expect(within(drawer).getByText(/exactly 2 ordered subqueries/i)).toBeVisible();
+    expect(within(drawer).getByLabelText("Include a same-request no-filter counterfactual")).toBeDisabled();
+    expect(diagnoseExpectedDocument).not.toHaveBeenCalled();
+    expect(window.location.href).toBe(drawerHref);
+
+    fireEvent.click(within(drawer).getByLabelText("I understand this starts cost-bearing provider work."));
+    fireEvent.click(within(drawer).getByRole("button", { name: "Run expected-document diagnostic" }));
+    expect(await within(drawer).findByText("New live expected-document diagnostic · not original run evidence")).toBeVisible();
+    expect(within(drawer).getByText(new RegExp(diagnosticTrace))).toBeVisible();
+    expect(diagnoseExpectedDocument).toHaveBeenCalledWith(
+      runId,
+      queryId,
+      documentId,
+      { contract_version: 1, config_id: baselineId, include_no_filter_counterfactual: false },
+      expect.any(AbortSignal),
+    );
+    expect(window.location.href).toBe(drawerHref);
+  });
+
+  it("preserves stored and replay evidence when the diagnostic fails", async () => {
+    vi.mocked(diagnoseExpectedDocument).mockRejectedValueOnce(new ApiRequestError({
+      code: "namespace_not_ready",
+      message: "The diagnostic namespace is unavailable.",
+      retryable: true,
+      trace_id: "safe-diagnostic-failure",
+    }, 503));
+    renderPage();
+    await screen.findByText("authored local query text");
+    fireEvent.click(screen.getByRole("button", { name: "Run live replay (cost-bearing)" }));
+    await screen.findByText("New live replay · not original run evidence");
+    fireEvent.click(screen.getAllByRole("button", { name: /Inspect evidence/ })[0]!);
+    const drawer = await screen.findByRole("dialog", { name: "Document evidence" });
+
+    fireEvent.change(within(drawer).getByLabelText("Diagnostic configuration"), {
+      target: { value: baselineId },
+    });
+    fireEvent.click(within(drawer).getByLabelText("I understand this starts cost-bearing provider work."));
+    fireEvent.click(within(drawer).getByRole("button", { name: "Run expected-document diagnostic" }));
+
+    const alert = await within(drawer).findByRole("alert");
+    expect(within(alert).getByText("The diagnostic namespace is unavailable.")).toBeVisible();
+    expect(within(drawer).getByRole("heading", { name: "Stored run evidence" })).toBeVisible();
+    expect(within(drawer).getByRole("heading", { name: "New primary replay observation" })).toBeVisible();
+    expect(screen.getByText("New live replay · not original run evidence")).toBeVisible();
+    expect(screen.getByRole("table", { name: "Durable outcomes for the recorded query" })).toBeVisible();
+    expect(replayEvaluationRunQuery).toHaveBeenCalledTimes(1);
+    expect(diagnoseExpectedDocument).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps grade-zero qrels inspectable but diagnostic-ineligible with zero calls", async () => {
+    const detail = queryDetail();
+    vi.mocked(getEvaluationRunQuery).mockResolvedValue({
+      ...detail,
+      query: {
+        ...detail.query,
+        qrels: detail.query.qrels.map((qrel, index) => index === 0
+          ? { ...qrel, relevance_grade: 0 }
+          : qrel),
+      },
+    });
+    renderPage();
+    await screen.findByRole("heading", { name: "Judged documents" });
+    fireEvent.click(screen.getAllByRole("button", { name: "Inspect document" })[0]!);
+    const drawer = await screen.findByRole("dialog", { name: "Document evidence" });
+
+    expect(within(drawer).getByText(/Only a positively judged document is eligible/)).toBeVisible();
+    expect(within(drawer).queryByLabelText("Diagnostic configuration")).not.toBeInTheDocument();
+    expect(diagnoseExpectedDocument).not.toHaveBeenCalled();
   });
 
   it("runs replay only on explicit action, renders separated failed probes, and resets stale evidence", async () => {
@@ -159,9 +252,12 @@ describe("QueryDetailPage", () => {
     expect(within(replayDrawer).getAllByText(/probe unavailable/i).length).toBeGreaterThan(0);
 
     const replayClose = within(replayDrawer).getByRole("button", { name: "Close document evidence" });
+    const diagnosticConfig = within(replayDrawer).getByLabelText("Diagnostic configuration");
     fireEvent.keyDown(replayDrawer, { key: "Tab" });
     expect(replayClose).toHaveFocus();
     fireEvent.keyDown(replayDrawer, { key: "Tab", shiftKey: true });
+    expect(diagnosticConfig).toHaveFocus();
+    fireEvent.keyDown(replayDrawer, { key: "Tab" });
     expect(replayClose).toHaveFocus();
     fireEvent.keyDown(replayDrawer, { key: "Escape" });
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());

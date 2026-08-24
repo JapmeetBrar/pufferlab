@@ -564,8 +564,8 @@ describe("App routing", () => {
   });
 
   it("restores a document drawer through nested-route back, forward, and refresh-safe URL state", async () => {
-    const fetchMock = vi.fn((input: string | URL | Request) => {
-      const url = requestUrl(input);
+    const fetchMock = vi.fn((...args: [input: string | URL | Request, init?: RequestInit]) => {
+      const url = requestUrl(args[0]);
       if (url.endsWith("/api/v1/health")) {
         return Promise.resolve(jsonResponse({ contract_version: 1, status: "ok", version: "0.1.0" }));
       }
@@ -586,7 +586,13 @@ describe("App routing", () => {
     const opener = screen.getAllByRole("button", { name: "Inspect document" })[0];
     if (opener === undefined) throw new Error("Expected a document evidence opener");
     fireEvent.click(opener);
-    expect(await screen.findByRole("dialog", { name: "Document evidence" })).toBeVisible();
+    const openedDrawer = await screen.findByRole("dialog", { name: "Document evidence" });
+    expect(openedDrawer).toBeVisible();
+    const diagnosticConfig = within(openedDrawer).getByLabelText("Diagnostic configuration");
+    expect(diagnosticConfig).toHaveValue("");
+    fireEvent.change(diagnosticConfig, { target: { value: baselineId } });
+    expect(diagnosticConfig).toHaveValue(baselineId);
+    expect(fetchMock.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
     await waitFor(() => expect(new URLSearchParams(window.location.search).get("document")).toBe(documentId));
 
     window.history.back();
@@ -598,6 +604,8 @@ describe("App routing", () => {
     const restoredDrawer = await screen.findByRole("dialog", { name: "Document evidence" });
     expect(new URLSearchParams(window.location.search).get("document")).toBe(documentId);
     expect(within(restoredDrawer).getByRole("button", { name: "Close document evidence" })).toHaveFocus();
+    expect(within(restoredDrawer).getByLabelText("Diagnostic configuration")).toHaveValue("");
+    expect(fetchMock.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
   });
 
   it("uses semantic navigation, moves focus, and restores history without reloading", async () => {

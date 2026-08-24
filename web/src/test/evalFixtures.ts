@@ -6,6 +6,7 @@ import type {
   EvaluationRunListResponse,
   EvaluationRunQueryDetailResponse,
   EvaluationRunQueryReplayResponse,
+  ExpectedDocumentDiagnosticResponse,
   RegressionResponse,
 } from "../api/evaluations";
 
@@ -26,6 +27,7 @@ export const primaryTrace = "a1000000-0000-4000-8000-000000000001";
 export const rightPrimaryTrace = "a2000000-0000-4000-8000-000000000002";
 export const probeTrace = "a3000000-0000-4000-8000-000000000003";
 export const failedProbeTrace = "a4000000-0000-4000-8000-000000000004";
+export const diagnosticTrace = "a6000000-0000-4000-8000-000000000006";
 
 type RunView = EvaluationRunListResponse["runs"][number];
 type RunStatus = RunView["run"]["status"];
@@ -271,6 +273,7 @@ function successOutcome(configId: string, rank: number): EvaluationRunQueryDetai
 
 export function queryDetail(
   origin: "live" | "synthetic_demo" = "live",
+  options: { withFilter?: boolean } = {},
 ): EvaluationRunQueryDetailResponse {
   return {
     contract_version: 1,
@@ -285,7 +288,9 @@ export function queryDetail(
         { document_id: secondDocumentId, relevance_grade: 1 },
       ],
       tags: ["authored"],
-      filters: null,
+      filters: options.withFilter
+        ? { kind: "predicate", field: "category", op: "eq", value: "authored-filter-value" }
+        : null,
     },
     baseline_config_id: baselineId,
     candidate_config_ids: [...candidateIds],
@@ -327,6 +332,206 @@ export function queryDetail(
     },
     original_stage_evidence_available: false,
     live_replay_policy_permitted: origin === "live",
+  };
+}
+
+type DiagnosticMode = ExpectedDocumentDiagnosticResponse["config_mode"];
+type DiagnosticSubquery = ExpectedDocumentDiagnosticResponse["subqueries"][number];
+type CandidateSubquery = Extract<DiagnosticSubquery, { kind: "candidate" }>;
+type CandidateEvidence = ExpectedDocumentDiagnosticResponse["candidate_evidence"][number];
+type ObservedScore = NonNullable<CandidateEvidence["target_score"]>;
+
+function diagnosticScore(signal: "bm25" | "ann" | "rrf", direct = false): ObservedScore {
+  return {
+    value: signal === "ann" ? 0.2 : signal === "rrf" ? 2 / 61 : 3,
+    kind: signal === "ann" ? "vector_distance" : signal === "rrf" ? "rrf" : "bm25",
+    direction: signal === "ann" ? "lower_is_better" : "higher_is_better",
+    source: direct ? "compute_attribute" : signal === "rrf" ? "client_computed" : "turbopuffer_dist",
+  };
+}
+
+const storedRoles: Record<DiagnosticMode, CandidateSubquery["role"][]> = {
+  bm25: ["stored_query_bm25_candidates"],
+  vector: ["stored_query_ann_candidates"],
+  hybrid_rrf: ["stored_query_bm25_candidates", "stored_query_ann_candidates"],
+  hybrid_rerank: ["stored_query_bm25_candidates", "stored_query_ann_candidates"],
+};
+
+function noFilterRole(role: CandidateSubquery["role"]): CandidateSubquery["role"] {
+  return role.includes("bm25")
+    ? "no_filter_counterfactual_bm25_candidates"
+    : "no_filter_counterfactual_ann_candidates";
+}
+
+export function expectedDocumentDiagnosticResponse(
+  configId = baselineId,
+  includeNoFilter = false,
+  options: {
+    targetAvailable?: boolean;
+    storedFilterResult?: ExpectedDocumentDiagnosticResponse["stored_filter_result"];
+    relation?: CandidateEvidence["relation"];
+  } = {},
+): ExpectedDocumentDiagnosticResponse {
+  const config = evaluationConfigs.find((item) => item.id === configId);
+  if (config === undefined) throw new Error(`Missing authored diagnostic config ${configId}`);
+  const mode = config.mode;
+  const targetAvailable = options.targetAvailable ?? true;
+  const filterResult = options.storedFilterResult ?? null;
+  if (!targetAvailable && filterResult !== null) {
+    throw new Error("An unavailable diagnostic target cannot retain filter evidence");
+  }
+  if (
+    filterResult !== null &&
+    filterResult !== "matched" &&
+    (mode === "hybrid_rrf" || mode === "hybrid_rerank")
+  ) {
+    throw new Error("Authored hybrid filter-miss fixtures require explicit qualified-RRF facts");
+  }
+  const candidateLimit = mode === "bm25" || mode === "vector" ? 50 : 100;
+  const roles = includeNoFilter
+    ? [...storedRoles[mode], ...storedRoles[mode].map(noFilterRole)]
+    : storedRoles[mode];
+  const subqueries: DiagnosticSubquery[] = [{
+    kind: "target_lookup",
+    ordinal: 0,
+    role: "target_lookup",
+    requested_limit: 1,
+    returned_count: targetAvailable ? 1 : 0,
+    target_present: targetAvailable,
+  }];
+  const candidateEvidence: ExpectedDocumentDiagnosticResponse["candidate_evidence"] = [];
+  roles.forEach((role, index) => {
+    const ordinal = index + 1;
+    const signal = role.includes("bm25") ? "bm25" : "ann";
+    const scope = role.startsWith("no_filter") ? "no_filter_counterfactual" : "stored_query";
+    const storedFilterExcludes = scope === "stored_query"
+      && filterResult !== null
+      && filterResult !== "matched";
+    const candidateTargetPresent = targetAvailable && !storedFilterExcludes;
+    const candidateScore = candidateTargetPresent ? diagnosticScore(signal) : null;
+    const boundaryScore = storedFilterExcludes
+      ? { ...diagnosticScore(signal), value: signal === "ann" ? 0.3 : 2 }
+      : null;
+    subqueries.push({
+      kind: "candidate",
+      ordinal,
+      role,
+      requested_limit: candidateLimit,
+      returned_count: storedFilterExcludes ? candidateLimit : 1,
+      target_present: candidateTargetPresent,
+      target_rank: candidateTargetPresent ? 1 : null,
+      target_score: candidateScore,
+      boundary_score: boundaryScore,
+    });
+    if (targetAvailable) {
+      candidateEvidence.push({
+        config_id: configId,
+        target_document_id: documentId,
+        observed_at: primaryObservedAt,
+        trace_id: diagnosticTrace,
+        origin: "client_computed",
+        subquery_ordinal: ordinal,
+        role,
+        scope,
+        stored_filter_result: scope === "stored_query" ? filterResult : null,
+        signal,
+        requested_limit: candidateLimit,
+        returned_count: storedFilterExcludes ? candidateLimit : 1,
+        target_present: candidateTargetPresent,
+        target_rank: candidateTargetPresent ? 1 : null,
+        target_score: candidateScore,
+        direct_score: diagnosticScore(signal, true),
+        boundary_score: boundaryScore,
+        relation: storedFilterExcludes ? "not_observable" : options.relation ?? "target_present",
+        certainty: storedFilterExcludes
+          ? "insufficient"
+          : scope === "no_filter_counterfactual" ? "counterfactual" : "observed",
+      });
+    }
+  });
+  const hybrid = mode === "hybrid_rrf" || mode === "hybrid_rerank";
+  const rrfScopes = includeNoFilter
+    ? (["stored_query", "no_filter_counterfactual"] as const)
+    : (["stored_query"] as const);
+  const qualifiedRrfEvidence: ExpectedDocumentDiagnosticResponse["qualified_rrf_evidence"] =
+    targetAvailable && hybrid
+      ? rrfScopes.map((scope) => ({
+        config_id: configId,
+        target_document_id: documentId,
+        observed_at: primaryObservedAt,
+        trace_id: diagnosticTrace,
+        origin: "client_computed",
+        scope,
+        stored_filter_result: scope === "stored_query" ? filterResult : null,
+        bm25_rank: 1,
+        ann_rank: 1,
+        bm25_weight: 1,
+        ann_weight: 1,
+        rank_constant: 60,
+        cutoff: 50,
+        returned_count: 1,
+        target_present: true,
+        target_rank: 1,
+        target_score: diagnosticScore("rrf"),
+        boundary_score: null,
+        relation: "target_present",
+        certainty: scope === "no_filter_counterfactual" ? "counterfactual" : "observed",
+      }))
+      : [];
+  return {
+    contract_version: 1,
+    run_id: runId,
+    query_id: queryId,
+    config_id: configId,
+    config_mode: mode,
+    target_document_id: documentId,
+    data_origin: "live",
+    origin: "live_expected_document_diagnostic",
+    observability_notice: "new_live_diagnostic_not_original_run",
+    included_no_filter_counterfactual: includeNoFilter,
+    stored_filter_result: filterResult,
+    observed_at: primaryObservedAt,
+    trace_id: diagnosticTrace,
+    duration_ms: 20,
+    embedding_duration_ms: mode === "bm25" ? null : 10,
+    subqueries,
+    target: {
+      config_id: configId,
+      target_document_id: documentId,
+      observed_at: primaryObservedAt,
+      trace_id: diagnosticTrace,
+      origin: "live_expected_document_diagnostic",
+      available: targetAvailable,
+      unavailable_reason: targetAvailable ? null : "target_unavailable_in_diagnostic_snapshot",
+      bm25_score: targetAvailable && mode !== "vector" ? diagnosticScore("bm25", true) : null,
+      vector_distance: targetAvailable && mode !== "bm25" ? diagnosticScore("ann", true) : null,
+    },
+    filter_evidence: !targetAvailable || filterResult === null ? [] : [{
+      config_id: configId,
+      target_document_id: documentId,
+      observed_at: primaryObservedAt,
+      trace_id: diagnosticTrace,
+      origin: "client_computed",
+      predicate_ordinal: 0,
+      predicate_path: [0],
+      field: "category",
+      operator: "eq",
+      result: filterResult,
+      certainty: filterResult === "not_observable" ? "insufficient" : "observed",
+    }],
+    candidate_evidence: candidateEvidence,
+    qualified_rrf_evidence: qualifiedRrfEvidence,
+    observations: targetAvailable ? [] : [{
+      config_id: configId,
+      document_id: documentId,
+      code: "not_observable",
+      statement: "The selected target was unavailable in this diagnostic snapshot.",
+      origin: "live_expected_document_diagnostic",
+      observed_at: primaryObservedAt,
+      trace_id: diagnosticTrace,
+      certainty: "insufficient",
+      evidence: [],
+    }],
   };
 }
 

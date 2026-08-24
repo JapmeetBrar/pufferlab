@@ -14,6 +14,7 @@ import { navigate } from "../../app/routing";
 import { ComparisonResults } from "../playground/ComparisonResults";
 import { safeSourceUrl } from "../playground/safeUrl";
 import { RequestErrorPanel } from "./components";
+import { ExpectedDocumentDiagnostic } from "./ExpectedDocumentDiagnostic";
 import { ForensicDrawer } from "./ForensicDrawer";
 import { ForensicEvidence } from "./ForensicEvidence";
 import { formatDate } from "./formatters";
@@ -597,6 +598,30 @@ export function QueryDetailPage({
                 detail={detail}
                 replay={replay.isSuccess ? replay.data : undefined}
                 selection={{ ...selection, document: selection.document }}
+              />
+              <ExpectedDocumentDiagnostic
+                key={JSON.stringify({
+                  runId,
+                  queryId,
+                  documentId: selection.document,
+                  relevanceGrade: detail.query.qrels.find(
+                    (qrel) => qrel.document_id === selection.document,
+                  )?.relevance_grade ?? null,
+                  dataOrigin: detail.data_origin,
+                  policyPermitted: detail.live_replay_policy_permitted,
+                  hasStoredFilter: detail.query.filters !== null,
+                  configs: detail.configs,
+                })}
+                runId={runId}
+                queryId={queryId}
+                documentId={selection.document}
+                relevanceGrade={detail.query.qrels.find(
+                  (qrel) => qrel.document_id === selection.document,
+                )?.relevance_grade ?? null}
+                dataOrigin={detail.data_origin}
+                policyPermitted={detail.live_replay_policy_permitted}
+                hasStoredFilter={detail.query.filters !== null}
+                configs={detail.configs}
               />
             </ForensicDrawer>
           )}
