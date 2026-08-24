@@ -11,7 +11,7 @@ from typing import NoReturn, cast
 from uuid import UUID
 
 from pufferlab.contracts.common import ScoreKind
-from pufferlab.contracts.filters import FilterNode
+from pufferlab.contracts.filters import FilterLogical, FilterNode, FilterPredicate
 from pufferlab.contracts.retrieval import RetrievalConfigSummary, RetrievalMode
 from pufferlab.retrieval.config import SeededSearchConfig
 from pufferlab.retrieval.diagnostic_types import (
@@ -85,7 +85,7 @@ async def execute_expected_document_diagnostic(
     validation_failed = False
     validation_control = (False, False, False)
     try:
-        _validate_input(request, query_embedder=query_embedder)
+        request = _validated_input(request, query_embedder=query_embedder)
     except BaseException as error:
         validation_control = _classify_control(error)
         validation_failed = True
@@ -122,28 +122,36 @@ async def execute_expected_document_diagnostic(
     return outcome.result
 
 
-def _validate_input(
-    request: DiagnosticRetrievalInput,
+def _validated_input(
+    value: object,
     *,
     query_embedder: QueryEmbedder | None,
-) -> None:
-    if not isinstance(request, DiagnosticRetrievalInput):
+) -> DiagnosticRetrievalInput:
+    if type(value) is not DiagnosticRetrievalInput:
         raise ValueError("diagnostic retrieval input is invalid")
-    config = request.config
-    if not isinstance(config, SeededSearchConfig) or not isinstance(config.mode, RetrievalMode):
-        raise ValueError("diagnostic retrieval config is invalid")
-    _validate_config(config)
+    config = _validated_config(value.config)
     if (
-        not is_valid_diagnostic_namespace(request.namespace)
-        or not isinstance(request.query_text, str)
-        or not request.query_text
-        or not isinstance(request.target_document_id, UUID)
-        or type(request.include_no_filter_counterfactual) is not bool
+        not is_valid_diagnostic_namespace(value.namespace)
+        or type(value.query_text) is not str
+        or not value.query_text
+        or type(value.target_document_id) is not UUID
+        or type(value.include_no_filter_counterfactual) is not bool
     ):
         raise ValueError("diagnostic retrieval binding is invalid")
-    diagnostic_filter_fields(request.stored_filter)
-    if request.include_no_filter_counterfactual and request.stored_filter is None:
+    stored_filter = _validated_filter(value.stored_filter)
+    if value.include_no_filter_counterfactual and stored_filter is None:
         raise ValueError("diagnostic no-filter input is ineligible")
+
+    request = DiagnosticRetrievalInput(
+        namespace=value.namespace,
+        query_text=value.query_text,
+        target_document_id=value.target_document_id,
+        config=config,
+        stored_filter=stored_filter,
+        include_no_filter_counterfactual=value.include_no_filter_counterfactual,
+    )
+    if type(config.mode) is not RetrievalMode:
+        raise ValueError("diagnostic retrieval config is invalid")
 
     vector = config.mode in {
         RetrievalMode.VECTOR,
@@ -154,29 +162,42 @@ def _validate_input(
         if query_embedder is None:
             raise ValueError("diagnostic query embedder is required")
         if (
-            query_embedder.model != config.embedding_model
+            type(query_embedder.model) is not str
+            or type(query_embedder.revision) is not str
+            or type(query_embedder.dimensions) is not int
+            or query_embedder.model != config.embedding_model
             or query_embedder.revision != config.embedding_revision
             or query_embedder.dimensions != config.embedding_dimensions
         ):
             raise ValueError("diagnostic query embedder does not match the config")
     elif query_embedder is not None:
         raise ValueError("BM25 diagnostics cannot construct a query embedder")
+    return request
 
 
-def _validate_config(config: SeededSearchConfig) -> None:
+def _validated_config(config: object) -> SeededSearchConfig:
+    if type(config) is not SeededSearchConfig or type(config.mode) is not RetrievalMode:
+        raise ValueError("diagnostic retrieval config is invalid")
     summary = config.summary
-    if not isinstance(summary, RetrievalConfigSummary):
+    if type(summary) is not RetrievalConfigSummary:
         raise ValueError("diagnostic config summary is invalid")
     checked_summary = RetrievalConfigSummary.model_validate(summary.model_dump(mode="python"))
-    if checked_summary != summary or checked_summary.mode is not config.mode:
+    if (
+        type(checked_summary.id) is not UUID
+        or type(checked_summary.revision) is not int
+        or type(checked_summary.name) is not str
+        or type(checked_summary.mode) is not RetrievalMode
+        or type(checked_summary.config_hash) is not str
+        or checked_summary != summary
+        or checked_summary.mode is not config.mode
+    ):
         raise ValueError("diagnostic config summary is invalid")
     if (
-        not isinstance(config.result_k, int)
-        or isinstance(config.result_k, bool)
-        or not isinstance(config.candidate_k, int)
-        or isinstance(config.candidate_k, bool)
+        type(config.result_k) is not int
+        or type(config.candidate_k) is not int
         or config.result_k != 50
         or config.candidate_k != 100
+        or type(config.consistency) is not str
         or config.consistency != "strong"
     ):
         raise ValueError("diagnostic config bounds are invalid")
@@ -219,15 +240,15 @@ def _validate_config(config: SeededSearchConfig) -> None:
     ):
         raise ValueError("diagnostic vector config is invalid")
     if vector and (
-        not isinstance(config.vector_attribute, str)
+        type(config.vector_attribute) is not str
         or not config.vector_attribute
-        or not isinstance(config.embedding_model, str)
+        or type(config.embedding_model) is not str
         or not config.embedding_model
-        or not isinstance(config.embedding_revision, str)
+        or type(config.embedding_revision) is not str
         or not config.embedding_revision
-        or not isinstance(config.embedding_dimensions, int)
-        or isinstance(config.embedding_dimensions, bool)
+        or type(config.embedding_dimensions) is not int
         or config.embedding_dimensions < 1
+        or type(config.distance_metric) is not str
         or config.distance_metric not in {"cosine_distance", "euclidean_squared"}
     ):
         raise ValueError("diagnostic vector config is invalid")
@@ -237,15 +258,13 @@ def _validate_config(config: SeededSearchConfig) -> None:
     ):
         raise ValueError("diagnostic RRF config is invalid")
     if hybrid and (
-        not isinstance(config.rrf_rank_constant, int)
-        or isinstance(config.rrf_rank_constant, bool)
+        type(config.rrf_rank_constant) is not int
         or config.rrf_rank_constant < 1
         or config.rrf_rank_constant > 10_000
-        or not isinstance(config.rrf_weights, tuple)
+        or type(config.rrf_weights) is not tuple
         or len(config.rrf_weights) != 2
         or any(
-            not isinstance(weight, int | float)
-            or isinstance(weight, bool)
+            type(weight) not in {int, float}
             or not math.isfinite(weight)
             or weight <= 0
             or weight > 100
@@ -259,15 +278,48 @@ def _validate_config(config: SeededSearchConfig) -> None:
     ):
         raise ValueError("diagnostic reranker config is invalid")
     if rerank and (
-        not isinstance(config.reranker_model, str)
+        type(config.reranker_model) is not str
         or not config.reranker_model
-        or not isinstance(config.reranker_revision, str)
+        or type(config.reranker_revision) is not str
         or not config.reranker_revision
-        or not isinstance(config.reranker_depth, int)
-        or isinstance(config.reranker_depth, bool)
+        or type(config.reranker_depth) is not int
         or config.reranker_depth != 50
     ):
         raise ValueError("diagnostic reranker config is invalid")
+    return SeededSearchConfig(
+        summary=checked_summary,
+        mode=config.mode,
+        result_k=config.result_k,
+        candidate_k=config.candidate_k,
+        consistency=config.consistency,
+        lexical_fields=config.lexical_fields,
+        vector_attribute=config.vector_attribute,
+        embedding_model=config.embedding_model,
+        embedding_revision=config.embedding_revision,
+        embedding_dimensions=config.embedding_dimensions,
+        distance_metric=config.distance_metric,
+        rrf_rank_constant=config.rrf_rank_constant,
+        rrf_weights=config.rrf_weights,
+        reranker_model=config.reranker_model,
+        reranker_revision=config.reranker_revision,
+        reranker_depth=config.reranker_depth,
+    )
+
+
+def _validated_filter(value: object) -> FilterNode | None:
+    if value is None:
+        return None
+    diagnostic_filter_fields(cast(FilterNode, value))
+    if type(value) is FilterPredicate:
+        checked: FilterNode = FilterPredicate.model_validate(
+            value.model_dump(mode="python", exclude_unset=True)
+        )
+    elif type(value) is FilterLogical:
+        checked = FilterLogical.model_validate(value.model_dump(mode="python", exclude_unset=True))
+    else:
+        raise ValueError("diagnostic stored filter is invalid")
+    diagnostic_filter_fields(checked)
+    return checked
 
 
 async def _execute_sensitive(
@@ -427,14 +479,23 @@ async def _embed_if_required(
             keyboard_interrupt=control[1],
             system_exit=control[2],
         )
-    if (
-        not isinstance(expected_dimensions, int)
-        or isinstance(expected_dimensions, bool)
-        or embedding is None
-        or not _valid_embedding(embedding, expected_dimensions=expected_dimensions)
-    ):
+    try:
+        if type(expected_dimensions) is not int or embedding is None:
+            raise ValueError("diagnostic embedding is invalid")
+        embedding = _validated_embedding(
+            embedding,
+            expected_dimensions=expected_dimensions,
+        )
+    except BaseException as caught_validation:
+        control = _classify_control(caught_validation)
+        _detach_exception(caught_validation)
         embedding = None
-        return _EmbeddingOutcome(failed=True)
+        return _EmbeddingOutcome(
+            failed=not any(control),
+            cancelled=control[0],
+            keyboard_interrupt=control[1],
+            system_exit=control[2],
+        )
     return _EmbeddingOutcome(embedding=embedding)
 
 
@@ -448,27 +509,34 @@ async def _capture_embedding(
         return None, error
 
 
-def _valid_embedding(embedding: QueryEmbedding, *, expected_dimensions: int | None) -> bool:
-    try:
-        return (
-            isinstance(embedding, QueryEmbedding)
-            and isinstance(embedding.vector, tuple)
-            and bool(embedding.vector)
-            and (expected_dimensions is None or len(embedding.vector) == expected_dimensions)
-            and all(
-                isinstance(value, int | float)
-                and not isinstance(value, bool)
-                and math.isfinite(value)
-                for value in embedding.vector
-            )
-            and isinstance(embedding.client_duration_ms, int | float)
-            and not isinstance(embedding.client_duration_ms, bool)
-            and math.isfinite(embedding.client_duration_ms)
-            and embedding.client_duration_ms >= 0
-            and embedding.client_duration_ms <= 600_000.0
-        )
-    except (OverflowError, TypeError, ValueError):
-        return False
+def _validated_embedding(
+    embedding: object,
+    *,
+    expected_dimensions: int,
+) -> QueryEmbedding:
+    if type(embedding) is not QueryEmbedding:
+        raise ValueError("diagnostic embedding is invalid")
+    vector = embedding.vector
+    duration = embedding.client_duration_ms
+    if type(vector) is not tuple or not vector or len(vector) != expected_dimensions:
+        raise ValueError("diagnostic embedding vector is invalid")
+    if type(duration) not in {int, float}:
+        raise ValueError("diagnostic embedding duration is invalid")
+    checked_vector: list[float] = []
+    for value in vector:
+        if type(value) not in {int, float}:
+            raise ValueError("diagnostic embedding vector is invalid")
+        checked = float(value)
+        if not math.isfinite(checked):
+            raise ValueError("diagnostic embedding vector is invalid")
+        checked_vector.append(checked)
+    checked_duration = float(duration)
+    if not math.isfinite(checked_duration) or checked_duration < 0 or checked_duration > 600_000.0:
+        raise ValueError("diagnostic embedding duration is invalid")
+    return QueryEmbedding(
+        vector=tuple(checked_vector),
+        client_duration_ms=checked_duration,
+    )
 
 
 async def _drain_close(provider: DiagnosticProvider) -> tuple[BaseException | None, bool]:

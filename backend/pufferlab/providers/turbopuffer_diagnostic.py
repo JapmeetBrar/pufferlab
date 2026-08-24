@@ -603,7 +603,7 @@ async def _query_inner(
 ) -> _QueryOutcome:
     body_guard = provider._body_guard
     try:
-        request.__post_init__()
+        request = _validated_provider_request(request)
         if provider._closed or provider._called or provider._namespace is None:
             raise ValueError("diagnostic provider is unavailable")
         if request.namespace != provider._namespace_name:
@@ -634,6 +634,25 @@ async def _query_inner(
             keyboard_interrupt=keyboard,
             system_exit=system,
         )
+
+
+def _validated_provider_request(value: object) -> DiagnosticProviderRequest:
+    if type(value) is not DiagnosticProviderRequest:
+        raise ValueError("diagnostic provider request is invalid")
+    return DiagnosticProviderRequest(
+        namespace=value.namespace,
+        query_text=value.query_text,
+        target_document_id=value.target_document_id,
+        mode=value.mode,
+        lexical_fields=value.lexical_fields,
+        vector_attribute=value.vector_attribute,
+        query_vector=value.query_vector,
+        distance_metric=value.distance_metric,
+        stored_filter=value.stored_filter,
+        include_no_filter_counterfactual=value.include_no_filter_counterfactual,
+        result_k=value.result_k,
+        candidate_k=value.candidate_k,
+    )
 
 
 def _decode_response(

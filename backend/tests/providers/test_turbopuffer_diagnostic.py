@@ -262,6 +262,61 @@ async def test_one_strong_sdk_multi_query_uses_exact_mode_shapes_and_hardened_tr
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("attack", ["request_subclass", "query_text_subclass"])
+async def test_request_subclasses_and_nested_string_subclasses_fail_before_transport(
+    attack: str,
+) -> None:
+    roles_calls = 0
+    hostile_consumed = False
+
+    class RequestSubclass(DiagnosticProviderRequest):
+        def __post_init__(self) -> None:
+            return
+
+        @property
+        def roles(self) -> tuple[DiagnosticSubqueryRole, ...]:
+            nonlocal roles_calls
+            roles_calls += 1
+            return (DiagnosticSubqueryRole.TARGET_LOOKUP,)
+
+    class HostileString(str):
+        def __str__(self) -> str:
+            nonlocal hostile_consumed
+            hostile_consumed = True
+            raise RuntimeError("request-string-marker")
+
+    request = _request(RetrievalMode.BM25)
+    if attack == "request_subclass":
+        request = RequestSubclass(
+            **{field: getattr(request, field) for field in request.__dataclass_fields__}
+        )
+    else:
+        object.__setattr__(request, "query_text", HostileString(request.query_text))
+
+    async def handler(_: httpx.Request) -> httpx.Response:
+        raise AssertionError("transport must not be reached")
+
+    transport = RecordingTransport(handler)
+    provider = await TurbopufferDiagnosticProvider.create(
+        api_key=_API_KEY,
+        region=_REGION,
+        namespace=_NAMESPACE,
+        transport=transport,
+    )
+    with pytest.raises(DiagnosticProviderFailure) as raised:
+        await provider.query(request)
+    await provider.close()
+
+    assert transport.requests == []
+    assert transport.close_calls == 1
+    assert roles_calls == 0
+    assert hostile_consumed is False
+    assert "request-string-marker" not in str(raised.value)
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "mutation",
     [

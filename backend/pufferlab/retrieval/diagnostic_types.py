@@ -67,7 +67,7 @@ class DiagnosticAttributeValue:
     def __post_init__(self) -> None:
         if type(self.field) is not str or _SAFE_FILTER_FIELD.fullmatch(self.field) is None:
             raise ValueError("diagnostic attribute field is invalid")
-        if not isinstance(self.state, DiagnosticAttributeState):
+        if type(self.state) is not DiagnosticAttributeState:
             raise ValueError("diagnostic attribute state is invalid")
         if self.state is DiagnosticAttributeState.PRESENT_VALUE:
             if self.value is None:
@@ -211,7 +211,7 @@ class DiagnosticProviderResult:
         if len(roles) != len(set(roles)):
             raise ValueError("diagnostic candidate roles must be unique")
         if (
-            isinstance(self.client_duration_ms, bool)
+            type(self.client_duration_ms) not in {int, float}
             or not _is_finite_number(self.client_duration_ms)
             or float(self.client_duration_ms) < 0
             or float(self.client_duration_ms) > _MAX_DIAGNOSTIC_DURATION_MS
@@ -235,21 +235,19 @@ class DiagnosticProviderRequest:
     candidate_k: int = _CANDIDATE_K
 
     def __post_init__(self) -> None:
-        if not isinstance(self.namespace, str) or not is_valid_diagnostic_namespace(self.namespace):
+        if not is_valid_diagnostic_namespace(self.namespace):
             raise ValueError("diagnostic namespace is invalid")
-        if not isinstance(self.query_text, str) or not self.query_text:
+        if type(self.query_text) is not str or not self.query_text:
             raise ValueError("diagnostic query text is required")
         if type(self.target_document_id) is not UUID:
             raise ValueError("diagnostic target ID must be a UUID")
-        if not isinstance(self.mode, RetrievalMode):
+        if type(self.mode) is not RetrievalMode:
             raise ValueError("diagnostic retrieval mode is invalid")
-        if isinstance(self.include_no_filter_counterfactual, bool) is False:
+        if type(self.include_no_filter_counterfactual) is not bool:
             raise ValueError("diagnostic no-filter option must be boolean")
         if (
-            not isinstance(self.result_k, int)
-            or isinstance(self.result_k, bool)
-            or not isinstance(self.candidate_k, int)
-            or isinstance(self.candidate_k, bool)
+            type(self.result_k) is not int
+            or type(self.candidate_k) is not int
             or self.result_k != _RESULT_K
             or self.candidate_k != _CANDIDATE_K
         ):
@@ -273,17 +271,16 @@ class DiagnosticProviderRequest:
         if lexical_required:
             lexical_fields = self.lexical_fields
             if (
-                not isinstance(lexical_fields, tuple)
+                type(lexical_fields) is not tuple
                 or not lexical_fields
-                or not all(isinstance(item, tuple) and len(item) == 2 for item in lexical_fields)
+                or not all(type(item) is tuple and len(item) == 2 for item in lexical_fields)
             ):
                 raise ValueError("diagnostic lexical fields must be nonempty and unique")
             for field, weight in lexical_fields:
                 if (
-                    not isinstance(field, str)
+                    type(field) is not str
                     or not field
-                    or not isinstance(weight, int | float)
-                    or isinstance(weight, bool)
+                    or type(weight) not in {int, float}
                     or not _is_finite_number(weight)
                     or float(weight) <= 0
                 ):
@@ -301,17 +298,16 @@ class DiagnosticProviderRequest:
             vector_attribute = self.vector_attribute
             query_vector = self.query_vector
             if (
-                not isinstance(vector_attribute, str)
+                type(vector_attribute) is not str
                 or not vector_attribute
-                or not isinstance(query_vector, tuple)
+                or type(query_vector) is not tuple
                 or not query_vector
+                or type(self.distance_metric) is not str
                 or self.distance_metric not in {"cosine_distance", "euclidean_squared"}
             ):
                 raise ValueError("diagnostic vector inputs must be nonempty")
             if any(
-                not isinstance(value, int | float)
-                or isinstance(value, bool)
-                or not _is_finite_number(value)
+                type(value) not in {int, float} or not _is_finite_number(value)
                 for value in query_vector
             ):
                 raise ValueError("diagnostic query vector must be finite")
@@ -379,7 +375,7 @@ def diagnostic_filter_fields(node: FilterNode | None) -> tuple[str, ...]:
         node_count += 1
         if node_count > _MAX_FILTER_NODES or depth > _MAX_FILTER_DEPTH:
             raise ValueError("diagnostic stored filter exceeds the finite node/depth bound")
-        if isinstance(current, FilterPredicate):
+        if type(current) is FilterPredicate:
             predicate_count += 1
             if predicate_count > _MAX_FILTER_PREDICATES:
                 raise ValueError("diagnostic stored filter exceeds the predicate bound")
@@ -389,10 +385,10 @@ def diagnostic_filter_fields(node: FilterNode | None) -> tuple[str, ...]:
             kind = getattr(current, "kind", _MISSING)
             if (
                 kind != "predicate"
-                or not isinstance(field, str)
+                or type(field) is not str
                 or _SAFE_FILTER_FIELD.fullmatch(field) is None
                 or field in _RESERVED_DIAGNOSTIC_FIELDS
-                or not isinstance(op, PredicateOp)
+                or type(op) is not PredicateOp
                 or value is _MISSING
             ):
                 raise ValueError("diagnostic stored filter predicate is invalid")
@@ -401,21 +397,21 @@ def diagnostic_filter_fields(node: FilterNode | None) -> tuple[str, ...]:
                 seen.add(field)
                 fields.append(field)
             continue
-        if not isinstance(current, FilterLogical):
+        if type(current) is not FilterLogical:
             raise ValueError("diagnostic stored filter contains an unsupported node")
         kind = getattr(current, "kind", _MISSING)
         op = getattr(current, "op", _MISSING)
         children = getattr(current, "children", _MISSING)
         if (
             kind != "logical"
-            or not isinstance(op, LogicalOp)
-            or not isinstance(children, list)
+            or type(op) is not LogicalOp
+            or type(children) is not list
             or not children
             or len(children) > _MAX_FILTER_NODES
             or (op is LogicalOp.NOT and len(children) != 1)
         ):
             raise ValueError("diagnostic stored filter logical node is invalid")
-        if not all(isinstance(child, FilterPredicate | FilterLogical) for child in children):
+        if not all(type(child) in {FilterPredicate, FilterLogical} for child in children):
             raise ValueError("diagnostic stored filter logical children are invalid")
         stack.extend((child, depth + 1) for child in reversed(children))
     return tuple(fields)
@@ -438,16 +434,16 @@ def is_valid_diagnostic_region(value: object) -> bool:
 def _validate_predicate_value(op: PredicateOp, value: object) -> None:
     _validate_json_value(value)
     if op in {PredicateOp.IN, PredicateOp.CONTAINS_ANY}:
-        if not isinstance(value, list):
+        if type(value) is not list:
             raise ValueError("diagnostic stored filter array operand is invalid")
         scalar_types = {_json_scalar_type(item) for item in value}
         if None in scalar_types or len(scalar_types) > 1:
             raise ValueError("diagnostic stored filter array operands must share one scalar type")
         return
-    if isinstance(value, list | dict):
+    if type(value) in {list, dict}:
         raise ValueError("diagnostic stored filter scalar operand is invalid")
     if op in {PredicateOp.LT, PredicateOp.LTE, PredicateOp.GT, PredicateOp.GTE} and (
-        value is None or isinstance(value, bool) or not isinstance(value, int | float | str)
+        value is None or type(value) not in {int, float, str}
     ):
         raise ValueError("diagnostic stored filter range operand is invalid")
 
@@ -455,11 +451,11 @@ def _validate_predicate_value(op: PredicateOp, value: object) -> None:
 def _json_scalar_type(value: object) -> str | None:
     if value is None:
         return None
-    if isinstance(value, bool):
+    if type(value) is bool:
         return "bool"
-    if isinstance(value, int | float):
+    if type(value) in {int, float}:
         return "number"
-    if isinstance(value, str):
+    if type(value) is str:
         return "string"
     return None
 
@@ -482,9 +478,7 @@ def _validate_json_value(value: object, *, depth: int = 0) -> None:
             _validate_json_value(item, depth=depth + 1)
         return
     if type(value) is dict:
-        if len(value) > _MAX_ATTRIBUTE_OBJECT_ITEMS or not all(
-            isinstance(key, str) for key in value
-        ):
+        if len(value) > _MAX_ATTRIBUTE_OBJECT_ITEMS or not all(type(key) is str for key in value):
             raise ValueError("diagnostic JSON object is invalid")
         for item in value.values():
             _validate_json_value(item, depth=depth + 1)

@@ -361,6 +361,99 @@ async def test_complete_mode_config_is_validated_before_embedding_or_provider(
         assert embedder.calls == 0
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "attack",
+    [
+        "input_subclass",
+        "config_subclass",
+        "query_text_subclass",
+        "namespace_subclass",
+        "lexical_tuple_subclass",
+        "result_k_subclass",
+    ],
+)
+async def test_input_config_and_nested_primitives_reject_before_sensitive_work(
+    attack: str,
+) -> None:
+    hostile_consumed = False
+
+    class InputSubclass(DiagnosticRetrievalInput):
+        pass
+
+    class ConfigSubclass(SeededSearchConfig):
+        pass
+
+    class HostileString(str):
+        def __str__(self) -> str:
+            nonlocal hostile_consumed
+            hostile_consumed = True
+            raise RuntimeError("retrieval-string-marker")
+
+    class HostileTuple(tuple[tuple[str, float], ...]):
+        def __iter__(self) -> object:
+            nonlocal hostile_consumed
+            hostile_consumed = True
+            raise RuntimeError("retrieval-tuple-marker")
+
+    class IntSubclass(int):
+        pass
+
+    request = _input(RetrievalMode.HYBRID_RRF)
+    if attack == "input_subclass":
+        request = InputSubclass(
+            **{field: getattr(request, field) for field in request.__dataclass_fields__}
+        )
+    elif attack == "config_subclass":
+        config = request.config
+        request = replace(
+            request,
+            config=ConfigSubclass(
+                **{field: getattr(config, field) for field in config.__dataclass_fields__}
+            ),
+        )
+    elif attack == "query_text_subclass":
+        request = replace(request, query_text=HostileString(request.query_text))
+    elif attack == "namespace_subclass":
+        request = replace(request, namespace=HostileString(request.namespace))
+    elif attack == "lexical_tuple_subclass":
+        assert request.config.lexical_fields is not None
+        request = replace(
+            request,
+            config=replace(
+                request.config,
+                lexical_fields=cast(object, HostileTuple(request.config.lexical_fields)),
+            ),
+        )
+    else:
+        request = replace(
+            request,
+            config=replace(request.config, result_k=IntSubclass(50)),
+        )
+
+    embedder = FakeEmbedder()
+    factory_calls = 0
+
+    async def factory() -> FakeProvider:
+        nonlocal factory_calls
+        factory_calls += 1
+        return FakeProvider()
+
+    with pytest.raises(DiagnosticRetrievalConfigurationError) as raised:
+        await execute_expected_document_diagnostic(
+            request,
+            provider_factory=factory,
+            query_embedder=embedder,
+        )
+
+    assert embedder.calls == 0
+    assert factory_calls == 0
+    assert hostile_consumed is False
+    assert "retrieval-" not in str(raised.value)
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None
+
+
 @pytest.mark.parametrize(
     "node",
     [
@@ -883,6 +976,149 @@ async def test_huge_embedding_numbers_fail_fixed_before_provider(embedding: Quer
             query_embedder=FakeEmbedder(embedding),
         )
     assert factory_calls == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("attack", ["tuple_subclass", "numeric_subclass"])
+async def test_embedding_subclasses_fail_fixed_without_consuming_hostile_values(
+    attack: str,
+) -> None:
+    hostile_consumed = False
+
+    class HostileTuple(tuple[float, ...]):
+        def __len__(self) -> int:
+            nonlocal hostile_consumed
+            hostile_consumed = True
+            raise RuntimeError("embedding-tuple-marker")
+
+        def __iter__(self) -> object:
+            nonlocal hostile_consumed
+            hostile_consumed = True
+            raise RuntimeError("embedding-tuple-marker")
+
+    class HostileFloat(float):
+        def __float__(self) -> float:
+            nonlocal hostile_consumed
+            hostile_consumed = True
+            raise RuntimeError("embedding-number-marker")
+
+    vector: tuple[float, ...]
+    if attack == "tuple_subclass":
+        vector = HostileTuple((0.25, -0.5))
+    else:
+        vector = (cast(float, HostileFloat(0.25)), -0.5)
+    embedding = QueryEmbedding(vector=vector, client_duration_ms=1.0)
+    factory_calls = 0
+
+    async def factory() -> FakeProvider:
+        nonlocal factory_calls
+        factory_calls += 1
+        return FakeProvider()
+
+    with pytest.raises(DiagnosticRetrievalFailure) as raised:
+        await execute_expected_document_diagnostic(
+            _input(RetrievalMode.VECTOR),
+            provider_factory=factory,
+            query_embedder=FakeEmbedder(embedding),
+        )
+
+    assert factory_calls == 0
+    assert hostile_consumed is False
+    assert "embedding-" not in str(raised.value)
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (asyncio.CancelledError(_MARKER), asyncio.CancelledError),
+        (KeyboardInterrupt(_MARKER), KeyboardInterrupt),
+        (SystemExit(_MARKER), SystemExit),
+        (MemoryError(_MARKER), DiagnosticRetrievalFailure),
+    ],
+)
+async def test_embedding_controls_and_memory_failure_are_detached_before_provider(
+    error: BaseException,
+    expected: type[BaseException],
+) -> None:
+    class FailingEmbedder(FakeEmbedder):
+        async def embed_query(self, _: str) -> QueryEmbedding:
+            raise error
+
+    factory_calls = 0
+
+    async def factory() -> FakeProvider:
+        nonlocal factory_calls
+        factory_calls += 1
+        return FakeProvider()
+
+    with pytest.raises(expected) as raised:
+        await execute_expected_document_diagnostic(
+            _input(RetrievalMode.VECTOR),
+            provider_factory=factory,
+            query_embedder=FailingEmbedder(),
+        )
+
+    assert factory_calls == 0
+    assert raised.value is not error
+    assert _MARKER not in str(raised.value)
+    assert error.__traceback__ is None
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None
+
+
+@pytest.mark.asyncio
+async def test_fake_attribute_string_subclass_key_fails_fixed_and_closes_provider_once() -> None:
+    marker = "attribute-key-marker"
+
+    class HostileKey(str):
+        def __str__(self) -> str:
+            raise RuntimeError(marker)
+
+    provider = FakeProvider()
+    original_query = provider.query
+
+    async def malicious_query(request: DiagnosticProviderRequest) -> DiagnosticProviderResult:
+        result = await original_query(request)
+        attribute = DiagnosticAttributeValue(
+            field="category",
+            state=DiagnosticAttributeState.PRESENT_VALUE,
+            value={"safe": "value"},
+        )
+        object.__setattr__(attribute, "value", {HostileKey("unsafe"): "value"})
+        return replace(
+            result,
+            target=replace(result.target, attributes=(attribute,)),
+        )
+
+    provider.query = malicious_query  # type: ignore[method-assign]
+
+    async def factory() -> FakeProvider:
+        return provider
+
+    with pytest.raises(DiagnosticRetrievalFailure) as raised:
+        await execute_expected_document_diagnostic(
+            _input(
+                RetrievalMode.BM25,
+                stored_filter=FilterPredicate(
+                    field="category",
+                    op=PredicateOp.EQ,
+                    value="unix",
+                ),
+            ),
+            provider_factory=factory,
+            query_embedder=None,
+        )
+
+    assert provider.query_calls == 1
+    assert provider.close_calls == 1
+    assert marker not in str(raised.value)
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None
 
 
 @pytest.mark.asyncio
