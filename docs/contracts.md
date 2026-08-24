@@ -799,12 +799,14 @@ root: `matched` permits no filter-leaf finding, `not_matched` permits only exact
 findings, and `not_observable` permits only exact not-observable leaf findings. Findings are not
 required to be exhaustive, so a false root produced solely by logical negation can retain complete
 atomic evidence without inventing a false leaf or filter-failed observation.
-When the aggregate is `not_matched`, the response also rejects a global `NOT_OBSERVABLE`
-observation triggered by a stored candidate or stored qualified-RRF cutoff. The typed cutoff
-evidence may remain not observable for ties, short lists, or the eligibility-qualified candidate
-shapes, but the fixed global uncertainty statement would contradict the known aggregate failure.
-Aggregate `not_observable` and no-filter counterfactual cutoff observations remain independent and
-valid; zero-score and clearly outside stored facts under a false root keep their supported codes.
+When the aggregate is `not_matched`, the response also rejects any observation evidence containing
+a stored candidate or stored qualified-RRF `NOT_OBSERVABLE` cutoff value, regardless of the
+observation's enclosing code. The typed cutoff evidence remains in the dedicated candidate/RRF
+arrays for ties, short lists, or the eligibility-qualified candidate shapes, but it cannot be
+padded into a filter-failed or other finding because the fixed global uncertainty evidence would
+contradict the known aggregate failure. Aggregate `not_observable` and no-filter counterfactual
+cutoff observations remain independent and valid; zero-score and clearly outside stored facts
+under a false root keep their supported codes.
 
 If the exact lookup returns zero rows, direct scores are absent, candidate summaries may retain
 safe counts/boundaries but cannot claim target presence, all filter/candidate/RRF evidence is empty,

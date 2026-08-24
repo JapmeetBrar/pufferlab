@@ -1490,13 +1490,13 @@ class ExpectedDocumentDiagnosticResponse(_DiagnosticContractModel):
             filter_values and DiagnosticCandidateScope.NO_FILTER_COUNTERFACTUAL in scopes
         ):
             raise ValueError("one observation cannot merge stored-query and no-filter scopes")
-        if (
-            self.stored_filter_result is DiagnosticPredicateResult.NOT_MATCHED
-            and observation.code is ForensicCode.NOT_OBSERVABLE
-            and DiagnosticCandidateScope.STORED_QUERY in scopes
+        if self.stored_filter_result is DiagnosticPredicateResult.NOT_MATCHED and any(
+            value.scope is DiagnosticCandidateScope.STORED_QUERY
+            and value.relation is DiagnosticCutoffRelation.NOT_OBSERVABLE
+            for value in cutoff_values
         ):
             raise ValueError(
-                "known filter failure suppresses stored-query cutoff uncertainty observations"
+                "known filter failure suppresses stored-query cutoff uncertainty in observations"
             )
         if filter_values:
             if self.stored_filter_result is DiagnosticPredicateResult.NOT_MATCHED:

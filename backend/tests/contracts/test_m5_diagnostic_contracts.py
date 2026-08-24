@@ -429,6 +429,54 @@ def _make_bm25_stored_target_absent(payload: dict[str, Any]) -> None:
     )
 
 
+def _make_rrf_scope_target_absent_not_observable(
+    payload: dict[str, Any],
+    scope: DiagnosticCandidateScope,
+) -> None:
+    roles = {
+        DiagnosticCandidateScope.STORED_QUERY: {
+            DiagnosticSubqueryRole.STORED_QUERY_BM25_CANDIDATES,
+            DiagnosticSubqueryRole.STORED_QUERY_ANN_CANDIDATES,
+        },
+        DiagnosticCandidateScope.NO_FILTER_COUNTERFACTUAL: {
+            DiagnosticSubqueryRole.NO_FILTER_COUNTERFACTUAL_BM25_CANDIDATES,
+            DiagnosticSubqueryRole.NO_FILTER_COUNTERFACTUAL_ANN_CANDIDATES,
+        },
+    }[scope]
+    for summary in payload["subqueries"]:
+        if summary["role"] in roles:
+            summary.update(
+                returned_count=0,
+                target_present=False,
+                target_rank=None,
+                target_score=None,
+                boundary_score=None,
+            )
+    for candidate in payload["candidate_evidence"]:
+        if candidate["scope"] == scope:
+            candidate.update(
+                returned_count=0,
+                target_present=False,
+                target_rank=None,
+                target_score=None,
+                boundary_score=None,
+                relation=DiagnosticCutoffRelation.NOT_OBSERVABLE,
+                certainty=EvidenceCertainty.INSUFFICIENT,
+            )
+    rrf = next(item for item in payload["qualified_rrf_evidence"] if item["scope"] == scope)
+    rrf.update(
+        bm25_rank=None,
+        ann_rank=None,
+        returned_count=0,
+        target_present=False,
+        target_rank=None,
+        target_score=_score(DiagnosticSignal.RRF, 0.0, direct=False).model_dump(mode="json"),
+        boundary_score=None,
+        relation=DiagnosticCutoffRelation.NOT_OBSERVABLE,
+        certainty=EvidenceCertainty.INSUFFICIENT,
+    )
+
+
 @pytest.mark.parametrize("mode", list(RetrievalMode))
 @pytest.mark.parametrize("include_no_filter", [False, True])
 def test_exact_mode_option_role_limit_matrix(
@@ -1218,6 +1266,87 @@ def test_false_filter_suppresses_stored_candidate_not_observable_observation() -
         ExpectedDocumentDiagnosticResponse.model_validate(payload)
 
 
+@pytest.mark.parametrize(
+    ("mode", "signal"),
+    [
+        (RetrievalMode.BM25, DiagnosticSignal.BM25),
+        (RetrievalMode.HYBRID_RRF, DiagnosticSignal.RRF),
+    ],
+)
+def test_false_filter_rejects_stored_not_observable_cutoff_padded_into_filter_failure(
+    mode: RetrievalMode,
+    signal: DiagnosticSignal,
+) -> None:
+    payload = _response(mode).model_dump(mode="json")
+    _bind_filter_root(
+        payload,
+        DiagnosticPredicateResult.NOT_MATCHED,
+        [DiagnosticPredicateResult.NOT_MATCHED],
+    )
+    if signal is DiagnosticSignal.BM25:
+        _make_bm25_stored_target_absent(payload)
+    else:
+        _make_rrf_scope_target_absent_not_observable(
+            payload,
+            DiagnosticCandidateScope.STORED_QUERY,
+        )
+    observation = _filter_observation(DiagnosticPredicateResult.NOT_MATCHED).model_dump(mode="json")
+    cutoff = _cutoff_observation(
+        scope=DiagnosticCandidateScope.STORED_QUERY,
+        signal=signal,
+        relation=DiagnosticCutoffRelation.NOT_OBSERVABLE,
+        code=ForensicCode.NOT_OBSERVABLE,
+        certainty=EvidenceCertainty.INSUFFICIENT,
+    ).model_dump(mode="json")
+    observation["evidence"].append(cutoff["evidence"][0])
+    payload["observations"] = [observation]
+
+    with pytest.raises(ValidationError, match="known filter failure suppresses"):
+        ExpectedDocumentDiagnosticResponse.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    ("mode", "signal"),
+    [
+        (RetrievalMode.BM25, DiagnosticSignal.BM25),
+        (RetrievalMode.HYBRID_RRF, DiagnosticSignal.RRF),
+    ],
+)
+def test_unknown_filter_allows_stored_not_observable_cutoff_with_root_witness(
+    mode: RetrievalMode,
+    signal: DiagnosticSignal,
+) -> None:
+    payload = _response(mode).model_dump(mode="json")
+    _bind_filter_root(
+        payload,
+        DiagnosticPredicateResult.NOT_OBSERVABLE,
+        [DiagnosticPredicateResult.NOT_OBSERVABLE],
+    )
+    if signal is DiagnosticSignal.BM25:
+        _make_bm25_stored_target_absent(payload)
+    else:
+        _make_rrf_scope_target_absent_not_observable(
+            payload,
+            DiagnosticCandidateScope.STORED_QUERY,
+        )
+    observation = _filter_observation(DiagnosticPredicateResult.NOT_OBSERVABLE).model_dump(
+        mode="json"
+    )
+    cutoff = _cutoff_observation(
+        scope=DiagnosticCandidateScope.STORED_QUERY,
+        signal=signal,
+        relation=DiagnosticCutoffRelation.NOT_OBSERVABLE,
+        code=ForensicCode.NOT_OBSERVABLE,
+        certainty=EvidenceCertainty.INSUFFICIENT,
+    ).model_dump(mode="json")
+    observation["evidence"].append(cutoff["evidence"][0])
+    payload["observations"] = [observation]
+
+    response = ExpectedDocumentDiagnosticResponse.model_validate(payload)
+    assert response.observations[0].code is ForensicCode.NOT_OBSERVABLE
+    assert len(response.observations[0].evidence) == 2
+
+
 def test_unknown_filter_permits_stored_candidate_not_observable_observation() -> None:
     payload = _response().model_dump(mode="json")
     _bind_filter_root(
@@ -1268,6 +1397,35 @@ def test_false_filter_does_not_suppress_counterfactual_cutoff_uncertainty() -> N
         _cutoff_observation(
             scope=DiagnosticCandidateScope.NO_FILTER_COUNTERFACTUAL,
             signal=DiagnosticSignal.BM25,
+            relation=DiagnosticCutoffRelation.NOT_OBSERVABLE,
+            code=ForensicCode.NOT_OBSERVABLE,
+            certainty=EvidenceCertainty.INSUFFICIENT,
+        ).model_dump(mode="json")
+    ]
+
+    response = ExpectedDocumentDiagnosticResponse.model_validate(payload)
+    assert response.observations[0].code is ForensicCode.NOT_OBSERVABLE
+
+
+def test_false_filter_does_not_suppress_counterfactual_rrf_uncertainty() -> None:
+    payload = _response(RetrievalMode.HYBRID_RRF, include_no_filter=True).model_dump(mode="json")
+    _bind_filter_root(
+        payload,
+        DiagnosticPredicateResult.NOT_MATCHED,
+        [DiagnosticPredicateResult.NOT_MATCHED],
+    )
+    _make_rrf_scope_target_absent_not_observable(
+        payload,
+        DiagnosticCandidateScope.STORED_QUERY,
+    )
+    _make_rrf_scope_target_absent_not_observable(
+        payload,
+        DiagnosticCandidateScope.NO_FILTER_COUNTERFACTUAL,
+    )
+    payload["observations"] = [
+        _cutoff_observation(
+            scope=DiagnosticCandidateScope.NO_FILTER_COUNTERFACTUAL,
+            signal=DiagnosticSignal.RRF,
             relation=DiagnosticCutoffRelation.NOT_OBSERVABLE,
             code=ForensicCode.NOT_OBSERVABLE,
             certainty=EvidenceCertainty.INSUFFICIENT,

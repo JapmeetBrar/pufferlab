@@ -368,9 +368,9 @@ Cutoff comparisons are direction-aware and only compare values from the one diag
   `NOT_OBSERVABLE`: BM25 above a full boundary and ANN below it. BM25 zero, clear worse-than-boundary
   facts, ties, and short lists preserve their ordinary bounded relation. False-filter target
   presence is contradictory; unknown-filter presence remains an observed membership fact.
-- A false aggregate suppresses only a stored cutoff's fixed global `NOT_OBSERVABLE` observation;
-  typed evidence remains complete, and independent zero/outside findings plus no-filter
-  counterfactual observations remain valid.
+- A false aggregate suppresses every stored `NOT_OBSERVABLE` cutoff value from observations,
+  regardless of the enclosing observation code; typed candidate/RRF evidence remains complete,
+  and independent zero/outside findings plus no-filter counterfactual observations remain valid.
 - Stored-query provider facts use the diagnostic origin with observed certainty. Local filter,
   cutoff, and RRF arithmetic is `client_computed`; no-filter provider facts and computations are
   counterfactual. None proves the provider's internal filter/ANN execution order.
