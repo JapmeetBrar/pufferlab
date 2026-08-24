@@ -950,18 +950,22 @@ class ExpectedDocumentDiagnosticResponse(_DiagnosticContractModel):
                 number = normalized.get(field)
                 if number is not None and isinstance(number, bool):
                     raise ValueError(f"{field} requires an explicit JSON number")
-            if "observations" in normalized:
+            raw_observations = normalized.get("observations")
+            if isinstance(raw_observations, (list, tuple)):
                 observations = []
-                for item in normalized["observations"]:
+                for item in raw_observations:
                     observation = (
                         item.model_dump(warnings=False)
                         if isinstance(item, ForensicObservation)
                         else item
                     )
-                    if isinstance(observation, dict) and "evidence" in observation:
+                    raw_evidence = (
+                        observation.get("evidence") if isinstance(observation, dict) else None
+                    )
+                    if isinstance(raw_evidence, (list, tuple)):
                         observation = dict(observation)
                         evidence_payloads = []
-                        for evidence in observation["evidence"]:
+                        for evidence in raw_evidence:
                             evidence_payload = (
                                 evidence.model_dump(warnings=False)
                                 if isinstance(evidence, EvidenceItem)

@@ -1060,6 +1060,50 @@ def test_constructed_legacy_evidence_values_fail_as_validation_errors(value: obj
         ExpectedDocumentDiagnosticResponse.model_validate(payload)
 
 
+@pytest.mark.parametrize("malformed", [None, object(), 3, "invalid", {}])
+def test_malformed_observation_containers_fail_as_validation_errors(
+    malformed: object,
+) -> None:
+    payload = _response().model_dump(mode="json")
+    payload["observations"] = malformed
+    with pytest.raises(ValidationError):
+        ExpectedDocumentDiagnosticResponse.model_validate(payload)
+
+    attacked = _response().model_copy(update={"observations": malformed})
+    with pytest.raises(ValidationError):
+        ExpectedDocumentDiagnosticResponse.model_validate(attacked)
+
+
+@pytest.mark.parametrize("malformed", [None, object(), 3, "invalid", {}])
+def test_malformed_nested_evidence_containers_fail_as_validation_errors(
+    malformed: object,
+) -> None:
+    payload = _outside_bm25_response()
+    payload["observations"][0]["evidence"] = malformed
+    with pytest.raises(ValidationError):
+        ExpectedDocumentDiagnosticResponse.model_validate(payload)
+
+    source = ForensicObservation.model_validate(_outside_bm25_response()["observations"][0])
+    attacked_observation = source.model_copy(update={"evidence": malformed})
+    attacked = _response().model_copy(update={"observations": [attacked_observation]})
+    with pytest.raises(ValidationError):
+        ExpectedDocumentDiagnosticResponse.model_validate(attacked)
+
+
+def test_constructed_observation_and_evidence_missing_fields_fail_as_validation_errors() -> None:
+    payload = _response().model_dump(mode="json")
+    payload["observations"] = [ForensicObservation.model_construct(config_id=_CONFIG)]
+    with pytest.raises(ValidationError):
+        ExpectedDocumentDiagnosticResponse.model_validate(payload)
+
+    payload = _outside_bm25_response()
+    payload["observations"][0]["evidence"] = [
+        EvidenceItem.model_construct(label="cutoff_stored_query_bm25")
+    ]
+    with pytest.raises(ValidationError):
+        ExpectedDocumentDiagnosticResponse.model_validate(payload)
+
+
 def test_legacy_replay_explicitly_rejects_diagnostic_origin() -> None:
     from backend.tests.contracts.test_forensics import _primary  # type: ignore[import-not-found]
 
