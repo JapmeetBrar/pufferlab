@@ -45,6 +45,13 @@ export type EvaluationRunQueryReplayResponse = JsonResponse<
   "post",
   200
 >;
+export type ExpectedDocumentDiagnosticRequest =
+  paths["/api/v1/eval-runs/{run_id}/queries/{query_id}/documents/{document_id}/diagnostic"]["post"]["requestBody"]["content"]["application/json"];
+export type ExpectedDocumentDiagnosticResponse = JsonResponse<
+  "/api/v1/eval-runs/{run_id}/queries/{query_id}/documents/{document_id}/diagnostic",
+  "post",
+  200
+>;
 export type RegressionQuery =
   paths["/api/v1/eval-runs/{run_id}/regressions"]["get"]["parameters"]["query"];
 
@@ -165,4 +172,45 @@ export async function replayEvaluationRunQuery(
     },
   );
   return readJsonResponse<EvaluationRunQueryReplayResponse>(response);
+}
+
+export async function diagnoseExpectedDocument(
+  runId: string,
+  queryId: string,
+  documentId: string,
+  request: ExpectedDocumentDiagnosticRequest,
+  signal?: AbortSignal,
+): Promise<ExpectedDocumentDiagnosticResponse> {
+  if (typeof request !== "object" || request === null) {
+    throw new TypeError("Invalid expected-document diagnostic request.");
+  }
+  const candidate = request as unknown as Record<string, unknown>;
+  const contractVersion = candidate.contract_version;
+  const configId = candidate.config_id;
+  const includeNoFilterCounterfactual = candidate.include_no_filter_counterfactual;
+  if (
+    contractVersion !== 1 ||
+    typeof configId !== "string" ||
+    configId.length === 0 ||
+    typeof includeNoFilterCounterfactual !== "boolean"
+  ) {
+    throw new TypeError("Invalid expected-document diagnostic request.");
+  }
+  const body: ExpectedDocumentDiagnosticRequest = {
+    contract_version: contractVersion,
+    config_id: configId,
+    include_no_filter_counterfactual: includeNoFilterCounterfactual,
+  };
+  const response = await fetch(
+    apiUrl(
+      `/api/v1/eval-runs/${encoded(runId)}/queries/${encoded(queryId)}/documents/${encoded(documentId)}/diagnostic`,
+    ),
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal,
+    },
+  );
+  return readJsonResponse<ExpectedDocumentDiagnosticResponse>(response);
 }

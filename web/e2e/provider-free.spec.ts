@@ -1,6 +1,16 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Page } from "@playwright/test";
 
+import {
+  baselineId as liveBaselineId,
+  candidateIds as liveCandidateIds,
+  documentId as liveDocumentId,
+  expectedDocumentDiagnosticResponse,
+  queryDetail as liveQueryDetail,
+  queryId as liveQueryId,
+  runId as liveRunId,
+} from "../src/test/evalFixtures";
+
 const runId = process.env.PUFFERLAB_E2E_RUN_ID;
 if (runId === undefined) throw new Error("PUFFERLAB_E2E_RUN_ID is required");
 
@@ -117,6 +127,164 @@ test("provider-free synthetic dashboard journey is actionable, navigable, and ac
   expect(consoleErrors).toEqual([]);
   expect(pageErrors).toEqual([]);
   expect(failedRequests).toEqual([]);
+});
+
+test("intercepted live expected-document diagnostic is explicit, bounded, reset-safe, and accessible", async ({ page }) => {
+  const queryPath = `/api/v1/eval-runs/${liveRunId}/queries/${liveQueryId}`;
+  const diagnosticPath = `${queryPath}/documents/${liveDocumentId}/diagnostic`;
+  const browserPosts: string[] = [];
+  const diagnosticBodies: Record<string, unknown>[] = [];
+  const consoleErrors: string[] = [];
+  const pageErrors: string[] = [];
+  const failedRequests: string[] = [];
+  let releaseLateResponse: (() => void) | undefined;
+  const lateResponseGate = new Promise<void>((resolve) => { releaseLateResponse = resolve; });
+  let markLateResponseSettled: () => void = () => undefined;
+  const lateResponseSettled = new Promise<void>((resolve) => { markLateResponseSettled = resolve; });
+
+  await page.route("**/api/v1/eval-runs/**", async (route) => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname;
+    if (request.method() === "GET" && path === queryPath) {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(liveQueryDetail("live", { withFilter: true })),
+      });
+      return;
+    }
+    if (request.method() === "POST" && path === diagnosticPath) {
+      const body = request.postDataJSON() as Record<string, unknown>;
+      diagnosticBodies.push(body);
+      const response = expectedDocumentDiagnosticResponse(
+        String(body.config_id),
+        body.include_no_filter_counterfactual === true,
+        { storedFilterResult: "matched" },
+      );
+      const delayedResponse = diagnosticBodies.length === 2;
+      if (delayedResponse) await lateResponseGate;
+      try {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify(response),
+        });
+      } catch {
+        // The second intercepted response is deliberately released after the browser aborts it.
+      } finally {
+        if (delayedResponse) markLateResponseSettled();
+      }
+      return;
+    }
+    await route.continue();
+  });
+  page.on("request", (request) => {
+    if (request.method() === "POST") browserPosts.push(request.url());
+  });
+  page.on("console", (message) => {
+    if (message.type() === "error") consoleErrors.push(message.text());
+  });
+  page.on("pageerror", (error) => pageErrors.push(error.message));
+  page.on("requestfailed", (request) => failedRequests.push(`${request.method()} ${request.url()}`));
+
+  await page.goto(
+    `/runs/${liveRunId}/queries/${liveQueryId}?left=${liveBaselineId}&right=${liveCandidateIds[0]}`,
+  );
+  await expect(page.getByRole("heading", { name: "Query forensics", level: 1 })).toBeFocused();
+  await expect(page.getByText("authored local query text")).toBeVisible();
+  expect(browserPosts).toEqual([]);
+
+  const opener = page.getByRole("button", { name: "Inspect document" }).first();
+  await opener.click();
+  const dialog = page.getByRole("dialog", { name: "Document evidence" });
+  const config = dialog.getByLabel("Diagnostic configuration");
+  const noFilter = dialog.getByLabel("Include a same-request no-filter counterfactual");
+  const confirm = dialog.getByLabel("I understand this starts cost-bearing provider work.");
+  const run = dialog.getByRole("button", { name: "Run expected-document diagnostic" });
+  const close = dialog.getByRole("button", { name: "Close document evidence" });
+  await expect(dialog).toBeVisible();
+  await expect(close).toBeFocused();
+  await expect(config).toHaveValue("");
+  await expect(run).toBeDisabled();
+  expect(browserPosts).toEqual([]);
+  await page.keyboard.press("Shift+Tab");
+  await expect(noFilter).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(close).toBeFocused();
+
+  for (const [configId, count] of [
+    [liveBaselineId, 2],
+    [liveCandidateIds[0], 2],
+    [liveCandidateIds[1], 3],
+    [liveCandidateIds[2], 3],
+  ] as const) {
+    await config.selectOption(configId);
+    await expect(dialog.getByText(new RegExp(`exactly ${count} ordered subqueries`, "i"))).toBeVisible();
+    await expect(confirm).not.toBeChecked();
+  }
+  expect(browserPosts).toEqual([]);
+  await close.focus();
+  await page.keyboard.press("Shift+Tab");
+  await expect(confirm).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(close).toBeFocused();
+
+  await config.selectOption(liveCandidateIds[1]);
+  await noFilter.check();
+  await expect(dialog.getByText(/exactly 5 ordered subqueries/i)).toBeVisible();
+  await confirm.check();
+  await close.focus();
+  await page.keyboard.press("Shift+Tab");
+  await expect(run).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(close).toBeFocused();
+  await run.click();
+  await expect(dialog.getByText("New live expected-document diagnostic · not original run evidence")).toBeVisible();
+  await expect(dialog.getByRole("heading", { name: "Same-request no-filter counterfactual candidates" })).toBeVisible();
+  await expect(dialog.getByRole("heading", { name: "Qualified client-computed RRF" })).toBeVisible();
+  await expect(dialog.getByText(/not observed server RRF, reranker, or final-order evidence/i)).toBeVisible();
+  await expect(confirm).not.toBeChecked();
+  expect(diagnosticBodies).toEqual([{
+    contract_version: 1,
+    config_id: liveCandidateIds[1],
+    include_no_filter_counterfactual: true,
+  }]);
+  expect(browserPosts).toHaveLength(1);
+  await expectContained(page);
+  await expectNoSeriousAxeViolations(page);
+
+  await page.goBack();
+  await expect(dialog).toBeHidden();
+  await page.goForward();
+  await expect(dialog).toBeVisible();
+  await expect(config).toHaveValue("");
+  expect(browserPosts).toHaveLength(1);
+  await page.reload();
+  await expect(dialog).toBeVisible();
+  await expect(config).toHaveValue("");
+  await expect(dialog.getByRole("button", { name: "Close document evidence" })).toBeFocused();
+  expect(browserPosts).toHaveLength(1);
+
+  await config.selectOption(liveBaselineId);
+  await confirm.check();
+  await run.click();
+  await expect(dialog.getByRole("button", { name: /Running expected-document diagnostic/ })).toBeDisabled();
+  await expect(config).toBeEnabled();
+  await config.selectOption(liveCandidateIds[0]);
+  await expect(confirm).not.toBeChecked();
+  releaseLateResponse?.();
+  await lateResponseSettled;
+  await expect.poll(() => failedRequests.some((failure) => failure.includes(diagnosticPath))).toBe(true);
+  await expect(dialog.getByText("New live expected-document diagnostic · not original run evidence")).toHaveCount(0);
+  await expect(dialog.getByRole("alert")).toHaveCount(0);
+  expect(diagnosticBodies).toHaveLength(2);
+  expect(browserPosts).toHaveLength(2);
+  await expectContained(page);
+  await expectNoSeriousAxeViolations(page);
+
+  expect(consoleErrors).toEqual([]);
+  expect(pageErrors).toEqual([]);
+  expect(failedRequests.filter((failure) => !failure.includes(diagnosticPath))).toEqual([]);
 });
 
 test("failed capability refetch invalidates configured readiness without browser mutations", async ({ page }) => {

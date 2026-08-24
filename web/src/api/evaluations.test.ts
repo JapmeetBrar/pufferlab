@@ -4,6 +4,7 @@ import { ApiRequestError } from "./client";
 import {
   cancelEvaluationRun,
   createEvaluationRun,
+  diagnoseExpectedDocument,
   getEvaluationRegressions,
   getEvaluationRun,
   getEvaluationRunQuery,
@@ -13,6 +14,7 @@ import {
   listEvaluationRuns,
   replayEvaluationRunQuery,
   type CreateEvaluationRunRequest,
+  type ExpectedDocumentDiagnosticRequest,
 } from "./evaluations";
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -170,6 +172,149 @@ describe("evaluation API client", () => {
     ]) {
       expect(body).not.toHaveProperty(forbidden);
     }
+  });
+
+  it("posts the exact generated expected-document body to three encoded path identities", async () => {
+    const fetchMock = successfulFetch();
+    vi.stubGlobal("fetch", fetchMock);
+    const controller = new AbortController();
+    const request: ExpectedDocumentDiagnosticRequest = {
+      contract_version: 1,
+      config_id: "config-id",
+      include_no_filter_counterfactual: true,
+    };
+
+    await diagnoseExpectedDocument(
+      "run/id",
+      "query/id",
+      "document/id",
+      request,
+      controller.signal,
+    );
+
+    const [input, init] = fetchMock.mock.calls[0] ?? [];
+    expect(requestUrl(input ?? "")).toBe(
+      "/api/v1/eval-runs/run%2Fid/queries/query%2Fid/documents/document%2Fid/diagnostic",
+    );
+    expect(init).toMatchObject({
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      signal: controller.signal,
+    });
+    if (typeof init?.body !== "string") throw new Error("Expected a JSON request body");
+    const body = JSON.parse(init.body) as Record<string, unknown>;
+    expect(body).toEqual(request);
+    for (const forbidden of [
+      "query_text",
+      "qrels",
+      "document_id",
+      "filters",
+      "namespace",
+      "region",
+      "vector",
+      "api_key",
+      "provider_body",
+      "model_path",
+      "reranker",
+    ]) {
+      expect(body).not.toHaveProperty(forbidden);
+    }
+  });
+
+  it("reconstructs the diagnostic body without reading runtime extras or prototype fields", async () => {
+    const fetchMock = successfulFetch();
+    vi.stubGlobal("fetch", fetchMock);
+    const forbiddenGetter = vi.fn(() => {
+      throw new Error("forbidden getter was read");
+    });
+    const prototype = Object.create(null) as Record<string, unknown>;
+    Object.defineProperty(prototype, "namespace", { enumerable: true, get: forbiddenGetter });
+    const request = Object.assign(Object.create(prototype) as Record<string, unknown>, {
+      contract_version: 1,
+      config_id: "config-id",
+      include_no_filter_counterfactual: false,
+      query_text: "must not cross boundary",
+    });
+    Object.defineProperty(request, "api_key", { enumerable: true, get: forbiddenGetter });
+
+    await diagnoseExpectedDocument(
+      "run-id",
+      "query-id",
+      "document-id",
+      request as ExpectedDocumentDiagnosticRequest,
+    );
+
+    expect(forbiddenGetter).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledOnce();
+    const init = fetchMock.mock.calls[0]?.[1];
+    if (typeof init?.body !== "string") throw new Error("Expected a JSON request body");
+    expect(JSON.parse(init.body)).toEqual({
+      contract_version: 1,
+      config_id: "config-id",
+      include_no_filter_counterfactual: false,
+    });
+  });
+
+  it("snapshots each allowed diagnostic property exactly once before validating", async () => {
+    const fetchMock = successfulFetch();
+    vi.stubGlobal("fetch", fetchMock);
+    const reads = {
+      contract_version: 0,
+      config_id: 0,
+      include_no_filter_counterfactual: 0,
+    };
+    const request = Object.create(null) as Record<string, unknown>;
+    Object.defineProperties(request, {
+      contract_version: {
+        enumerable: true,
+        get: () => (++reads.contract_version === 1 ? 1 : 2),
+      },
+      config_id: {
+        enumerable: true,
+        get: () => (++reads.config_id === 1 ? "config-id" : "changed-config"),
+      },
+      include_no_filter_counterfactual: {
+        enumerable: true,
+        get: () => (++reads.include_no_filter_counterfactual === 1 ? false : "changed"),
+      },
+    });
+
+    await diagnoseExpectedDocument(
+      "run-id",
+      "query-id",
+      "document-id",
+      request as ExpectedDocumentDiagnosticRequest,
+    );
+
+    expect(reads).toEqual({
+      contract_version: 1,
+      config_id: 1,
+      include_no_filter_counterfactual: 1,
+    });
+    const init = fetchMock.mock.calls[0]?.[1];
+    if (typeof init?.body !== "string") throw new Error("Expected a JSON request body");
+    expect(JSON.parse(init.body)).toEqual({
+      contract_version: 1,
+      config_id: "config-id",
+      include_no_filter_counterfactual: false,
+    });
+  });
+
+  it.each([
+    { contract_version: 2, config_id: "config-id", include_no_filter_counterfactual: false },
+    { contract_version: 1, config_id: "", include_no_filter_counterfactual: false },
+    { contract_version: 1, config_id: "config-id", include_no_filter_counterfactual: "false" },
+  ])("rejects an invalid runtime diagnostic body before fetch", async (request) => {
+    const fetchMock = successfulFetch();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(diagnoseExpectedDocument(
+      "run-id",
+      "query-id",
+      "document-id",
+      request as unknown as ExpectedDocumentDiagnosticRequest,
+    )).rejects.toThrow("Invalid expected-document diagnostic request.");
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("parses a direct redacted ApiErrorDetail without a nested detail shape", async () => {
