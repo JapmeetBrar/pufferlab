@@ -350,6 +350,33 @@
         "title": "CreateEvalRunResponse",
         "type": "object"
       },
+      "CutoffRelationEvidenceValue": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "diagnostic_cutoff_relation",
+            "default": "diagnostic_cutoff_relation",
+            "title": "Kind",
+            "type": "string"
+          },
+          "relation": {
+            "$ref": "#/components/schemas/DiagnosticCutoffRelation"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/DiagnosticCandidateScope"
+          },
+          "signal": {
+            "$ref": "#/components/schemas/DiagnosticSignal"
+          }
+        },
+        "required": [
+          "scope",
+          "signal",
+          "relation"
+        ],
+        "title": "CutoffRelationEvidenceValue",
+        "type": "object"
+      },
       "DataOrigin": {
         "description": "Whether persisted catalog data came from provider-backed work or the offline demo.",
         "enum": [
@@ -545,6 +572,71 @@
           "created_at"
         ],
         "title": "DatasetVersion",
+        "type": "object"
+      },
+      "DiagnosticCandidateScope": {
+        "enum": [
+          "stored_query",
+          "no_filter_counterfactual"
+        ],
+        "title": "DiagnosticCandidateScope",
+        "type": "string"
+      },
+      "DiagnosticCutoffRelation": {
+        "enum": [
+          "target_present",
+          "no_lexical_score",
+          "outside_candidates",
+          "ann_candidate_miss",
+          "not_observable"
+        ],
+        "title": "DiagnosticCutoffRelation",
+        "type": "string"
+      },
+      "DiagnosticPredicateResult": {
+        "enum": [
+          "matched",
+          "not_matched",
+          "not_observable"
+        ],
+        "title": "DiagnosticPredicateResult",
+        "type": "string"
+      },
+      "DiagnosticSignal": {
+        "enum": [
+          "bm25",
+          "ann",
+          "rrf"
+        ],
+        "title": "DiagnosticSignal",
+        "type": "string"
+      },
+      "DirectScoreEvidenceValue": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "diagnostic_direct_score",
+            "default": "diagnostic_direct_score",
+            "title": "Kind",
+            "type": "string"
+          },
+          "score": {
+            "$ref": "#/components/schemas/ObservedScore"
+          },
+          "signal": {
+            "enum": [
+              "bm25",
+              "ann"
+            ],
+            "title": "Signal",
+            "type": "string"
+          }
+        },
+        "required": [
+          "signal",
+          "score"
+        ],
+        "title": "DirectScoreEvidenceValue",
         "type": "object"
       },
       "EvalFailurePayload": {
@@ -1322,6 +1414,7 @@
           "stored_run",
           "live_replay_primary",
           "live_replay_counterfactual_probe",
+          "live_expected_document_diagnostic",
           "client_computed"
         ],
         "title": "EvidenceOrigin",
@@ -1509,6 +1602,56 @@
         "title": "FilterPredicate",
         "type": "object"
       },
+      "FilterPredicateEvidenceValue": {
+        "additionalProperties": false,
+        "properties": {
+          "field": {
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[A-Za-z_][A-Za-z0-9_.-]*$",
+            "title": "Field",
+            "type": "string"
+          },
+          "kind": {
+            "const": "diagnostic_filter_result",
+            "default": "diagnostic_filter_result",
+            "title": "Kind",
+            "type": "string"
+          },
+          "operator": {
+            "$ref": "#/components/schemas/PredicateOp"
+          },
+          "predicate_ordinal": {
+            "maximum": 15.0,
+            "minimum": 0.0,
+            "title": "Predicate Ordinal",
+            "type": "integer"
+          },
+          "predicate_path": {
+            "items": {
+              "maximum": 30.0,
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "maxItems": 8,
+            "minItems": 1,
+            "title": "Predicate Path",
+            "type": "array"
+          },
+          "result": {
+            "$ref": "#/components/schemas/DiagnosticPredicateResult"
+          }
+        },
+        "required": [
+          "predicate_ordinal",
+          "predicate_path",
+          "field",
+          "operator",
+          "result"
+        ],
+        "title": "FilterPredicateEvidenceValue",
+        "type": "object"
+      },
       "FilterResultEvidenceValue": {
         "additionalProperties": false,
         "properties": {
@@ -1543,6 +1686,7 @@
           "no_lexical_score",
           "outside_lexical_candidates",
           "outside_vector_candidates",
+          "ann_candidate_miss",
           "outside_fusion_top_k",
           "reranked_down",
           "not_observable"
@@ -1554,6 +1698,9 @@
         "discriminator": {
           "mapping": {
             "candidate_count": "#/components/schemas/CandidateCountEvidenceValue",
+            "diagnostic_cutoff_relation": "#/components/schemas/CutoffRelationEvidenceValue",
+            "diagnostic_direct_score": "#/components/schemas/DirectScoreEvidenceValue",
+            "diagnostic_filter_result": "#/components/schemas/FilterPredicateEvidenceValue",
             "filter_result": "#/components/schemas/FilterResultEvidenceValue",
             "presence": "#/components/schemas/PresenceEvidenceValue",
             "rank": "#/components/schemas/RankEvidenceValue",
@@ -1584,6 +1731,15 @@
           },
           {
             "$ref": "#/components/schemas/WarningEvidenceValue"
+          },
+          {
+            "$ref": "#/components/schemas/DirectScoreEvidenceValue"
+          },
+          {
+            "$ref": "#/components/schemas/FilterPredicateEvidenceValue"
+          },
+          {
+            "$ref": "#/components/schemas/CutoffRelationEvidenceValue"
           }
         ]
       },

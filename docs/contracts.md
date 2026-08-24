@@ -564,6 +564,7 @@ class ForensicCode(str, Enum):
     NO_LEXICAL_SCORE = "no_lexical_score"
     OUTSIDE_LEXICAL_CANDIDATES = "outside_lexical_candidates"
     OUTSIDE_VECTOR_CANDIDATES = "outside_vector_candidates"
+    ANN_CANDIDATE_MISS = "ann_candidate_miss"
     OUTSIDE_FUSION_TOP_K = "outside_fusion_top_k"
     RERANKED_DOWN = "reranked_down"
     NOT_OBSERVABLE = "not_observable"
@@ -572,6 +573,7 @@ class EvidenceOrigin(str, Enum):
     STORED_RUN = "stored_run"
     LIVE_REPLAY_PRIMARY = "live_replay_primary"
     LIVE_REPLAY_COUNTERFACTUAL_PROBE = "live_replay_counterfactual_probe"
+    LIVE_EXPECTED_DOCUMENT_DIAGNOSTIC = "live_expected_document_diagnostic"
     CLIENT_COMPUTED = "client_computed"
 
 class EvidenceItem(BaseModel):
@@ -594,10 +596,13 @@ class ForensicObservation(BaseModel):
 ```
 
 `ForensicEvidenceValue` is a discriminated allowlist only: bounded rank, typed score,
-candidate-count, presence, filter-result, RRF-contribution, or warning. Unknown keys/kinds, recursive
-JSON, non-finite numbers, boolean-to-number coercion, oversized strings/lists, and arbitrary provider
-bodies are rejected. RRF contributions require bounded rank/weight/constant inputs and exact
-`weight / (rank_constant + rank)` arithmetic.
+candidate-count, presence, filter-result, RRF-contribution, warning, diagnostic direct score,
+value-free diagnostic predicate result, or diagnostic cutoff relation. Unknown keys/kinds,
+recursive JSON, non-finite numbers, boolean-to-number coercion, oversized strings/lists, and
+arbitrary provider bodies are rejected. RRF contributions require bounded rank/weight/constant
+inputs and exact `weight / (rank_constant + rank)` arithmetic. The three diagnostic variants become
+usable only inside the dedicated response's stronger source/result cross-validator; legacy replay
+explicitly rejects them even when an attacker gives them a replay-valid `client_computed` trace.
 
 Stored M2 outcomes did not retain stage membership or stage scores. They may therefore emit only
 `NOT_OBSERVABLE` with `certainty=insufficient` and null trace/time; ranks, metrics, and timing remain
@@ -677,6 +682,105 @@ primary result.
 Forbidden statements include “turbopuffer searched cluster X,” “the cache was cold,” “the filter
 ran before ANN,” and counterfactual-probe inputs caused the primary order. Those claims remain
 `NOT_OBSERVABLE` unless a future API directly supplies the fact.
+
+### Expected-document diagnostic contracts
+
+Milestone 5 adds a separate target-scoped contract family. These Python models are deliberately
+unreachable from OpenAPI until the dedicated M5-D route is mounted; M5-A generates only the
+already-reachable `EvidenceOrigin`, `ForensicCode`, and `ForensicEvidenceValue` additions. Existing
+replay request and response models explicitly reject the diagnostic origin, diagnostic-only
+`ANN_CANDIDATE_MISS` code, and all three diagnostic evidence variants even when an attacker gives
+them a replay-valid `client_computed` trace. Because those shared additions are already reachable,
+M5-A also keeps the existing generic forensic renderer exhaustive with fixed labels for the new
+origin and target-safe fields for the three values. That compile-only compatibility surface adds no
+diagnostic endpoint, action, state, or request path and cannot widen legacy replay behavior.
+
+```python
+class ExpectedDocumentDiagnosticRequest(ContractModel):
+    contract_version: Literal[1] = 1
+    config_id: UUID
+    include_no_filter_counterfactual: bool = False
+
+class ExpectedDocumentDiagnosticResponse(ContractModel):
+    contract_version: Literal[1] = 1
+    run_id: UUID
+    query_id: UUID
+    data_origin: Literal["live"] = "live"
+    origin: Literal["live_expected_document_diagnostic"]
+    config_id: UUID
+    config_mode: RetrievalMode
+    target_document_id: UUID
+    included_no_filter_counterfactual: bool
+    observed_at: AwareDatetime
+    trace_id: UUID
+    duration_ms: float
+    embedding_duration_ms: float | None
+    subqueries: list[DiagnosticSubquerySummary]
+    target: DiagnosticTargetLookup
+    filter_evidence: list[FilterPredicateEvidence]
+    candidate_evidence: list[CandidateCutoffEvidence]
+    qualified_rrf_evidence: list[QualifiedRrfEvidence]
+    observations: list[ForensicObservation]
+    observability_notice: Literal["new_live_diagnostic_not_original_run"]
+```
+
+The request has exactly one UUID, one strict JSON boolean, and the exact integer contract version;
+it accepts no document, query text, filter, namespace, region, or provider input in the body. M5-D
+later cross-checks the body config and path identities against the authenticated run, positive qrel,
+and stored query.
+
+Subqueries use a discriminated lookup-versus-candidate union. Ordinals are contiguous from zero.
+The lookup is ordinal zero, limit one, and contains only a zero-or-one count plus exact target
+presence. Candidate summaries have limit 50 for BM25/vector or 100 for both hybrid modes, bounded
+count, target rank/score only when present, and a boundary score if and only if the list is full.
+Legal role sequences are exact:
+
+| Mode | Stored-query roles | With eligible no-filter |
+|---|---|---|
+| BM25 | lookup, BM25 | plus no-filter BM25 |
+| vector | lookup, ANN | plus no-filter ANN |
+| hybrid RRF/rerank | lookup, BM25, ANN | plus no-filter BM25, ANN |
+
+Direct target scores are nonnegative finite `compute_attribute` BM25/VectorDist values with the
+mode's exact kind and direction. Candidate target/boundary scores are nonnegative finite
+`turbopuffer_dist` values, and every returned BM25 target or boundary row is strictly positive
+because score-ranked BM25 omits score-zero rows. Present candidate scores must equal the direct target score under
+`math.isclose(rel_tol=1e-12, abs_tol=1e-15)`; the same tolerance makes a boundary tie
+`NOT_OBSERVABLE`. Count, presence, rank, ordering direction, source, kind, and boundary
+contradictions reject the whole response.
+
+`FilterPredicateEvidence` contains only the response/config/target/trace/time binding, contiguous
+predicate ordinal, bounded path, safe field name, operator, tri-state result, and derived certainty.
+It contains neither the predicate value nor the observed attribute value. `CandidateCutoffEvidence`
+repeats exactly one candidate summary plus the corresponding direct score and a derived
+target-present/no-score/outside/ANN-miss/not-observable relation. Its scope is exactly
+`stored_query` or `no_filter_counterfactual`; stored results are observed, no-filter results are
+counterfactual, and ties/short lists are insufficient.
+
+Hybrid responses also contain one target-only `QualifiedRrfEvidence` per active scope. It exposes
+only the selected target's BM25/ANN ranks, bounded positive weights, rank constant, target RRF
+score/rank, returned count, optional full-list boundary, and derived relation. The target RRF score
+must equal the sum of `weight / (rank_constant + rank)` for its present inputs. All scopes share the
+same config inputs; their ranks and row bounds equal the same-scope candidate evidence. RRF scores
+are `client_computed`, and equality at the qualified boundary remains `NOT_OBSERVABLE`. Pure modes
+forbid qualified RRF evidence. M5-D must exact-bind the repeated
+`(bm25_weight, ann_weight, rank_constant, cutoff)` tuple to the authenticated selected config; for
+hybrid RRF the cutoff is authenticated `result_k`, while hybrid rerank uses authenticated reranker
+admission depth and still makes no post-reranker/final-cutoff claim.
+
+Every nested target, filter, candidate, RRF, observation, and evidence value is revalidated at the
+top-level response boundary. All repeated config/target/trace/time fields equal the response source.
+Diagnostic observations permit only the diagnostic origin for the fixed unavailable-target result
+and `client_computed` for supported findings. Fixed statements and value-derived labels prevent
+free-form provider/filter text. Evidence codes must match their exact typed predicate/cutoff result;
+`RERANKED_DOWN`, stored/replay origins, cross-scope mixtures, cross-source values, unrelated document
+IDs, and exact duplicate observations reject.
+
+If the exact lookup returns zero rows, direct scores are absent, candidate summaries may retain
+safe counts/boundaries but cannot claim target presence, all filter/candidate/RRF evidence is empty,
+and the response contains exactly one fixed `NOT_OBSERVABLE` observation with
+`target_unavailable_in_diagnostic_snapshot`. This states only that the target was unavailable in
+the new diagnostic snapshot.
 
 ## 10. HTTP surface
 

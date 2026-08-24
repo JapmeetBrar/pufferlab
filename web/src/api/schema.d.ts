@@ -414,6 +414,17 @@ export interface components {
             contract_version: components["schemas"]["ContractVersion"];
             result: components["schemas"]["EvalRunView"];
         };
+        /** CutoffRelationEvidenceValue */
+        CutoffRelationEvidenceValue: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "diagnostic_cutoff_relation";
+            relation: components["schemas"]["DiagnosticCutoffRelation"];
+            scope: components["schemas"]["DiagnosticCandidateScope"];
+            signal: components["schemas"]["DiagnosticSignal"];
+        };
         /**
          * DataOrigin
          * @description Whether persisted catalog data came from provider-backed work or the offline demo.
@@ -481,6 +492,40 @@ export interface components {
             status: components["schemas"]["DatasetStatus"];
             /** Version */
             version: string;
+        };
+        /**
+         * DiagnosticCandidateScope
+         * @enum {string}
+         */
+        DiagnosticCandidateScope: "stored_query" | "no_filter_counterfactual";
+        /**
+         * DiagnosticCutoffRelation
+         * @enum {string}
+         */
+        DiagnosticCutoffRelation: "target_present" | "no_lexical_score" | "outside_candidates" | "ann_candidate_miss" | "not_observable";
+        /**
+         * DiagnosticPredicateResult
+         * @enum {string}
+         */
+        DiagnosticPredicateResult: "matched" | "not_matched" | "not_observable";
+        /**
+         * DiagnosticSignal
+         * @enum {string}
+         */
+        DiagnosticSignal: "bm25" | "ann" | "rrf";
+        /** DirectScoreEvidenceValue */
+        DirectScoreEvidenceValue: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "diagnostic_direct_score";
+            score: components["schemas"]["ObservedScore"];
+            /**
+             * Signal
+             * @enum {string}
+             */
+            signal: "bm25" | "ann";
         };
         /**
          * EvalFailurePayload
@@ -799,7 +844,7 @@ export interface components {
          * EvidenceOrigin
          * @enum {string}
          */
-        EvidenceOrigin: "stored_run" | "live_replay_primary" | "live_replay_counterfactual_probe" | "client_computed";
+        EvidenceOrigin: "stored_run" | "live_replay_primary" | "live_replay_counterfactual_probe" | "live_expected_document_diagnostic" | "client_computed";
         /** ExcludedPairCount */
         ExcludedPairCount: {
             /** Count */
@@ -854,6 +899,22 @@ export interface components {
             op: components["schemas"]["PredicateOp"];
             value: components["schemas"]["JsonValue-Output"];
         };
+        /** FilterPredicateEvidenceValue */
+        FilterPredicateEvidenceValue: {
+            /** Field */
+            field: string;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "diagnostic_filter_result";
+            operator: components["schemas"]["PredicateOp"];
+            /** Predicate Ordinal */
+            predicate_ordinal: number;
+            /** Predicate Path */
+            predicate_path: number[];
+            result: components["schemas"]["DiagnosticPredicateResult"];
+        };
         /** FilterResultEvidenceValue */
         FilterResultEvidenceValue: {
             /** Field */
@@ -870,8 +931,8 @@ export interface components {
          * ForensicCode
          * @enum {string}
          */
-        ForensicCode: "filter_predicate_failed" | "no_lexical_score" | "outside_lexical_candidates" | "outside_vector_candidates" | "outside_fusion_top_k" | "reranked_down" | "not_observable";
-        ForensicEvidenceValue: components["schemas"]["RankEvidenceValue"] | components["schemas"]["ScoreEvidenceValue"] | components["schemas"]["CandidateCountEvidenceValue"] | components["schemas"]["PresenceEvidenceValue"] | components["schemas"]["FilterResultEvidenceValue"] | components["schemas"]["RrfContributionEvidenceValue"] | components["schemas"]["WarningEvidenceValue"];
+        ForensicCode: "filter_predicate_failed" | "no_lexical_score" | "outside_lexical_candidates" | "outside_vector_candidates" | "ann_candidate_miss" | "outside_fusion_top_k" | "reranked_down" | "not_observable";
+        ForensicEvidenceValue: components["schemas"]["RankEvidenceValue"] | components["schemas"]["ScoreEvidenceValue"] | components["schemas"]["CandidateCountEvidenceValue"] | components["schemas"]["PresenceEvidenceValue"] | components["schemas"]["FilterResultEvidenceValue"] | components["schemas"]["RrfContributionEvidenceValue"] | components["schemas"]["WarningEvidenceValue"] | components["schemas"]["DirectScoreEvidenceValue"] | components["schemas"]["FilterPredicateEvidenceValue"] | components["schemas"]["CutoffRelationEvidenceValue"];
         /** ForensicObservation */
         ForensicObservation: {
             certainty: components["schemas"]["EvidenceCertainty"];
