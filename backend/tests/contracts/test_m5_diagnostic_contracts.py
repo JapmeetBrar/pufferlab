@@ -2507,7 +2507,7 @@ def test_public_response_is_target_scoped_and_contains_no_unrelated_document_ids
             ExpectedDocumentDiagnosticResponse.model_validate(attacked)
 
 
-def test_generated_schema_contains_only_reachable_shared_diagnostic_additions() -> None:
+def test_generated_schema_contains_reachable_diagnostic_route_and_models() -> None:
     schema = json.loads((_ROOT / "openapi" / "pufferlab-v1.json").read_text())
     components = schema["components"]["schemas"]
 
@@ -2519,7 +2519,7 @@ def test_generated_schema_contains_only_reachable_shared_diagnostic_additions() 
         "diagnostic_filter_result",
         "diagnostic_cutoff_relation",
     }
-    for unreachable in (
+    for reachable in (
         "ExpectedDocumentDiagnosticRequest",
         "ExpectedDocumentDiagnosticResponse",
         "DiagnosticSubquerySummary",
@@ -2527,5 +2527,13 @@ def test_generated_schema_contains_only_reachable_shared_diagnostic_additions() 
         "CandidateCutoffEvidence",
         "QualifiedRrfEvidence",
     ):
-        assert unreachable not in components
-    assert all("/diagnostic" not in path for path in schema["paths"])
+        assert reachable in components
+    path = "/api/v1/eval-runs/{run_id}/queries/{query_id}/documents/{document_id}/diagnostic"
+    operation = schema["paths"][path]["post"]
+    assert operation["operationId"] == "diagnose_expected_document"
+    assert operation["requestBody"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/ExpectedDocumentDiagnosticRequest"
+    }
+    assert operation["responses"]["200"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/ExpectedDocumentDiagnosticResponse"
+    }

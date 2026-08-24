@@ -155,9 +155,9 @@ class DatasetVersion(BaseModel):
 
 `live` revisions require a non-empty provider namespace. The single `synthetic_demo` revision uses
 an empty namespace and may only cross read/export surfaces. It must fail before credentials or any
-provider-related factory is constructed on create, recovery, or replay. The default `live` value is
-backward compatible with stored Milestone 2 JSON; M3 catalog projections always expose the origin
-explicitly.
+provider-related factory is constructed on create, recovery, replay, or diagnostic. The default
+`live` value is backward compatible with stored Milestone 2 JSON; M3 catalog projections always
+expose the origin explicitly.
 
 Versioned dataset list/detail responses wrap the immutable revision and repeat its matching origin.
 
@@ -685,15 +685,15 @@ ran before ANN,” and counterfactual-probe inputs caused the primary order. Tho
 
 ### Expected-document diagnostic contracts
 
-Milestone 5 adds a separate target-scoped contract family. These Python models are deliberately
-unreachable from OpenAPI until the dedicated M5-D route is mounted; M5-A generates only the
-already-reachable `EvidenceOrigin`, `ForensicCode`, and `ForensicEvidenceValue` additions. Existing
-replay request and response models explicitly reject the diagnostic origin, diagnostic-only
+Milestone 5 adds a separate target-scoped contract family. M5-D mounts the dedicated route, so the
+request and response models are now reachable in OpenAPI and generated TypeScript. M5-A generated
+the already-reachable `EvidenceOrigin`, `ForensicCode`, and `ForensicEvidenceValue` additions.
+Existing replay request and response models explicitly reject the diagnostic origin, diagnostic-only
 `ANN_CANDIDATE_MISS` code, and all three diagnostic evidence variants even when an attacker gives
 them a replay-valid `client_computed` trace. Because those shared additions are already reachable,
 M5-A also keeps the existing generic forensic renderer exhaustive with fixed labels for the new
-origin and target-safe fields for the three values. That compile-only compatibility surface adds no
-diagnostic endpoint, action, state, or request path and cannot widen legacy replay behavior.
+origin and target-safe fields for the three values. The dedicated endpoint remains separate and
+cannot widen legacy replay behavior.
 
 ```python
 class ExpectedDocumentDiagnosticRequest(ContractModel):
@@ -726,9 +726,19 @@ class ExpectedDocumentDiagnosticResponse(ContractModel):
 ```
 
 The request has exactly one UUID, one strict JSON boolean, and the exact integer contract version;
-it accepts no document, query text, filter, namespace, region, or provider input in the body. M5-D
-later cross-checks the body config and path identities against the authenticated run, positive qrel,
-and stored query.
+it accepts no document, query text, filter, namespace, region, or provider input in the body. The
+runtime cross-checks the body config and path identities against the complete authenticated source,
+exact four-config run, one positive qrel, stored filter/schema, dataset namespace, and stored/current
+region before credentials or provider-capable factories. It then independently cross-checks the
+target-only summaries and qualified RRF arithmetic against the complete internal provider rows and
+discards those rows without persistence.
+
+FastAPI decoding failures remain the standard fixed `422`. A missing run or query is `404`, a
+synthetic revision is the existing read/export-only `409`, and any authenticated-source mismatch is
+the fixed immutable-run `422`. Missing credentials or any catalog, embedding, provider, analysis,
+validation, or cleanup failure returns the fixed operation-scoped `503`; cancellation and process
+control propagate only after owned work is drained. No diagnostic path mutates run state, outcomes,
+or the catalog.
 
 Subqueries use a discriminated lookup-versus-candidate union. Ordinals are contiguous from zero.
 The lookup is ordinal zero, limit one, and contains only a zero-or-one count plus exact target
@@ -835,6 +845,7 @@ GET    /api/v1/eval-runs/{run_id}/regressions
 GET    /api/v1/eval-runs/{run_id}/queries/{query_id}
 GET    /api/v1/eval-runs/{run_id}/export
 POST   /api/v1/eval-runs/{run_id}/queries/{query_id}/replay
+POST   /api/v1/eval-runs/{run_id}/queries/{query_id}/documents/{document_id}/diagnostic
 ```
 
 M4-B mounts `/api/v1/capabilities` only through its provider-free local inspector, so the capability
@@ -847,7 +858,8 @@ There is no P0 `POST /configs`.
 Every non-2xx response is the direct, redacted `ApiErrorDetail` body—not FastAPI's nested
 `{"detail": ...}` shape. Duplicate active suites return `409 run_conflict`; validation and forbidden
 synthetic cost paths fail before provider construction. Reads and deep-link restoration never
-perform provider work. Live replay is the only explicit query-detail action that may do so.
+perform provider work. Live replay and the expected-document diagnostic are the only explicit
+query-detail actions that may do so.
 
 ## 11. Errors and warnings
 
@@ -881,7 +893,8 @@ Provider exceptions are mapped at the adapter boundary. API responses never expo
 - Cancelling stops scheduling new queries and preserves completed outcomes.
 - `completed_queries` means fully durable query groups on 0..50, while outcome attempts are 0..200.
 - Persist outcomes before publishing progress; final summaries derive only from durable outcomes.
-- Synthetic demo revisions are read/export-only and never enter create, recovery, replay, or any
+- Synthetic demo revisions are read/export-only and never enter create, recovery, replay,
+  diagnostic, or any
   provider-capable composition path.
 - Deleting a local run never deletes a turbopuffer namespace.
 - Only a PufferLab-created branch with a recorded ownership token may be deleted automatically.

@@ -17,6 +17,8 @@ from pufferlab.contracts.evals import (
 from pufferlab.contracts.forensics import (
     EvalRunQueryReplayRequest,
     EvalRunQueryReplayResponse,
+    ExpectedDocumentDiagnosticRequest,
+    ExpectedDocumentDiagnosticResponse,
 )
 
 
@@ -54,6 +56,19 @@ class ProviderFreeEvaluationControls:
         if detail.result.data_origin is DataOrigin.SYNTHETIC_DEMO:
             raise self._synthetic_read_only("replay_eval_query")
         raise self._control_unavailable("replay_eval_query")
+
+    async def diagnose_expected_document(
+        self,
+        run_id: UUID,
+        query_id: UUID,
+        document_id: UUID,
+        request: ExpectedDocumentDiagnosticRequest,
+    ) -> ExpectedDocumentDiagnosticResponse:
+        del query_id, document_id, request
+        detail = self._views.get_eval_run(run_id)
+        if detail.result.data_origin is DataOrigin.SYNTHETIC_DEMO:
+            raise self._synthetic_read_only("diagnose_expected_document")
+        raise self._control_unavailable("diagnose_expected_document")
 
     @staticmethod
     def _synthetic_read_only(operation: str) -> EvaluationViewError:

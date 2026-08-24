@@ -27,6 +27,8 @@ from pufferlab.contracts.evals import (
 from pufferlab.contracts.forensics import (
     EvalRunQueryReplayRequest,
     EvalRunQueryReplayResponse,
+    ExpectedDocumentDiagnosticRequest,
+    ExpectedDocumentDiagnosticResponse,
 )
 
 router = APIRouter(prefix="/eval-runs", tags=["evaluation runs"])
@@ -156,3 +158,24 @@ async def replay_evaluation_run_query(
     controls: Annotated[EvaluationControlFacade, Depends(get_evaluation_controls)],
 ) -> EvalRunQueryReplayResponse:
     return await controls.replay_eval_query(run_id, query_id, request)
+
+
+@router.post(
+    "/{run_id}/queries/{query_id}/documents/{document_id}/diagnostic",
+    operation_id="diagnose_expected_document",
+    response_model=ExpectedDocumentDiagnosticResponse,
+    responses=_EVALUATION_ERRORS,
+)
+async def diagnose_expected_document(
+    run_id: UUID,
+    query_id: UUID,
+    document_id: UUID,
+    request: ExpectedDocumentDiagnosticRequest,
+    controls: Annotated[EvaluationControlFacade, Depends(get_evaluation_controls)],
+) -> ExpectedDocumentDiagnosticResponse:
+    return await controls.diagnose_expected_document(
+        run_id,
+        query_id,
+        document_id,
+        request,
+    )

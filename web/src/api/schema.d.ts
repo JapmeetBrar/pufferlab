@@ -175,6 +175,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/eval-runs/{run_id}/queries/{query_id}/documents/{document_id}/diagnostic": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Diagnose Expected Document */
+        post: operations["diagnose_expected_document"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/eval-runs/{run_id}/queries/{query_id}/replay": {
         parameters: {
             query?: never;
@@ -309,6 +326,65 @@ export interface components {
              */
             kind: "candidate_count";
             stage: components["schemas"]["RetrievalStage"];
+        };
+        /** CandidateCutoffEvidence */
+        CandidateCutoffEvidence: {
+            boundary_score?: components["schemas"]["ObservedScore"] | null;
+            certainty: components["schemas"]["EvidenceCertainty"];
+            /**
+             * Config Id
+             * Format: uuid
+             */
+            config_id: string;
+            direct_score: components["schemas"]["ObservedScore"];
+            /**
+             * Observed At
+             * Format: date-time
+             */
+            observed_at: string;
+            /**
+             * Origin
+             * @default client_computed
+             * @constant
+             */
+            origin: "client_computed";
+            relation: components["schemas"]["DiagnosticCutoffRelation"];
+            /**
+             * Requested Limit
+             * @enum {integer}
+             */
+            requested_limit: 50 | 100;
+            /** Returned Count */
+            returned_count: number;
+            /**
+             * Role
+             * @enum {string}
+             */
+            role: "stored_query_bm25_candidates" | "stored_query_ann_candidates" | "no_filter_counterfactual_bm25_candidates" | "no_filter_counterfactual_ann_candidates";
+            scope: components["schemas"]["DiagnosticCandidateScope"];
+            /**
+             * Signal
+             * @enum {string}
+             */
+            signal: "bm25" | "ann";
+            stored_filter_result: components["schemas"]["DiagnosticPredicateResult"] | null;
+            /** Subquery Ordinal */
+            subquery_ordinal: number;
+            /**
+             * Target Document Id
+             * Format: uuid
+             */
+            target_document_id: string;
+            /** Target Present */
+            target_present: boolean;
+            /** Target Rank */
+            target_rank?: number | null;
+            target_score?: components["schemas"]["ObservedScore"] | null;
+            /**
+             * Trace Id
+             * Format: uuid
+             */
+            trace_id: string;
         };
         /** CandidateRelevantRankChanges */
         CandidateRelevantRankChanges: {
@@ -498,6 +574,34 @@ export interface components {
          * @enum {string}
          */
         DiagnosticCandidateScope: "stored_query" | "no_filter_counterfactual";
+        /** DiagnosticCandidateSubquerySummary */
+        DiagnosticCandidateSubquerySummary: {
+            boundary_score?: components["schemas"]["ObservedScore"] | null;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "candidate";
+            /** Ordinal */
+            ordinal: number;
+            /**
+             * Requested Limit
+             * @enum {integer}
+             */
+            requested_limit: 50 | 100;
+            /** Returned Count */
+            returned_count: number;
+            /**
+             * Role
+             * @enum {string}
+             */
+            role: "stored_query_bm25_candidates" | "stored_query_ann_candidates" | "no_filter_counterfactual_bm25_candidates" | "no_filter_counterfactual_ann_candidates";
+            /** Target Present */
+            target_present: boolean;
+            /** Target Rank */
+            target_rank?: number | null;
+            target_score?: components["schemas"]["ObservedScore"] | null;
+        };
         /**
          * DiagnosticCutoffRelation
          * @enum {string}
@@ -513,6 +617,76 @@ export interface components {
          * @enum {string}
          */
         DiagnosticSignal: "bm25" | "ann" | "rrf";
+        DiagnosticSubquerySummary: components["schemas"]["DiagnosticTargetLookupSubquerySummary"] | components["schemas"]["DiagnosticCandidateSubquerySummary"];
+        /** DiagnosticTargetLookup */
+        DiagnosticTargetLookup: {
+            /** Available */
+            available: boolean;
+            bm25_score?: components["schemas"]["ObservedScore"] | null;
+            /**
+             * Config Id
+             * Format: uuid
+             */
+            config_id: string;
+            /**
+             * Observed At
+             * Format: date-time
+             */
+            observed_at: string;
+            /**
+             * Origin
+             * @default live_expected_document_diagnostic
+             * @constant
+             */
+            origin: "live_expected_document_diagnostic";
+            /**
+             * Target Document Id
+             * Format: uuid
+             */
+            target_document_id: string;
+            /**
+             * Trace Id
+             * Format: uuid
+             */
+            trace_id: string;
+            unavailable_reason?: components["schemas"]["DiagnosticTargetUnavailableReason"] | null;
+            vector_distance?: components["schemas"]["ObservedScore"] | null;
+        };
+        /** DiagnosticTargetLookupSubquerySummary */
+        DiagnosticTargetLookupSubquerySummary: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "target_lookup";
+            /**
+             * Ordinal
+             * @default 0
+             * @constant
+             */
+            ordinal: 0;
+            /**
+             * Requested Limit
+             * @default 1
+             * @constant
+             */
+            requested_limit: 1;
+            /** Returned Count */
+            returned_count: number;
+            /**
+             * Role
+             * @default target_lookup
+             * @constant
+             */
+            role: "target_lookup";
+            /** Target Present */
+            target_present: boolean;
+        };
+        /**
+         * DiagnosticTargetUnavailableReason
+         * @enum {string}
+         */
+        DiagnosticTargetUnavailableReason: "target_unavailable_in_diagnostic_snapshot";
         /** DirectScoreEvidenceValue */
         DirectScoreEvidenceValue: {
             /**
@@ -851,6 +1025,93 @@ export interface components {
             count: number;
             status: components["schemas"]["RegressionPairStatus"];
         };
+        /** ExpectedDocumentDiagnosticRequest */
+        ExpectedDocumentDiagnosticRequest: {
+            /**
+             * Config Id
+             * Format: uuid
+             */
+            config_id: string;
+            /** @default 1 */
+            contract_version: components["schemas"]["ContractVersion"];
+            /**
+             * Include No Filter Counterfactual
+             * @default false
+             */
+            include_no_filter_counterfactual: boolean;
+        };
+        /** ExpectedDocumentDiagnosticResponse */
+        ExpectedDocumentDiagnosticResponse: {
+            /** Candidate Evidence */
+            candidate_evidence: components["schemas"]["CandidateCutoffEvidence"][];
+            /**
+             * Config Id
+             * Format: uuid
+             */
+            config_id: string;
+            config_mode: components["schemas"]["RetrievalMode"];
+            /** @default 1 */
+            contract_version: components["schemas"]["ContractVersion"];
+            /**
+             * Data Origin
+             * @default live
+             * @constant
+             */
+            data_origin: "live";
+            /** Duration Ms */
+            duration_ms: number;
+            /** Embedding Duration Ms */
+            embedding_duration_ms?: number | null;
+            /** Filter Evidence */
+            filter_evidence: components["schemas"]["FilterPredicateEvidence"][];
+            /** Included No Filter Counterfactual */
+            included_no_filter_counterfactual: boolean;
+            /**
+             * Observability Notice
+             * @default new_live_diagnostic_not_original_run
+             * @constant
+             */
+            observability_notice: "new_live_diagnostic_not_original_run";
+            /** Observations */
+            observations: components["schemas"]["ForensicObservation"][];
+            /**
+             * Observed At
+             * Format: date-time
+             */
+            observed_at: string;
+            /**
+             * Origin
+             * @default live_expected_document_diagnostic
+             * @constant
+             */
+            origin: "live_expected_document_diagnostic";
+            /** Qualified Rrf Evidence */
+            qualified_rrf_evidence: components["schemas"]["QualifiedRrfEvidence"][];
+            /**
+             * Query Id
+             * Format: uuid
+             */
+            query_id: string;
+            /**
+             * Run Id
+             * Format: uuid
+             */
+            run_id: string;
+            stored_filter_result: components["schemas"]["DiagnosticPredicateResult"] | null;
+            /** Subqueries */
+            subqueries: components["schemas"]["DiagnosticSubquerySummary"][];
+            target: components["schemas"]["DiagnosticTargetLookup"];
+            /**
+             * Target Document Id
+             * Format: uuid
+             */
+            target_document_id: string;
+            /**
+             * Trace Id
+             * Format: uuid
+             */
+            trace_id: string;
+        };
         /** FilterLogical */
         "FilterLogical-Input": {
             /** Children */
@@ -898,6 +1159,44 @@ export interface components {
             kind: "predicate";
             op: components["schemas"]["PredicateOp"];
             value: components["schemas"]["JsonValue-Output"];
+        };
+        /** FilterPredicateEvidence */
+        FilterPredicateEvidence: {
+            certainty: components["schemas"]["EvidenceCertainty"];
+            /**
+             * Config Id
+             * Format: uuid
+             */
+            config_id: string;
+            /** Field */
+            field: string;
+            /**
+             * Observed At
+             * Format: date-time
+             */
+            observed_at: string;
+            operator: components["schemas"]["PredicateOp"];
+            /**
+             * Origin
+             * @default client_computed
+             * @constant
+             */
+            origin: "client_computed";
+            /** Predicate Ordinal */
+            predicate_ordinal: number;
+            /** Predicate Path */
+            predicate_path: number[];
+            result: components["schemas"]["DiagnosticPredicateResult"];
+            /**
+             * Target Document Id
+             * Format: uuid
+             */
+            target_document_id: string;
+            /**
+             * Trace Id
+             * Format: uuid
+             */
+            trace_id: string;
         };
         /** FilterPredicateEvidenceValue */
         FilterPredicateEvidenceValue: {
@@ -1214,6 +1513,67 @@ export interface components {
             document_id: string;
             /** Relevance Grade */
             relevance_grade: number;
+        };
+        /** QualifiedRrfEvidence */
+        QualifiedRrfEvidence: {
+            /** Ann Rank */
+            ann_rank?: number | null;
+            /** Ann Weight */
+            ann_weight: number;
+            /** Bm25 Rank */
+            bm25_rank?: number | null;
+            /** Bm25 Weight */
+            bm25_weight: number;
+            boundary_score?: components["schemas"]["ObservedScore"] | null;
+            certainty: components["schemas"]["EvidenceCertainty"];
+            /**
+             * Config Id
+             * Format: uuid
+             */
+            config_id: string;
+            /**
+             * Cutoff
+             * @default 50
+             * @constant
+             */
+            cutoff: 50;
+            /**
+             * Observed At
+             * Format: date-time
+             */
+            observed_at: string;
+            /**
+             * Origin
+             * @default client_computed
+             * @constant
+             */
+            origin: "client_computed";
+            /** Rank Constant */
+            rank_constant: number;
+            /**
+             * Relation
+             * @enum {string}
+             */
+            relation: "target_present" | "outside_candidates" | "not_observable";
+            /** Returned Count */
+            returned_count: number;
+            scope: components["schemas"]["DiagnosticCandidateScope"];
+            stored_filter_result: components["schemas"]["DiagnosticPredicateResult"] | null;
+            /**
+             * Target Document Id
+             * Format: uuid
+             */
+            target_document_id: string;
+            /** Target Present */
+            target_present: boolean;
+            /** Target Rank */
+            target_rank?: number | null;
+            target_score: components["schemas"]["ObservedScore"];
+            /**
+             * Trace Id
+             * Format: uuid
+             */
+            trace_id: string;
         };
         /** QuerySet */
         QuerySet: {
@@ -2307,6 +2667,79 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["EvalRunQueryDetailResponse"];
+                };
+            };
+            /** @description The requested evaluation record was not found. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
+                };
+            };
+            /** @description The requested evaluation action conflicts. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
+                };
+            };
+            /** @description The evaluation request is invalid. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
+                };
+            };
+            /** @description The request failed unexpectedly. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
+                };
+            };
+            /** @description Evaluation data or runtime is unavailable. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorDetail"];
+                };
+            };
+        };
+    };
+    diagnose_expected_document: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: string;
+                query_id: string;
+                document_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ExpectedDocumentDiagnosticRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExpectedDocumentDiagnosticResponse"];
                 };
             };
             /** @description The requested evaluation record was not found. */
