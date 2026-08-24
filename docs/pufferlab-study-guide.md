@@ -208,7 +208,7 @@ flowchart TB
         EVAL[Evaluation engine]
         JOB[Bounded in-process job manager]
         MODEL[Local embedding + reranker models]
-        CLI[Typer CLI]
+        CLI[argparse CLI]
     end
 
     subgraph Durable[Ignored local state]
@@ -419,7 +419,7 @@ Good experiments change one variable at a time:
 - RRF weight or rank constant;
 - reranker depth or model adapter;
 - filter expression;
-- consistency level, recorded as part of the environment.
+- consistency level, recorded in the immutable retrieval configuration.
 
 Changing the dataset, schema, model, candidate depth, and fusion weights at once may produce a new
 number, but it produces a weak explanation.
@@ -616,10 +616,11 @@ The UI distinguishes:
 - API health;
 - local configuration completeness;
 - whether a live action is ready, needs operator action, or is disabled;
-- whether remote credentials have actually been checked.
+- a persistent **remote unchecked** warning, because capabilities perform no remote check.
 
-A configured-looking local environment is not described as a successful remote connection until an
-explicit live check or action has observed one.
+A configured-looking local environment is never described by the capability state as a successful
+remote connection. Only a separate explicit live check or action can produce its own remote
+observation.
 
 ### UI safety and accessibility
 
@@ -642,12 +643,13 @@ PufferLab's most important technical idea is that an explanation must identify i
 |---|---:|---|
 | `stored_run` | No | Original final ranks, judgments, stored metrics, run errors, and recorded client timing |
 | `live_replay_primary` | Yes | New live result/stage observations for the replayed configuration |
-| `live_replay_counterfactual_probe` | Yes | A separately timed, deliberately changed request such as a no-filter comparison |
-| `live_expected_document_diagnostic` | Yes | New exact-bound evidence for one positive-qrel document/config/query |
+| `live_replay_counterfactual_probe` | Yes | Optional separately timed same-filter raw BM25/ANN candidate-list requests for a hybrid replay |
+| `live_expected_document_diagnostic` | Yes | One new exact-bound operation for a positive-qrel document, including eligible no-filter subqueries inside that same diagnostic request |
 | `client_computed` | No additional call | Transparent arithmetic over a named observed source, such as RRF reconstruction or rank delta |
 
-Every live observation has its own timing and trace identity. It is not relabeled as the original
-stored run.
+Each live operation is bound to its own time and trace. Replay counterfactual probes are separately
+traced requests; diagnostic subqueries remain inside the one diagnostic trace/request. Neither can
+be relabeled as the original stored run or used as causal proof for another observation.
 
 ### What can be stated honestly
 
@@ -660,7 +662,7 @@ PufferLab can show:
 - RRF contribution arithmetic reconstructed from named observed ranks;
 - exact client wall-clock duration around known client/provider stages;
 - whether locally available document attributes satisfy a supported stored filter;
-- the result of a separately labeled no-filter counterfactual.
+- the result of a separately labeled no-filter subquery inside an eligible diagnostic request.
 
 ### What must remain not observable
 
@@ -678,8 +680,9 @@ The UI uses terms such as **observation**, **stage membership**, **score contrib
 **counterfactual**, and **NOT_OBSERVABLE**. It does not call these artifacts “the model's reasoning”
 or a provider `EXPLAIN` plan.
 
-Read [`docs/observability.md`](observability.md) for the complete source/binding matrix and demo
-wording.
+Read [`docs/observability.md`](observability.md) for the stored/replay source matrix and demo
+wording, then [`docs/milestone-5-execution.md`](milestone-5-execution.md) for the additive diagnostic
+source and its same-request subquery semantics.
 
 ## Recorded-query forensics
 
@@ -710,16 +713,19 @@ The Milestone 5 diagnostic addresses a common investigation:
 
 The server first authenticates the full recorded evidence chain:
 
-- completed canonical run;
+- exact durable live dataset/query-set/run binding and canonical source/qrel suite;
 - run-bound query set and exact query;
 - selected run-bound configuration;
 - selected document is an exact positive qrel for that query;
 - dataset, namespace, schema, model, and config bindings are intact;
 - stored filter is within the supported diagnostic subset;
-- current server settings are eligible for the same dataset namespace.
+- a current server credential is present and the current region exactly equals the stored run
+  region.
 
 Synthetic demo evidence cannot authorize live provider work. An arbitrary document UUID, config,
-namespace, or filter cannot be supplied to widen the request.
+namespace, or filter cannot be supplied to widen the request. The provider namespace is derived
+from the authenticated stored `DatasetVersion`; the current `PUFFERLAB_SEARCH_NAMESPACE` setting is
+not an authorization input. Diagnostic eligibility does not invent a completed-run prerequisite.
 
 ### Request behavior
 
@@ -864,9 +870,12 @@ cd web
 VITE_API_BASE_URL=http://127.0.0.1:8000 pnpm dev
 ```
 
-Open the URL Vite prints, normally `http://127.0.0.1:5173/runs`. If either port is already in use,
-choose two other loopback ports and keep `VITE_API_BASE_URL` and `PUFFERLAB_CORS_ORIGINS` aligned.
-The README contains a collision-safe preview procedure that deliberately avoids existing processes.
+Vite normally prints the root origin `http://localhost:5173/`; open
+`http://localhost:5173/runs`. The backend's default CORS origin is also
+`http://localhost:5173`. Do not substitute `127.0.0.1` for the browser origin unless you explicitly
+bind Vite there and set `PUFFERLAB_CORS_ORIGINS` to that exact origin before starting the API. If
+either port is already in use, choose two other loopback ports and align the API URL, Vite bind, and
+CORS origin. The README contains a collision-safe preview procedure that avoids existing processes.
 
 ### What to verify manually
 
@@ -898,8 +907,12 @@ uv sync --locked --extra live-search
 uv run pufferlab doctor --mode live-tiny
 uv run pufferlab dataset ingest-tiny
 uv run pufferlab namespace show-tiny
-uv run pufferlab config seed
 ```
+
+Copy the exact `TURBOPUFFER_REGION` and `PUFFERLAB_SEARCH_NAMESPACE` assignments printed by
+`namespace show-tiny` into the ignored `.env`, preserve the API key, and restart the backend before
+opening the Playground. Do not run `config seed` for the tiny fixture: that command repairs the
+persisted curated-50 evaluation catalog and requires a READY dataset/query-set revision.
 
 After starting the API and web app with the same environment, use the explicit compare control. Run
 the opt-in metadata check only when desired:
@@ -1090,8 +1103,9 @@ Use this order:
 >
 > The dashboard makes aggregate movement visible, but the main workflow is to open a regression in
 > the forensic view. Every piece of evidence is labeled by source: original stored run, a new live
-> replay, a counterfactual provider request, or transparent client computation. If the public API
-> does not expose something—like cache tier or an internal query plan—the UI says not observable.
+> replay, an auxiliary same-filter replay probe, a no-filter diagnostic subquery, or transparent
+> client computation. If the public API does not expose something—like cache tier or an internal
+> query plan—the UI says not observable.
 >
 > Milestone 5 adds an explicit expected-document diagnostic. For an exact positive qrel it runs one
 > bounded strong-consistency multi-query and can tell us whether the document is directly
@@ -1130,7 +1144,8 @@ Use this order:
 7. **Describe replay:** “This would be a new explicitly requested observation, not a recreation of
    the original.”
 8. **Describe expected-document diagnosis:** show the disabled/eligible action as appropriate and
-   explain the one-request bound, filter evidence, candidate membership, and counterfactual.
+   explain the one-request bound, filter evidence, candidate membership, and eligible same-request
+   no-filter subquery.
 9. **Close with the real table:** “The observed winner depended on the workload, and the latency
    trade-off was visible. The next experiment comes from the regression evidence.”
 
@@ -1315,7 +1330,7 @@ then inspect the merged diff and tests rather than reading commits in arbitrary 
 | Candidate | Configuration compared with the baseline. |
 | Candidate depth | Number of first-stage results considered before final truncation/reranking. |
 | Client wall-clock | Time observed around client-side/provider calls; not isolated server compute. |
-| Counterfactual | A separate changed request used for comparison, never original-run evidence. |
+| Counterfactual | A labeled auxiliary observation: a separately traced raw-list replay probe or an eligible changed-filter subquery inside one diagnostic request; never original-run or causal evidence. |
 | Evidence binding | Validation that a value belongs to the stated run/query/config/document/source. |
 | FTS | Full-text search schema/profile used by BM25. |
 | Hybrid | Lexical and vector retrieval combined, here through RRF. |
