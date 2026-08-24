@@ -352,6 +352,9 @@ Predicate values never enter the response.
 Cutoff comparisons are direction-aware and only compare values from the one diagnostic trace:
 
 - Target membership and rank in a returned list are observed facts.
+- The response carries one value-free aggregate stored-filter result and exact copies on stored
+  candidate/RRF evidence; it is null exactly when filter evidence is empty, while no-filter
+  counterfactual copies are always null and independent.
 - BM25 direct score zero supports `NO_LEXICAL_SCORE` because official query behavior excludes
   zero-score rows.
 - A clear worse-than-boundary direct score in a full returned list supports an outside-candidate
@@ -360,6 +363,14 @@ Cutoff comparisons are direction-aware and only compare values from the one diag
   **observed ANN candidate miss in this diagnostic**, never an internal-cause claim.
 - A short list, missing boundary, malformed score, or direction mismatch cannot support a cutoff
   claim. Structurally contradictory provider results fail closed.
+- When the stored filter aggregate is false or unknown and the target is absent, only the two
+  otherwise contradictory better-but-absent candidate shapes are eligibility-qualified as
+  `NOT_OBSERVABLE`: BM25 above a full boundary and ANN below it. BM25 zero, clear worse-than-boundary
+  facts, ties, and short lists preserve their ordinary bounded relation. False-filter target
+  presence is contradictory; unknown-filter presence remains an observed membership fact.
+- A false aggregate suppresses every stored `NOT_OBSERVABLE` cutoff value from observations,
+  regardless of the enclosing observation code; typed candidate/RRF evidence remains complete,
+  and independent zero/outside findings plus no-filter counterfactual observations remain valid.
 - Stored-query provider facts use the diagnostic origin with observed certainty. Local filter,
   cutoff, and RRF arithmetic is `client_computed`; no-filter provider facts and computations are
   counterfactual. None proves the provider's internal filter/ANN execution order.
@@ -373,6 +384,9 @@ fusion cutoff is `result_k`. For hybrid rerank, only admission to the would-be r
 `reranker.depth` is client-computed; post-reranker/final `result_k`, `RERANKED_DOWN`, and reranker
 cutoff remain `NOT_OBSERVABLE` because the diagnostic constructs no reranker and returns no target
 text. Findings are mode-scoped and never borrow a score or boundary from another config.
+A false stored-filter aggregate forbids any selected-target input rank in stored qualified RRF;
+otherwise qualified fusion preserves the existing exact rank/contribution/boundary arithmetic.
+Unknown-filter and no-filter scopes do not override that arithmetic.
 
 Stored-run ranks and separate live-replay ranks come from different snapshots. They may be displayed
 alongside the diagnostic but never participate in its cutoff arithmetic or causal wording.
@@ -435,23 +449,28 @@ M5-0 codex/m5-plan
   v
 M5-A codex/m5-diagnostic-contracts
   |\
-  | +--> M5-B codex/m5-diagnostic-provider
-  |
-  +----> M5-C codex/m5-diagnostic-analysis
-              \                         /
-               +------ M5-D -----------+
-                       codex/m5-diagnostic-api
-                              |
-                              v
-                    M5-E codex/m5-diagnostic-ui
-                              |
-                              v
-                    M5-F codex/m5-finalization
+  | +----> M5-B codex/m5-diagnostic-provider ----+
+  |                                             |
+  v                                             |
+M5-A1 codex/m5-filter-eligibility-contract      |
+  |                                             |
+  +----> M5-C codex/m5-diagnostic-analysis -----+
+                                                |
+                                                v
+                                                M5-D codex/m5-diagnostic-api
+                                                  |
+                                                  v
+                                                M5-E codex/m5-diagnostic-ui
+                                                  |
+                                                  v
+                                                M5-F codex/m5-finalization
 ```
 
-M5-B and M5-C may proceed in parallel after the contract freeze because their production file
-ownership is disjoint. M5-D begins only after both are reviewer-merged. M5-F is the one goal-closing
-PR.
+M5-A1 is the focused prerequisite discovered by M5-C: it binds aggregate stored-filter eligibility
+into candidate/RRF evidence without exposing values or widening provider/application behavior.
+M5-B proceeds independently because its production ownership is disjoint; M5-C resumes only after
+M5-A1 is reviewer-merged. M5-D begins only after M5-B and M5-C are reviewer-merged. M5-F is the one
+goal-closing PR.
 
 ## Review units and acceptance
 
@@ -474,6 +493,18 @@ PR.
   OpenAPI and generated TypeScript, with regeneration/drift tests. Dedicated request/response models
   remain unreachable and are not emitted until M5-D adds the route. No provider, persistence, route,
   application, or UI behavior.
+
+### M5-A1 — Stored-filter eligibility contract repair
+
+- **Files:** diagnostic forensic contracts/tests, contract/plan documentation, generated schema
+  drift evidence, and the progress ledger only.
+- **Acceptance:** required nullable aggregate stored-filter result; exact stored-scope copies and
+  null counterfactual copies; narrow BM25/ANN eligibility override without erasing independent
+  zero/worse/tie/short facts; false-filter candidate/RRF rank contradictions; unchanged qualified
+  RRF arithmetic; root-aligned leaf observations including negation-only evidence; malformed,
+  constructed, cross-scope, privacy, legacy-separation, and generated-drift attacks. No provider,
+  retrieval adapter, application, route, persistence, credential, namespace, network, model, live
+  action, or UI behavior.
 
 ### M5-B — Provider and retrieval diagnostic adapter
 

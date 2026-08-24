@@ -593,6 +593,7 @@ class CandidateCutoffEvidence(_DiagnosticContractModel):
         DiagnosticSubqueryRole.NO_FILTER_COUNTERFACTUAL_ANN_CANDIDATES,
     ]
     scope: DiagnosticCandidateScope
+    stored_filter_result: DiagnosticPredicateResult | None
     signal: Literal[DiagnosticSignal.BM25, DiagnosticSignal.ANN]
     requested_limit: Literal[50, 100]
     returned_count: int = Field(ge=0, le=100, strict=True)
@@ -622,6 +623,11 @@ class CandidateCutoffEvidence(_DiagnosticContractModel):
         expected_scope, expected_signal = _scope_signal_for_role(self.role)
         if self.scope is not expected_scope or self.signal is not expected_signal:
             raise ValueError("candidate scope and signal must match its exact subquery role")
+        if (
+            self.scope is DiagnosticCandidateScope.NO_FILTER_COUNTERFACTUAL
+            and self.stored_filter_result is not None
+        ):
+            raise ValueError("no-filter candidate evidence cannot retain a stored-filter result")
         if self.returned_count > self.requested_limit:
             raise ValueError("candidate count cannot exceed the requested limit")
         _validate_score(self.direct_score, signal=self.signal, direct=True)
@@ -629,6 +635,8 @@ class CandidateCutoffEvidence(_DiagnosticContractModel):
             if score is not None:
                 _validate_score(score, signal=self.signal, direct=False)
         if self.target_present:
+            if self.stored_filter_result is DiagnosticPredicateResult.NOT_MATCHED:
+                raise ValueError("a filter-ineligible target cannot appear in stored candidates")
             if self.target_rank is None or self.target_score is None:
                 raise ValueError("present target requires an exact candidate rank and score")
             if self.target_rank > self.returned_count:
@@ -672,6 +680,14 @@ class CandidateCutoffEvidence(_DiagnosticContractModel):
     def _derive_relation(self) -> DiagnosticCutoffRelation:
         if self.target_present:
             return DiagnosticCutoffRelation.TARGET_PRESENT
+        filter_ineligible = (
+            self.scope is DiagnosticCandidateScope.STORED_QUERY
+            and self.stored_filter_result
+            in {
+                DiagnosticPredicateResult.NOT_MATCHED,
+                DiagnosticPredicateResult.NOT_OBSERVABLE,
+            }
+        )
         if self.signal is DiagnosticSignal.BM25 and self.direct_score.value == 0:
             return DiagnosticCutoffRelation.NO_LEXICAL_SCORE
         if self.boundary_score is None:
@@ -680,10 +696,16 @@ class CandidateCutoffEvidence(_DiagnosticContractModel):
             return DiagnosticCutoffRelation.NOT_OBSERVABLE
         if self.signal is DiagnosticSignal.BM25:
             if self.direct_score.value > self.boundary_score.value:
+                if filter_ineligible:
+                    return DiagnosticCutoffRelation.NOT_OBSERVABLE
                 raise ValueError("absent BM25 target cannot score clearly above a full boundary")
             return DiagnosticCutoffRelation.OUTSIDE_CANDIDATES
         if self.direct_score.value < self.boundary_score.value:
-            return DiagnosticCutoffRelation.ANN_CANDIDATE_MISS
+            return (
+                DiagnosticCutoffRelation.NOT_OBSERVABLE
+                if filter_ineligible
+                else DiagnosticCutoffRelation.ANN_CANDIDATE_MISS
+            )
         return DiagnosticCutoffRelation.OUTSIDE_CANDIDATES
 
 
@@ -694,6 +716,7 @@ class QualifiedRrfEvidence(_DiagnosticContractModel):
     observed_at: AwareDatetime
     trace_id: UUID
     scope: DiagnosticCandidateScope
+    stored_filter_result: DiagnosticPredicateResult | None
     cutoff: Literal[50] = 50
     bm25_rank: int | None = Field(default=None, ge=1, le=100, strict=True)
     ann_rank: int | None = Field(default=None, ge=1, le=100, strict=True)
@@ -728,12 +751,23 @@ class QualifiedRrfEvidence(_DiagnosticContractModel):
 
     @model_validator(mode="after")
     def validate_rrf_cutoff(self) -> QualifiedRrfEvidence:
+        if (
+            self.scope is DiagnosticCandidateScope.NO_FILTER_COUNTERFACTUAL
+            and self.stored_filter_result is not None
+        ):
+            raise ValueError("no-filter qualified RRF cannot retain a stored-filter result")
+        if self.stored_filter_result is DiagnosticPredicateResult.NOT_MATCHED and (
+            self.bm25_rank is not None or self.ann_rank is not None
+        ):
+            raise ValueError("a filter-ineligible target cannot retain stored fusion input ranks")
         _validate_score(self.target_score, signal=DiagnosticSignal.RRF, direct=False)
         if self.boundary_score is not None:
             _validate_score(self.boundary_score, signal=DiagnosticSignal.RRF, direct=False)
             if self.boundary_score.value == 0:
                 raise ValueError("qualified RRF boundary rows require a positive contribution")
         if self.target_present:
+            if self.stored_filter_result is DiagnosticPredicateResult.NOT_MATCHED:
+                raise ValueError("a filter-ineligible target cannot appear in stored fusion")
             if self.target_rank is None or self.target_rank > self.returned_count:
                 raise ValueError("present fusion target requires a rank within the returned count")
             if self.bm25_rank is None and self.ann_rank is None:
@@ -914,6 +948,7 @@ class ExpectedDocumentDiagnosticResponse(_DiagnosticContractModel):
     config_mode: RetrievalMode
     target_document_id: UUID
     included_no_filter_counterfactual: bool = Field(strict=True)
+    stored_filter_result: DiagnosticPredicateResult | None
     observed_at: AwareDatetime
     trace_id: UUID
     duration_ms: float = Field(ge=0, le=_MAX_DIAGNOSTIC_DURATION_MS, strict=True)
@@ -1053,6 +1088,8 @@ class ExpectedDocumentDiagnosticResponse(_DiagnosticContractModel):
                 raise ValueError("candidate target cannot exist when exact lookup is unavailable")
 
     def _validate_filter_evidence(self) -> None:
+        if (self.stored_filter_result is None) is not (not self.filter_evidence):
+            raise ValueError("stored_filter_result is null if and only if filter evidence is empty")
         ordinals = [item.predicate_ordinal for item in self.filter_evidence]
         paths = [item.predicate_path for item in self.filter_evidence]
         if ordinals != list(range(len(ordinals))) or len(paths) != len(set(paths)):
@@ -1085,6 +1122,15 @@ class ExpectedDocumentDiagnosticResponse(_DiagnosticContractModel):
                 or item.observed_at != self.observed_at
             ):
                 raise ValueError("candidate evidence must bind to the exact diagnostic source")
+            expected_filter_result = (
+                self.stored_filter_result
+                if item.scope is DiagnosticCandidateScope.STORED_QUERY
+                else None
+            )
+            if item.stored_filter_result is not expected_filter_result:
+                raise ValueError(
+                    "candidate evidence must repeat the exact scope-bound stored-filter result"
+                )
             summary = summaries[key]
             summary_facts = (
                 summary.requested_limit,
@@ -1138,6 +1184,15 @@ class ExpectedDocumentDiagnosticResponse(_DiagnosticContractModel):
                 or item.observed_at != self.observed_at
             ):
                 raise ValueError("qualified RRF evidence must bind to the exact diagnostic source")
+            expected_filter_result = (
+                self.stored_filter_result
+                if item.scope is DiagnosticCandidateScope.STORED_QUERY
+                else None
+            )
+            if item.stored_filter_result is not expected_filter_result:
+                raise ValueError(
+                    "qualified RRF must repeat the exact scope-bound stored-filter result"
+                )
             candidates = {
                 candidate.signal: candidate
                 for candidate in self.candidate_evidence
@@ -1435,6 +1490,29 @@ class ExpectedDocumentDiagnosticResponse(_DiagnosticContractModel):
             filter_values and DiagnosticCandidateScope.NO_FILTER_COUNTERFACTUAL in scopes
         ):
             raise ValueError("one observation cannot merge stored-query and no-filter scopes")
+        if self.stored_filter_result is DiagnosticPredicateResult.NOT_MATCHED and any(
+            value.scope is DiagnosticCandidateScope.STORED_QUERY
+            and value.relation is DiagnosticCutoffRelation.NOT_OBSERVABLE
+            for value in cutoff_values
+        ):
+            raise ValueError(
+                "known filter failure suppresses stored-query cutoff uncertainty in observations"
+            )
+        if filter_values:
+            if self.stored_filter_result is DiagnosticPredicateResult.NOT_MATCHED:
+                expected_filter_code = ForensicCode.FILTER_PREDICATE_FAILED
+            elif self.stored_filter_result is DiagnosticPredicateResult.NOT_OBSERVABLE:
+                expected_filter_code = ForensicCode.NOT_OBSERVABLE
+            else:
+                expected_filter_code = None
+            if expected_filter_code is None or observation.code is not expected_filter_code:
+                raise ValueError(
+                    "filter observations must align with the aggregate stored-filter result"
+                )
+            if any(value.result is not self.stored_filter_result for value in filter_values):
+                raise ValueError(
+                    "filter observation leaves must witness the aggregate stored-filter result"
+                )
         self._validate_observation_code(observation.code, filter_values, cutoff_values)
 
         if observation.code is ForensicCode.NOT_OBSERVABLE:
