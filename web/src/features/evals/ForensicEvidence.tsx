@@ -8,6 +8,7 @@ const originLabels: Record<Observation["origin"], string> = {
   stored_run: "Stored run",
   live_replay_primary: "Live replay primary",
   live_replay_counterfactual_probe: "Separate counterfactual probe",
+  live_expected_document_diagnostic: "Live expected-document diagnostic",
   client_computed: "Client-computed from returned inputs",
 };
 
@@ -40,6 +41,21 @@ export function EvidenceValueView({ value }: { value: EvidenceValue }) {
       );
     case "warning":
       return <span>{value.code.replaceAll("_", " ")}</span>;
+    case "diagnostic_direct_score":
+      return <span>{value.signal.toUpperCase()} direct score · {scoreText(value.score)}</span>;
+    case "diagnostic_filter_result":
+      return (
+        <span>
+          Filter predicate {value.predicate_ordinal} · path {value.predicate_path.join(".")} · field {value.field}
+          {" · "}{value.operator.replaceAll("_", " ")} · {value.result.replaceAll("_", " ")}
+        </span>
+      );
+    case "diagnostic_cutoff_relation":
+      return (
+        <span>
+          {value.scope.replaceAll("_", " ")} · {value.signal.toUpperCase()} · {value.relation.replaceAll("_", " ")}
+        </span>
+      );
     default: {
       const exhaustive: never = value;
       return exhaustive;

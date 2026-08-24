@@ -31,6 +31,8 @@ from pufferlab.contracts.filters import FilterLogical, FilterNode, FilterPredica
 from pufferlab.contracts.forensics import (
     EvalRunQueryReplayRequest,
     EvalRunQueryReplayResponse,
+    ExpectedDocumentDiagnosticRequest,
+    ExpectedDocumentDiagnosticResponse,
     ForensicObservation,
 )
 from pufferlab.contracts.gates import GateMetricName, GatePolicy, GateReport, GateVerdict
@@ -61,6 +63,8 @@ __all__ = [
     "EvalRunQueryDetailResponse",
     "EvalRunQueryReplayRequest",
     "EvalRunQueryReplayResponse",
+    "ExpectedDocumentDiagnosticRequest",
+    "ExpectedDocumentDiagnosticResponse",
     "FilterLogical",
     "FilterNode",
     "FilterPredicate",
