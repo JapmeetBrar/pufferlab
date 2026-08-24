@@ -7,6 +7,7 @@ regression analysis, a provider-free quality gate, guided live-search setup, sta
 links, an evidence-honest forensic drawer, and explicit live actions. Stored-run pages are
 provider-free; only clearly labeled actions can start provider work. See:
 
+- [Complete study and presentation guide](docs/pufferlab-study-guide.md)
 - [Project decision and implementation brief](docs/project-decision-and-implementation-brief.md)
 - [Shared contracts](docs/contracts.md)
 - [Implementation plan](docs/implementation-plan.md)
