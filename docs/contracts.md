@@ -711,6 +711,7 @@ class ExpectedDocumentDiagnosticResponse(ContractModel):
     config_mode: RetrievalMode
     target_document_id: UUID
     included_no_filter_counterfactual: bool
+    stored_filter_result: DiagnosticPredicateResult | None
     observed_at: AwareDatetime
     trace_id: UUID
     duration_ms: float
@@ -751,11 +752,23 @@ contradictions reject the whole response.
 
 `FilterPredicateEvidence` contains only the response/config/target/trace/time binding, contiguous
 predicate ordinal, bounded path, safe field name, operator, tri-state result, and derived certainty.
-It contains neither the predicate value nor the observed attribute value. `CandidateCutoffEvidence`
-repeats exactly one candidate summary plus the corresponding direct score and a derived
-target-present/no-score/outside/ANN-miss/not-observable relation. Its scope is exactly
+It contains neither the predicate value nor the observed attribute value. The required nullable
+`stored_filter_result` exposes only the aggregate strong-Kleene result: it is null if and only if
+filter evidence is empty. A non-null result is repeated exactly by stored-scope candidate and RRF
+evidence; no-filter counterfactual evidence must keep its copy null. The aggregate carries no
+predicate or observed attribute value.
+
+`CandidateCutoffEvidence` repeats exactly one candidate summary plus the corresponding direct score
+and a derived target-present/no-score/outside/ANN-miss/not-observable relation. Its scope is exactly
 `stored_query` or `no_filter_counterfactual`; stored results are observed, no-filter results are
-counterfactual, and ties/short lists are insufficient.
+counterfactual, and ties/short lists are insufficient. Stored filter eligibility changes only two
+otherwise contradictory absent-target cases: a BM25 direct score clearly above a full stored-list
+boundary and an ANN distance clearly below it become `NOT_OBSERVABLE` when the aggregate result is
+`not_matched` or `not_observable`. Independent facts remain unchanged: BM25 direct zero is
+`NO_LEXICAL_SCORE`, clearly worse full-list scores are outside candidates, and equal or short lists
+remain not observable. A `not_matched` target cannot appear in stored candidates; an aggregate
+`not_observable` target may appear and reports exact observed membership. Counterfactual cutoff
+derivation never receives or borrows the stored result.
 
 Hybrid responses also contain one target-only `QualifiedRrfEvidence` per active scope. It exposes
 only the selected target's BM25/ANN ranks, bounded positive weights, rank constant, target RRF
@@ -768,13 +781,30 @@ forbid qualified RRF evidence. M5-D must exact-bind the repeated
 hybrid RRF the cutoff is authenticated `result_k`, while hybrid rerank uses authenticated reranker
 admission depth and still makes no post-reranker/final-cutoff claim.
 
+Qualified RRF always preserves its exact bounded rank arithmetic. A stored aggregate `not_matched`
+requires both target input ranks to be null; any stored input rank or fusion presence is a
+contradiction. With no ranks, a zero target contribution may be outside a positive full boundary or
+not observable for a short/tied list. Aggregate `not_observable` keeps the existing observed
+rank/score/boundary derivation, including target presence. No-filter RRF keeps a null stored result
+and unchanged counterfactual derivation.
+
 Every nested target, filter, candidate, RRF, observation, and evidence value is revalidated at the
 top-level response boundary. All repeated config/target/trace/time fields equal the response source.
 Diagnostic observations permit only the diagnostic origin for the fixed unavailable-target result
 and `client_computed` for supported findings. Fixed statements and value-derived labels prevent
 free-form provider/filter text. Evidence codes must match their exact typed predicate/cutoff result;
 `RERANKED_DOWN`, stored/replay origins, cross-scope mixtures, cross-source values, unrelated document
-IDs, and exact duplicate observations reject.
+IDs, and exact duplicate observations reject. Filter-leaf findings must also witness the aggregate
+root: `matched` permits no filter-leaf finding, `not_matched` permits only exact not-matched leaf
+findings, and `not_observable` permits only exact not-observable leaf findings. Findings are not
+required to be exhaustive, so a false root produced solely by logical negation can retain complete
+atomic evidence without inventing a false leaf or filter-failed observation.
+When the aggregate is `not_matched`, the response also rejects a global `NOT_OBSERVABLE`
+observation triggered by a stored candidate or stored qualified-RRF cutoff. The typed cutoff
+evidence may remain not observable for ties, short lists, or the eligibility-qualified candidate
+shapes, but the fixed global uncertainty statement would contradict the known aggregate failure.
+Aggregate `not_observable` and no-filter counterfactual cutoff observations remain independent and
+valid; zero-score and clearly outside stored facts under a false root keep their supported codes.
 
 If the exact lookup returns zero rows, direct scores are absent, candidate summaries may retain
 safe counts/boundaries but cannot claim target presence, all filter/candidate/RRF evidence is empty,
