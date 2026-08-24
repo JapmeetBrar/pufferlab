@@ -44,6 +44,23 @@ requirements. The finite architecture and branch plan is in
 
 Exit: a reviewer can clone, configure, ingest, run, inspect, and clean up without oral guidance.
 
+### Milestone 5 — Exact-bound expected-document diagnostic
+
+Add the original P1 expected-document probe to the authenticated recorded-query workflow. An
+operator explicitly selects one positively judged document and one config, then requests one new
+same-snapshot diagnostic observation: exact ID lookup with computed lexical/vector scores,
+SDK-preserved missing/null/value stored-query-filter evidence, candidate cutoff/membership, and an
+eligible no-filter counterfactual. The dedicated request uses one strong-consistency multi-query
+with exactly two, three, or five ordered subqueries by mode and option, and one HTTP attempt; it
+never claims to reproduce stored evidence, server RRF, provider internals, or local-reranker output.
+The finite architecture, contracts, risks, and branch plan split already-reachable shared schema
+generation from the later dedicated endpoint/model generation in
+[`milestone-5-execution.md`](milestone-5-execution.md).
+
+Exit: a selected positive-qrel document produces source-bound, bounded diagnostic evidence or an
+honest `NOT_OBSERVABLE` state through the explicit live action, while provider-free reads remain
+zero-call and every Milestone 5 PR is independently reviewed and reviewer-only merged.
+
 ## 2. Parallel execution map
 
 ```text
