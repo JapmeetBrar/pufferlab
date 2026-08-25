@@ -15,7 +15,8 @@ checks, and merge events are canonical for completed work. Process details live 
 
 | ID | Deliverable | Owner | Branch / PR | Status | Evidence / next action |
 |---|---|---|---|---|---|
-| REPO-1 | Public README and repository hygiene | public repository polish worker | `codex/public-repo-polish` / [PR #46](https://github.com/JapmeetBrar/pufferlab/pull/46) | review requested | The README is 162 lines; approved historical files are removed; retained Markdown passes `9/14/0` file/link/fragment validation; the dataset audit passes `267/963/19`; 68 focused CLI tests, the documented seed/doctor smoke, full `make check`, and all six provider-free browser journeys pass. Independent exact-head review and reviewer-only merge are next. |
+| REPO-1 | Public README and repository hygiene | public repository polish worker | `codex/public-repo-polish` / [PR #46](https://github.com/JapmeetBrar/pufferlab/pull/46) | verified | [Independent exact-head review](https://github.com/JapmeetBrar/pufferlab/pull/46#issuecomment-5408342991) approved the delivery head after observing a 162-line README, `9/14/0` retained Markdown files/local links/fragments, artifact audit `267/968/19`, 68 focused tests, full `make check` with 1,539 backend tests plus one opt-in skip and 114 frontend tests/build, and all six provider-free browser journeys. Reviewer-only squash merge `229751db0bd70952a45573374e8bb4719eda23ee` established the public-repository polish; the [canonical protected-main record](https://github.com/JapmeetBrar/pufferlab/pull/46#issuecomment-5408388800) confirms run [`32832145650`](https://github.com/JapmeetBrar/pufferlab/actions/runs/32832145650) passed Backend and Frontend. No credential, provider/model network, namespace/live action, or user server was used. |
+| REPO-F | Public-repository polish goal finalization | finalization worker + independent reviewer | `codex/public-repo-polish-finalization` | review requested | This single finite finalization unit changes only this ledger and records the independently verified delivery evidence above. `git diff --check`, all retained Markdown links, the dataset artifact/history boundary, and full `make check` pass on the finalization head. Independent exact-head final review, reviewer-only merge, deletion of this source branch, and protected-main verification remain open; their GitHub records will be canonical and no second finalization ledger PR will follow. No credential, provider/model network, namespace/live action, or user server was used. |
 
 ## Acceptance criteria
 
@@ -31,13 +32,21 @@ checks, and merge events are canonical for completed work. Process details live 
 - [x] Dataset artifact/history auditing still passes after the tracked note removal, and no secret,
   corpus text, vector, credential, or local runtime artifact enters the diff.
 - [x] `git diff --check`, focused documentation/CLI checks, and full `make check` pass before handoff.
-- [ ] A separate reviewer inspects the exact PR head, reruns risk-relevant checks, requests repairs
-  if needed, and alone merges only after required Backend and Frontend checks pass.
+- [x] REPO-1 received independent exact-head review, reviewer-only merge, source-branch deletion, and
+  green protected-main Backend and Frontend checks.
+
+Only the finalization process remains open:
+
+- [ ] An independent reviewer inspects the exact REPO-F head and reruns risk-relevant checks.
+- [ ] That reviewer alone merges the approved finalization head after required PR checks pass.
+- [ ] The finalization source branch is deleted after merge.
+- [ ] The resulting protected-main Backend and Frontend checks pass and remain canonical in GitHub.
 
 ## Repository hygiene outcome
 
-- Before this review unit, all 40 non-`main` remote branches were matched to merged pull requests
-  and deleted. Only `main` remained remotely before `codex/public-repo-polish` was created.
+- The original 40 non-`main` remote branches were matched to merged pull requests and deleted before
+  REPO-1. After PR #46 merged, its `codex/public-repo-polish` source branch was also deleted. Only
+  `main` existed remotely before this finalization branch was published.
 - The public documentation retained by this change is intentionally small: the README, API/evidence
   contracts, Unix dataset runbook and attribution, provider-free operator runbook, engineering
   loop, progress ledger, fixture note, and repository agent policy.
