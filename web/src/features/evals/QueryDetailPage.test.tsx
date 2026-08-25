@@ -117,7 +117,7 @@ describe("QueryDetailPage", () => {
     await screen.findByRole("heading", { name: "Judged documents" });
     fireEvent.click(screen.getAllByRole("button", { name: "Inspect document" })[0]!);
     const drawer = await screen.findByRole("dialog", { name: "Document evidence" });
-    const config = within(drawer).getByLabelText("Diagnostic configuration");
+    const config = within(drawer).getByLabelText("Configuration");
     expect(config).toHaveValue("");
     expect(within(drawer).getByRole("button", { name: "Run expected-document diagnostic" })).toBeDisabled();
     expect(diagnoseExpectedDocument).not.toHaveBeenCalled();
@@ -157,7 +157,7 @@ describe("QueryDetailPage", () => {
     fireEvent.click(screen.getAllByRole("button", { name: /Inspect evidence/ })[0]!);
     const drawer = await screen.findByRole("dialog", { name: "Document evidence" });
 
-    fireEvent.change(within(drawer).getByLabelText("Diagnostic configuration"), {
+    fireEvent.change(within(drawer).getByLabelText("Configuration"), {
       target: { value: baselineId },
     });
     fireEvent.click(within(drawer).getByLabelText("I understand this starts cost-bearing provider work."));
@@ -166,7 +166,7 @@ describe("QueryDetailPage", () => {
     const alert = await within(drawer).findByRole("alert");
     expect(within(alert).getByText("The diagnostic namespace is unavailable.")).toBeVisible();
     expect(within(drawer).getByRole("heading", { name: "Stored run evidence" })).toBeVisible();
-    expect(within(drawer).getByRole("heading", { name: "New primary replay observation" })).toBeVisible();
+    expect(within(drawer).getByRole("heading", { name: "New primary replay" })).toBeVisible();
     expect(screen.getByText("New live replay · not original run evidence")).toBeVisible();
     expect(screen.getByRole("table", { name: "Durable outcomes for the recorded query" })).toBeVisible();
     expect(replayEvaluationRunQuery).toHaveBeenCalledTimes(1);
@@ -190,7 +190,7 @@ describe("QueryDetailPage", () => {
     const drawer = await screen.findByRole("dialog", { name: "Document evidence" });
 
     expect(within(drawer).getByText(/Only a positively judged document is eligible/)).toBeVisible();
-    expect(within(drawer).queryByLabelText("Diagnostic configuration")).not.toBeInTheDocument();
+    expect(within(drawer).queryByLabelText("Configuration")).not.toBeInTheDocument();
     expect(diagnoseExpectedDocument).not.toHaveBeenCalled();
   });
 
@@ -207,7 +207,7 @@ describe("QueryDetailPage", () => {
     expect(screen.getByText(/separate probe was unavailable/i)).toBeVisible();
     expect(replayEvaluationRunQuery).toHaveBeenCalledTimes(1);
 
-    fireEvent.change(screen.getByLabelText("Left configuration"), {
+    fireEvent.change(screen.getByLabelText("Left config"), {
       target: { value: candidateIds[1] },
     });
     await waitFor(() => expect(screen.queryByText("New live replay · not original run evidence")).not.toBeInTheDocument());
@@ -215,7 +215,7 @@ describe("QueryDetailPage", () => {
     expect(replayEvaluationRunQuery).toHaveBeenCalledTimes(1);
 
     window.history.back();
-    await waitFor(() => expect(screen.getByLabelText("Left configuration")).toHaveValue(baselineId));
+    await waitFor(() => expect(screen.getByLabelText("Left config")).toHaveValue(baselineId));
   });
 
   it("renders every discriminated evidence kind for the exact target and traps drawer focus", async () => {
@@ -252,7 +252,7 @@ describe("QueryDetailPage", () => {
     expect(within(replayDrawer).getAllByText(/probe unavailable/i).length).toBeGreaterThan(0);
 
     const replayClose = within(replayDrawer).getByRole("button", { name: "Close document evidence" });
-    const diagnosticConfig = within(replayDrawer).getByLabelText("Diagnostic configuration");
+    const diagnosticConfig = within(replayDrawer).getByLabelText("Configuration");
     fireEvent.keyDown(replayDrawer, { key: "Tab" });
     expect(replayClose).toHaveFocus();
     fireEvent.keyDown(replayDrawer, { key: "Tab", shiftKey: true });

@@ -7,6 +7,7 @@ import {
   type ExpectedDocumentDiagnosticRequest,
   type ExpectedDocumentDiagnosticResponse,
 } from "../../api/evaluations";
+import { configLabel } from "../configLabels";
 import { ForensicEvidence } from "./ForensicEvidence";
 import { diagnosticSubqueryCount } from "./diagnosticPolicy";
 import { formatDate } from "./formatters";
@@ -19,15 +20,6 @@ type DiagnosticState =
   | { status: "pending" }
   | { status: "success"; response: ExpectedDocumentDiagnosticResponse }
   | { status: "error"; error: Error };
-
-function modeLabel(mode: QueryConfig["mode"]): string {
-  switch (mode) {
-    case "bm25": return "BM25";
-    case "vector": return "Vector";
-    case "hybrid_rrf": return "Hybrid RRF";
-    case "hybrid_rerank": return "Hybrid rerank";
-  }
-}
 
 function enumLabel(value: string): string {
   return value.replaceAll("_", " ");
@@ -120,7 +112,7 @@ function SubqueryEvidence({ response }: { response: ExpectedDocumentDiagnosticRe
 function TargetEvidence({ response }: { response: ExpectedDocumentDiagnosticResponse }) {
   return (
     <section className="diagnostic-evidence-group" aria-labelledby="diagnostic-target-heading">
-      <h4 id="diagnostic-target-heading">Exact selected-target lookup</h4>
+      <h4 id="diagnostic-target-heading">Exact target lookup</h4>
       {response.target.available ? (
         <dl className="diagnostic-facts">
           <div><dt>Availability</dt><dd>Available in this diagnostic snapshot</dd></div>
@@ -155,7 +147,7 @@ function FilterEvidence({ response }: { response: ExpectedDocumentDiagnosticResp
   }
   return (
     <section className="diagnostic-evidence-group" aria-labelledby="diagnostic-filter-heading">
-      <h4 id="diagnostic-filter-heading">Locally evaluated stored-query filter</h4>
+      <h4 id="diagnostic-filter-heading">Stored filter · evaluated locally</h4>
       <p className="diagnostic-aggregate">
         Aggregate result: <strong>{enumLabel(response.stored_filter_result ?? "not_observable")}</strong>
       </p>
@@ -193,7 +185,7 @@ function CandidateScope({
       aria-labelledby={`diagnostic-candidates-${scope}`}
     >
       <h4 id={`diagnostic-candidates-${scope}`}>
-        {counterfactual ? "Same-request no-filter counterfactual candidates" : "Stored-query candidates"}
+        {counterfactual ? "No-filter counterfactual candidates" : "Stored-query candidates"}
       </h4>
       {counterfactual && (
         <p>
@@ -225,7 +217,7 @@ function QualifiedRrfEvidence({ response }: { response: ExpectedDocumentDiagnost
   if (response.qualified_rrf_evidence.length === 0) return null;
   return (
     <section className="diagnostic-evidence-group" aria-labelledby="diagnostic-rrf-heading">
-      <h4 id="diagnostic-rrf-heading">Qualified client-computed RRF</h4>
+      <h4 id="diagnostic-rrf-heading">Client-computed RRF</h4>
       <p>
         This arithmetic uses only returned bounded inputs. It is not observed server RRF, reranker,
         or final-order evidence.
@@ -262,7 +254,7 @@ function DiagnosticResult({
     <section className="diagnostic-results" aria-labelledby="diagnostic-result-heading">
       <div className="diagnostic-origin-notice" role="note">
         <strong id="diagnostic-result-heading">New live expected-document diagnostic · not original run evidence</strong>
-        <span>{config.name} · {modeLabel(response.config_mode)} · {response.subqueries.length} ordered subqueries</span>
+        <span>{configLabel(config)} · {response.subqueries.length} ordered subqueries</span>
         <span>{formatDate(response.observed_at)} · trace {response.trace_id}</span>
         <span>
           {response.duration_ms.toLocaleString(undefined, { maximumFractionDigits: 1 })} ms total
@@ -278,7 +270,7 @@ function DiagnosticResult({
       <CandidateScope response={response} scope="no_filter_counterfactual" />
       <QualifiedRrfEvidence response={response} />
       <section className="diagnostic-evidence-group" aria-labelledby="diagnostic-findings-heading">
-        <h4 id="diagnostic-findings-heading">Typed findings and evidence limits</h4>
+        <h4 id="diagnostic-findings-heading">Findings and limits</h4>
         {response.observations.length > 0 ? (
           <ForensicEvidence observations={response.observations} />
         ) : (
@@ -405,8 +397,8 @@ function DiagnosticSession({
       <p className="eyebrow">Explicit cost-bearing observation</p>
       <h3 id="expected-document-diagnostic-heading">Expected-document diagnostic</h3>
       <p>
-        Select one authenticated run configuration to inspect this exact positively judged target in
-        one new provider snapshot. Nothing runs when this drawer opens or when a control changes.
+        Inspect this positively judged document in one new provider snapshot. Opening the drawer or
+        changing controls does nothing.
       </p>
 
       {!eligible ? (
@@ -421,14 +413,14 @@ function DiagnosticSession({
       ) : (
         <form className="diagnostic-controls" onSubmit={submit}>
           <label>
-            <span>Diagnostic configuration</span>
+            <span>Configuration</span>
             <select
               value={configId}
               onChange={(event) => handleConfigChange(event.target.value)}
             >
               <option value="">Choose a configuration</option>
               {configs.map((config) => (
-                <option key={config.id} value={config.id}>{config.name} · {modeLabel(config.mode)}</option>
+                <option key={config.id} value={config.id}>{configLabel(config)}</option>
               ))}
             </select>
           </label>

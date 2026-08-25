@@ -214,19 +214,19 @@ describe("App playground", () => {
     expect(await screen.findByText("API 0.1.0 alive")).toBeVisible();
     expect(await screen.findByText("Live search locally configured · remote unchecked")).toBeVisible();
     expect(screen.getByText(/Remote namespace health and authentication have not been checked/)).toBeVisible();
-    expect(await screen.findAllByRole("option", { name: "Exact terms · bm25" })).toHaveLength(2);
+    expect(await screen.findAllByRole("option", { name: "BM25" })).toHaveLength(2);
 
     fireEvent.change(screen.getByLabelText("Search query"), { target: { value: "permission mode" } });
     fireEvent.click(screen.getByRole("button", { name: "Compare results" }));
 
     expect(await screen.findByRole("heading", { name: "Results for “permission mode”" })).toBeVisible();
-    expect(screen.getByRole("heading", { name: "Exact terms" })).toBeVisible();
-    expect(screen.getByRole("heading", { name: "Semantic neighbors" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "BM25" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Vector ANN" })).toBeVisible();
     expect(screen.getByText("chmod.1#symbolic-modes")).toBeVisible();
     expect(screen.getByText("find.1#permissions")).toBeVisible();
     expect(screen.getByText("12.75 · bm25 · higher is better")).toBeVisible();
     expect(screen.getByText("0.14321 · vector distance · lower is better")).toBeVisible();
-    expect(screen.getByLabelText("Exact terms request timings")).toHaveTextContent(
+    expect(screen.getByLabelText("BM25 request timings")).toHaveTextContent(
       "Provider7.4 ms client wall clock",
     );
     expect(screen.getByText(/Debug provenance probe · 1.2 ms client wall clock · measured separately/)).toBeVisible();
@@ -258,8 +258,8 @@ describe("App playground", () => {
     renderApp();
 
     expect(screen.getByLabelText("Search query")).toHaveValue("restored query");
-    await waitFor(() => expect(screen.getByLabelText("Left result set")).toHaveValue(rightId));
-    expect(screen.getByLabelText("Right result set")).toHaveValue(leftId);
+    await waitFor(() => expect(screen.getByLabelText("Left")).toHaveValue(rightId));
+    expect(screen.getByLabelText("Right")).toHaveValue(leftId);
     fireEvent.click(screen.getByRole("button", { name: "Compare results" }));
     await screen.findByRole("heading", { name: "Results for “permission mode”" });
 
@@ -291,10 +291,10 @@ describe("App playground", () => {
     vi.stubGlobal("fetch", fetchMock);
     renderApp();
 
-    expect(await screen.findByText("Loading retrieval configurations…")).toBeVisible();
+    expect(await screen.findByText("Loading configurations…")).toBeVisible();
     expect(screen.getByRole("button", { name: "Compare results" })).toBeDisabled();
     resolveConfigs?.(jsonResponse({ contract_version: 1, configs: [] }));
-    expect(await screen.findByText("No retrieval configurations have been seeded yet.")).toBeVisible();
+    expect(await screen.findByText("No configurations have been seeded.")).toBeVisible();
     expect(screen.getByRole("button", { name: "Compare results" })).toBeDisabled();
   });
 
@@ -319,7 +319,7 @@ describe("App playground", () => {
     expect(screen.getByRole("button", { name: "Compare results" })).toBeDisabled();
 
     resolveCapabilities?.(jsonResponse(locallyConfiguredCapabilities));
-    expect(await screen.findAllByRole("option", { name: "Exact terms · bm25" })).toHaveLength(2);
+    expect(await screen.findAllByRole("option", { name: "BM25" })).toHaveLength(2);
     const requestedPaths = fetchMock.mock.calls.map(([input]) => new URL(requestUrl(input), window.location.origin).pathname);
     expect(requestedPaths.indexOf("/api/v1/capabilities")).toBeLessThan(
       requestedPaths.indexOf("/api/v1/configs"),
@@ -353,7 +353,7 @@ describe("App playground", () => {
     vi.stubGlobal("fetch", fetchMock);
     renderApp();
 
-    await screen.findAllByRole("option", { name: "Exact terms · bm25" });
+    await screen.findAllByRole("option", { name: "BM25" });
     expect(screen.getByText("Live search locally configured · remote unchecked")).toBeVisible();
     const initialConfigRequests = fetchMock.mock.calls.filter(([input]) =>
       requestUrl(input).endsWith("/api/v1/configs"),
@@ -415,12 +415,12 @@ describe("App playground", () => {
     vi.stubGlobal("fetch", fetchMock);
     renderApp();
 
-    await screen.findAllByRole("option", { name: "Exact terms · bm25" });
+    await screen.findAllByRole("option", { name: "BM25" });
     fireEvent.change(screen.getByLabelText("Search query"), { target: { value: "permission mode" } });
     fireEvent.click(screen.getByRole("button", { name: "Compare results" }));
     expect(await screen.findByRole("button", { name: "Comparing…" })).toBeDisabled();
     expect(screen.getByText("Comparison is loading.")).toBeInTheDocument();
-    expect(screen.getByRole("group", { name: "Configurations to compare" })).toBeDisabled();
+    expect(screen.getByRole("group", { name: "Compare configurations" })).toBeDisabled();
 
     resolveComparison?.(jsonResponse(comparison));
     expect(await screen.findByRole("heading", { name: "Results for “permission mode”" })).toBeVisible();
@@ -450,7 +450,7 @@ describe("App playground", () => {
     vi.stubGlobal("fetch", fetchMock);
     renderApp();
 
-    await screen.findAllByRole("option", { name: "Exact terms · bm25" });
+    await screen.findAllByRole("option", { name: "BM25" });
     fireEvent.change(screen.getByLabelText("Search query"), { target: { value: "permission mode" } });
     fireEvent.click(screen.getByRole("button", { name: "Compare results" }));
     const alert = await screen.findByRole("alert");
@@ -484,9 +484,9 @@ describe("App playground", () => {
     renderApp();
 
     const alert = await screen.findByRole("alert");
-    expect(within(alert).getByText("Retrieval configurations are unavailable.")).toBeVisible();
+    expect(within(alert).getByText("Configurations are unavailable.")).toBeVisible();
     fireEvent.click(within(alert).getByRole("button", { name: "Retry" }));
-    await screen.findAllByRole("option", { name: "Exact terms · bm25" });
+    await screen.findAllByRole("option", { name: "BM25" });
     fireEvent.change(screen.getByLabelText("Search query"), { target: { value: "no matches" } });
     fireEvent.click(screen.getByRole("button", { name: "Compare results" }));
     expect(await screen.findByText("No comparison results were returned.")).toBeVisible();
@@ -588,7 +588,7 @@ describe("App routing", () => {
     fireEvent.click(opener);
     const openedDrawer = await screen.findByRole("dialog", { name: "Document evidence" });
     expect(openedDrawer).toBeVisible();
-    const diagnosticConfig = within(openedDrawer).getByLabelText("Diagnostic configuration");
+    const diagnosticConfig = within(openedDrawer).getByLabelText("Configuration");
     expect(diagnosticConfig).toHaveValue("");
     fireEvent.change(diagnosticConfig, { target: { value: baselineId } });
     expect(diagnosticConfig).toHaveValue(baselineId);
@@ -604,7 +604,7 @@ describe("App routing", () => {
     const restoredDrawer = await screen.findByRole("dialog", { name: "Document evidence" });
     expect(new URLSearchParams(window.location.search).get("document")).toBe(documentId);
     expect(within(restoredDrawer).getByRole("button", { name: "Close document evidence" })).toHaveFocus();
-    expect(within(restoredDrawer).getByLabelText("Diagnostic configuration")).toHaveValue("");
+    expect(within(restoredDrawer).getByLabelText("Configuration")).toHaveValue("");
     expect(fetchMock.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
   });
 
@@ -724,7 +724,7 @@ describe("App routing", () => {
     window.history.replaceState(null, "", `/runs/${runId}`);
     renderApp();
 
-    expect(await screen.findByText(/create and replay actions are disabled/i)).toBeVisible();
+    expect(await screen.findByText(/timing and live actions are unavailable/i)).toBeVisible();
     expect(screen.queryByRole("button", { name: /replay/i })).not.toBeInTheDocument();
     expect(fetchMock.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
     expect(fetchMock.mock.calls.every(([, init]) => init?.body === undefined)).toBe(true);

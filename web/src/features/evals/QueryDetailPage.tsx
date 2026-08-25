@@ -11,6 +11,7 @@ import {
 } from "../../api/evaluations";
 import { AppLink, RouteHeading } from "../../app/router";
 import { navigate } from "../../app/routing";
+import { configLabel } from "../configLabels";
 import { ComparisonResults } from "../playground/ComparisonResults";
 import { safeSourceUrl } from "../playground/safeUrl";
 import { RequestErrorPanel } from "./components";
@@ -45,7 +46,8 @@ function formatMetric(value: number | null | undefined): string {
 }
 
 function configName(detail: QueryDetail, configId: string): string {
-  return detail.configs.find((config) => config.id === configId)?.name ?? configId;
+  const config = detail.configs.find((item) => item.id === configId);
+  return config === undefined ? configId : configLabel(config);
 }
 
 function StoredOutcomes({ detail }: { detail: QueryDetail }) {
@@ -60,7 +62,7 @@ function StoredOutcomes({ detail }: { detail: QueryDetail }) {
             <th scope="col">NDCG@10</th>
             <th scope="col">Recall@50</th>
             <th scope="col">MRR@10</th>
-            <th scope="col">Observed client wall</th>
+            <th scope="col">Client wall time</th>
           </tr>
         </thead>
         <tbody>
@@ -68,9 +70,7 @@ function StoredOutcomes({ detail }: { detail: QueryDetail }) {
             const record = outcomeFor(detail, config.id);
             return (
               <tr key={config.id}>
-                <th scope="row">
-                  {config.name}<span className="table-subcopy">{config.mode.replaceAll("_", " ")}</span>
-                </th>
+                <th scope="row">{configLabel(config)}</th>
                 <td>
                   {record === undefined ? "Not recorded" : record.outcome.kind === "success" ? "Success" : "Failed"}
                   {record?.outcome.kind === "failure" && (
@@ -199,7 +199,7 @@ function DrawerEvidence({
       <section className="drawer-section" aria-labelledby="stored-evidence-heading">
         <h3 id="stored-evidence-heading">Stored run evidence</h3>
         <p>
-          Judgment grade {qrel?.relevance_grade ?? "not recorded"}. Durable final ranks:
+          Judgment grade {qrel?.relevance_grade ?? "not recorded"}. Recorded final ranks:
           {" "}{configName(detail, selection.left)} {finalRank(outcomeFor(detail, selection.left), selection.document) ?? "outside top 50"};
           {" "}{configName(detail, selection.right)} {finalRank(outcomeFor(detail, selection.right), selection.document) ?? "outside top 50"}.
         </p>
@@ -216,12 +216,12 @@ function DrawerEvidence({
       {replay !== undefined && (
         <>
           <section className="drawer-section" aria-labelledby="primary-evidence-heading">
-            <h3 id="primary-evidence-heading">New primary replay observation</h3>
+            <h3 id="primary-evidence-heading">New primary replay</h3>
             {replay.primary.results.filter((result) => pair.includes(result.config.id)).map((result) => {
               const hit = result.hits.find((item) => item.document_id === selection.document);
               return (
                 <article className="source-evidence-card" key={result.config.id}>
-                  <h4>{result.config.name}</h4>
+                  <h4>{configLabel(result.config)}</h4>
                   <p>Trace {result.trace_id} · observed {formatDate(replay.primary_observed_at)}</p>
                   {hit === undefined ? (
                     <p>Document absent from this primary result set.</p>
@@ -246,7 +246,7 @@ function DrawerEvidence({
           </section>
 
           <section className="drawer-section counterfactual-section" aria-labelledby="probe-evidence-heading">
-            <h3 id="probe-evidence-heading">Separate counterfactual probe evidence</h3>
+            <h3 id="probe-evidence-heading">Counterfactual probe · separate snapshot</h3>
             <p>
               These probes observed a separate provider snapshot. They do not establish the reason for
               the primary ordering, and their timing is never added to primary latency.
@@ -287,7 +287,7 @@ function DrawerEvidence({
 
           {computedObservations.length > 0 && (
             <section className="drawer-section" aria-labelledby="computed-evidence-heading">
-              <h3 id="computed-evidence-heading">Arithmetic from returned bounded inputs</h3>
+              <h3 id="computed-evidence-heading">Client-computed arithmetic</h3>
               <ForensicEvidence observations={computedObservations} />
             </section>
           )}
@@ -401,13 +401,12 @@ export function QueryDetailPage({
   return (
     <section className="dashboard-page query-detail-page">
       <div className="page-heading compact-heading">
-        <p className="eyebrow">Recorded query and optional new observation</p>
+        <p className="eyebrow">Stored query and optional live replay</p>
         <RouteHeading routeKey={routeKey} id="query-forensics-heading">
           {detailError?.status === 404 ? "Query not found" : "Query forensics"}
         </RouteHeading>
         <p className="page-intro">
-          This page first reads durable SQLite evidence. Refreshing or opening its link never performs
-          provider work; live replay requires the explicit cost-bearing action below.
+          Stored evidence loads provider-free. Live replay runs only when explicitly requested.
         </p>
       </div>
 
@@ -415,7 +414,7 @@ export function QueryDetailPage({
       {detailQuery.isError && detailError?.status === 404 && (
         <div className="dashboard-empty" role="alert">
           <h2>No query matches this run-scoped URL</h2>
-          <p>The query or durable run may not exist in this local database.</p>
+          <p>The query or run may not exist in this local database.</p>
           <AppLink href={`/runs/${encodeURIComponent(runId)}`}>Return to the evaluation run</AppLink>
         </div>
       )}
@@ -432,7 +431,7 @@ export function QueryDetailPage({
           <section className="query-record-panel" aria-labelledby="recorded-query-heading">
             <div className="section-heading-row">
               <div>
-                <p className="eyebrow">Provider-free stored record</p>
+                <p className="eyebrow">Stored run · provider-free</p>
                 <h2 id="recorded-query-heading">{detail.query.text}</h2>
               </div>
               <span>{detail.data_origin === "synthetic_demo" ? "Synthetic demo · read-only" : "Live recorded run"}</span>
@@ -459,7 +458,7 @@ export function QueryDetailPage({
 
           <section className="query-evidence-panel" aria-labelledby="durable-outcomes-heading">
             <div className="section-heading-row">
-              <div><p className="eyebrow">Durable final evidence</p><h2 id="durable-outcomes-heading">Recorded outcomes</h2></div>
+              <div><p className="eyebrow">Stored evidence</p><h2 id="durable-outcomes-heading">Recorded outcomes</h2></div>
             </div>
             <StoredOutcomes detail={detail} />
             <div className="not-observable" role="note">
@@ -474,7 +473,7 @@ export function QueryDetailPage({
 
           <section className="query-evidence-panel" aria-labelledby="judgments-heading">
             <div className="section-heading-row">
-              <div><p className="eyebrow">Exact graded qrels</p><h2 id="judgments-heading">Judged documents</h2></div>
+              <div><p className="eyebrow">Relevance judgments</p><h2 id="judgments-heading">Judged documents</h2></div>
             </div>
             <JudgedDocuments detail={detail} selection={selection} onInspect={inspectDocument} />
             <RankChanges detail={detail} />
@@ -486,8 +485,7 @@ export function QueryDetailPage({
             </div>
             {detail.data_origin === "synthetic_demo" ? (
               <p className="synthetic-notice" role="note">
-                <strong>Synthetic demo · replay disabled.</strong> This authored dataset is read-only and
-                no provider-capable request will be sent.
+                <strong>Synthetic demo · replay disabled.</strong> No provider request will be sent.
               </p>
             ) : !detail.live_replay_policy_permitted ? (
               <p className="evidence-policy" role="note">
@@ -497,7 +495,7 @@ export function QueryDetailPage({
               <form className="replay-controls" onSubmit={submitReplay}>
                 <div className="replay-pair-controls">
                   <label>
-                    <span>Left configuration</span>
+                    <span>Left config</span>
                     <select
                       value={selection.left}
                       disabled={replay.isPending}
@@ -509,18 +507,18 @@ export function QueryDetailPage({
                         updateSelection({ ...selection, left, right });
                       }}
                     >
-                      {detail.configs.map((config) => <option key={config.id} value={config.id}>{config.name}</option>)}
+                      {detail.configs.map((config) => <option key={config.id} value={config.id}>{configLabel(config)}</option>)}
                     </select>
                   </label>
                   <label>
-                    <span>Right configuration</span>
+                    <span>Right config</span>
                     <select
                       value={selection.right}
                       disabled={replay.isPending}
                       onChange={(event) => updateSelection({ ...selection, right: event.target.value })}
                     >
                       {detail.configs.filter((config) => config.id !== selection.left).map((config) => (
-                        <option key={config.id} value={config.id}>{config.name}</option>
+                        <option key={config.id} value={config.id}>{configLabel(config)}</option>
                       ))}
                     </select>
                   </label>

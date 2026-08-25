@@ -1,4 +1,5 @@
 import type { SearchCompareResponse } from "../../api/client";
+import { configLabel } from "../configLabels";
 import { safeSourceUrl } from "./safeUrl";
 
 type ConfigResult = SearchCompareResponse["results"][number];
@@ -27,18 +28,18 @@ function ResultColumn({
 }) {
   const productionTimings = result.timings.filter((timing) => timing.stage !== "provenance_probe");
   const debugTimings = result.timings.filter((timing) => timing.stage === "provenance_probe");
+  const label = configLabel(result.config);
 
   return (
     <article className="result-column" aria-labelledby={`config-${result.config.id}`}>
       <header className="result-column-header">
         <div>
-          <p className="mode-label">{result.config.mode.replaceAll("_", " ")}</p>
-          <h3 id={`config-${result.config.id}`}>{result.config.name}</h3>
+          <h3 id={`config-${result.config.id}`}>{label}</h3>
         </div>
         <span className="result-count">{result.hits.length} hits</span>
       </header>
 
-      <div className="timing-strip" aria-label={`${result.config.name} request timings`}>
+      <div className="timing-strip" aria-label={`${label} request timings`}>
         {productionTimings.map((timing) => (
           <span key={timing.stage}>
             <strong>{timing.stage === "turbopuffer" ? "Provider" : timing.stage}</strong>
@@ -56,7 +57,7 @@ function ResultColumn({
       ))}
 
       {result.warnings.length > 0 && (
-        <ul className="warnings" aria-label={`${result.config.name} warnings`}>
+        <ul className="warnings" aria-label={`${label} warnings`}>
           {result.warnings.map((warning) => (
             <li key={`${warning.code}-${warning.message}`}>{warning.message}</li>
           ))}

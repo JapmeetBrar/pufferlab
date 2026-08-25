@@ -197,7 +197,7 @@ test("intercepted live expected-document diagnostic is explicit, bounded, reset-
   const opener = page.getByRole("button", { name: "Inspect document" }).first();
   await opener.click();
   const dialog = page.getByRole("dialog", { name: "Document evidence" });
-  const config = dialog.getByLabel("Diagnostic configuration");
+  const config = dialog.getByLabel("Configuration");
   const noFilter = dialog.getByLabel("Include a same-request no-filter counterfactual");
   const confirm = dialog.getByLabel("I understand this starts cost-bearing provider work.");
   const run = dialog.getByRole("button", { name: "Run expected-document diagnostic" });
@@ -240,8 +240,8 @@ test("intercepted live expected-document diagnostic is explicit, bounded, reset-
   await expect(close).toBeFocused();
   await run.click();
   await expect(dialog.getByText("New live expected-document diagnostic · not original run evidence")).toBeVisible();
-  await expect(dialog.getByRole("heading", { name: "Same-request no-filter counterfactual candidates" })).toBeVisible();
-  await expect(dialog.getByRole("heading", { name: "Qualified client-computed RRF" })).toBeVisible();
+  await expect(dialog.getByRole("heading", { name: "No-filter counterfactual candidates" })).toBeVisible();
+  await expect(dialog.getByRole("heading", { name: "Client-computed RRF" })).toBeVisible();
   await expect(dialog.getByText(/not observed server RRF, reranker, or final-order evidence/i)).toBeVisible();
   await expect(confirm).not.toBeChecked();
   expect(diagnosticBodies).toEqual([{
@@ -338,7 +338,7 @@ test("failed capability refetch invalidates configured readiness without browser
   await page.goto("/");
   await expect(page.getByText("Live search locally configured · remote unchecked")).toBeVisible();
   await expect(page.getByText(/Remote namespace health and authentication have not been checked/)).toBeVisible();
-  await expect(page.getByLabel("Left result set")).toBeEnabled();
+  await expect(page.getByLabel("Left")).toBeEnabled();
   await page.getByLabel("Search query").fill("permission mode");
   await expect(page.getByRole("button", { name: "Compare results" })).toBeEnabled();
   const initialConfigGets = configGets.length;
