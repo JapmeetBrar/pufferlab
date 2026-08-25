@@ -263,7 +263,8 @@ describe("ExpectedDocumentDiagnostic", () => {
     expect((await screen.findAllByText(
       new RegExp(`BM25 · ${relation.replaceAll("_", " ")}`, "i"),
     )).length).toBeGreaterThan(0);
-    expect(screen.getAllByText(/1 · bm25 · higher is better · turbopuffer dist/i).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/1 · bm25/i).length).toBeGreaterThan(0);
+    expect(document.body).not.toHaveTextContent(/higher is better|lower is better|turbopuffer dist/i);
     expect(screen.getAllByText(new RegExp(certainty, "i")).length).toBeGreaterThan(0);
     expect(document.body).not.toHaveTextContent("filter ran before ann");
   });

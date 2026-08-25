@@ -22,22 +22,22 @@ import { formatDate } from "./formatters";
 
 export const ACTIVE_RUN_POLL_INTERVAL_MS = 2_000;
 
-const metricOrder: MetricAggregate["name"][] = [
+type DisplayMetricName = Exclude<MetricAggregate["name"], "error_rate">;
+
+const metricOrder: DisplayMetricName[] = [
   "ndcg@10",
   "recall@50",
   "mrr@10",
   "latency_p50_ms",
   "latency_p95_ms",
-  "error_rate",
 ];
 
-const metricLabels: Record<MetricAggregate["name"], string> = {
+const metricLabels: Record<DisplayMetricName, string> = {
   "ndcg@10": "NDCG@10",
   "recall@50": "Recall@50",
   "mrr@10": "MRR@10",
   latency_p50_ms: "p50 latency",
   latency_p95_ms: "p95 latency",
-  error_rate: "Error rate",
 };
 
 const exclusionLabels = {
@@ -293,7 +293,6 @@ function RegressionSection({
                         <th scope="col">Recall delta</th>
                         <th scope="col">MRR delta</th>
                         <th scope="col">Latency · client wall</th>
-                        <th scope="col">Judged rank changes</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -316,7 +315,6 @@ function RegressionSection({
                               ? "Unavailable"
                               : `${row.baseline_latency_ms.toFixed(1)} → ${row.candidate_latency_ms.toFixed(1)} ms`}
                           </td>
-                          <td>{row.relevant_rank_changes.length} judged documents</td>
                         </tr>
                       ))}
                     </tbody>

@@ -17,7 +17,7 @@ function evidenceDate(value: string | null): string {
 }
 
 function scoreText(score: Extract<EvidenceValue, { kind: "score" }>["score"]): string {
-  return `${score.value.toLocaleString(undefined, { maximumFractionDigits: 6 })} · ${score.kind.replaceAll("_", " ")} · ${score.direction.replaceAll("_", " ")} · ${score.source.replaceAll("_", " ")}`;
+  return `${score.value.toLocaleString(undefined, { maximumFractionDigits: 6 })} · ${score.kind.replaceAll("_", " ")}`;
 }
 
 export function EvidenceValueView({ value }: { value: EvidenceValue }) {

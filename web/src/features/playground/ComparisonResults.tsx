@@ -9,11 +9,10 @@ function formatScore(hit: SearchHit): string {
   if (hit.final_score === null || hit.final_score === undefined) {
     return "Score not observed";
   }
-  const { value, kind, direction } = hit.final_score;
+  const { value, kind } = hit.final_score;
   return [
     value.toLocaleString(undefined, { maximumFractionDigits: 5 }),
     kind.replaceAll("_", " "),
-    direction.replaceAll("_", " "),
   ].join(" · ");
 }
 

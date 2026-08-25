@@ -168,7 +168,7 @@ function RankChanges({ detail }: { detail: QueryDetail }) {
 
 function scoreDescription(score: ReplayScore | undefined): string {
   if (score == null) return "Score unavailable";
-  return `${score.value.toLocaleString(undefined, { maximumFractionDigits: 6 })} · ${score.kind.replaceAll("_", " ")} · ${score.direction.replaceAll("_", " ")} · ${score.source.replaceAll("_", " ")}`;
+  return `${score.value.toLocaleString(undefined, { maximumFractionDigits: 6 })} · ${score.kind.replaceAll("_", " ")}`;
 }
 
 function DrawerEvidence({

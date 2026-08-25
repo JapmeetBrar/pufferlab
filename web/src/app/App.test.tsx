@@ -224,8 +224,9 @@ describe("App playground", () => {
     expect(screen.getByRole("heading", { name: "Vector ANN" })).toBeVisible();
     expect(screen.getByText("chmod.1#symbolic-modes")).toBeVisible();
     expect(screen.getByText("find.1#permissions")).toBeVisible();
-    expect(screen.getByText("12.75 · bm25 · higher is better")).toBeVisible();
-    expect(screen.getByText("0.14321 · vector distance · lower is better")).toBeVisible();
+    expect(screen.getByText("12.75 · bm25")).toBeVisible();
+    expect(screen.getByText("0.14321 · vector distance")).toBeVisible();
+    expect(screen.queryByText(/higher is better|lower is better|turbopuffer dist/i)).not.toBeInTheDocument();
     expect(screen.getByLabelText("BM25 request timings")).toHaveTextContent(
       "Provider7.4 ms client wall clock",
     );
