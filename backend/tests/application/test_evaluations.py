@@ -305,6 +305,11 @@ def _seed() -> tuple[UnixEvaluationSeed, tuple[RetrievalConfig, ...]]:
             dataset_version=dataset,
             query_set=query_set,
             curated_queries=tuple(curated),
+            judged_document_titles=tuple(
+                (qrel.document_id, f"Document title {query_index:02d}-{qrel_index}")
+                for query_index, item in enumerate(curated)
+                for qrel_index, qrel in enumerate(item.judged_query.qrels)
+            ),
         ),
         configs,
     )
@@ -373,6 +378,23 @@ def test_provider_free_create_requires_exact_config_contract_order(
         )
 
     assert repository.list_runs() == []
+
+
+def test_seed_persists_judged_document_titles_idempotently(
+    repository: PufferLabRepository,
+) -> None:
+    seed, configs = _seed()
+    service = _service(repository, FakeSearchBackend(configs))
+
+    service.seed(seed, configs)
+    service.seed(seed, configs)
+
+    first_query_ids = [qrel.document_id for qrel in seed.judged_queries[0].qrels]
+    expected_titles = dict(seed.judged_document_titles)
+    assert repository.get_judged_document_titles(
+        seed.query_set.id,
+        first_query_ids,
+    ) == {document_id: expected_titles[document_id] for document_id in first_query_ids}
 
 
 @pytest.mark.asyncio
@@ -744,6 +766,7 @@ def test_seed_rejects_cross_dataset_query_set_before_any_seed_write(
         dataset_version=seed.dataset_version,
         query_set=seed.query_set.model_copy(update={"dataset_version_id": other_dataset.id}),
         curated_queries=seed.curated_queries,
+        judged_document_titles=seed.judged_document_titles,
     )
 
     with pytest.raises(PersistenceValidationError, match="must bind to the seeded dataset"):

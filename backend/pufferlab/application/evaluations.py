@@ -167,6 +167,10 @@ class EvaluationApplicationService:
         for config in ordered:
             self._repository.put_retrieval_config(config)
         query_set, _ = self._repository.put_query_set(seed.query_set, seed.judged_queries)
+        self._repository.put_judged_document_titles(
+            query_set.id,
+            dict(seed.judged_document_titles),
+        )
         return EvaluationSeedResult(
             dataset_version=seed.dataset_version,
             query_set=query_set,
@@ -445,6 +449,22 @@ def _validate_canonical_seed(
         )
     if seed.query_set.query_count != 50 or len(seed.judged_queries) != 50:
         raise PersistenceValidationError("evaluation seeding requires the curated 50-query set")
+    title_ids = [document_id for document_id, _title in seed.judged_document_titles]
+    judged_document_ids = {
+        qrel.document_id for query in seed.judged_queries for qrel in query.qrels
+    }
+    if (
+        len(title_ids) > 5_000
+        or len(title_ids) != len(set(title_ids))
+        or set(title_ids) != judged_document_ids
+        or any(
+            not title.strip() or len(title) > 512
+            for _document_id, title in seed.judged_document_titles
+        )
+    ):
+        raise PersistenceValidationError(
+            "evaluation seeding requires one title for every judged document"
+        )
     _validate_canonical_configs(seed.dataset_version, configs)
 
 

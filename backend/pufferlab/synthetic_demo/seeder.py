@@ -29,7 +29,7 @@ from pufferlab.contracts.evals import (
     TimingSource,
 )
 from pufferlab.contracts.retrieval import RetrievalConfig, RetrievalMode
-from pufferlab.datasets.identity import PUFFERLAB_NAMESPACE_UUID, corpus_hash
+from pufferlab.datasets.identity import PUFFERLAB_NAMESPACE_UUID, corpus_hash, document_uuid
 from pufferlab.datasets.schema import compile_namespace_write_spec
 from pufferlab.evals.metrics import evaluate_ranking
 from pufferlab.evals.models import Judgment
@@ -182,6 +182,18 @@ def seed_synthetic_demo(
     repository.put_query_set(
         expected.query_set,
         [item.judged_query for item in authored.queries],
+    )
+    judged_document_ids = {
+        qrel.document_id for item in authored.queries for qrel in item.judged_query.qrels
+    }
+    repository.put_judged_document_titles(
+        expected.query_set.id,
+        {
+            document_id: document.title
+            for document in authored.documents
+            if (document_id := document_uuid(authored.manifest.version, document.external_id))
+            in judged_document_ids
+        },
     )
 
     try:

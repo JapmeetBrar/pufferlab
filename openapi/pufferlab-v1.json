@@ -1387,6 +1387,13 @@
           "data_origin": {
             "$ref": "#/components/schemas/DataOrigin"
           },
+          "judged_documents": {
+            "items": {
+              "$ref": "#/components/schemas/JudgedDocumentSummary"
+            },
+            "title": "Judged Documents",
+            "type": "array"
+          },
           "live_replay_policy_permitted": {
             "title": "Live Replay Policy Permitted",
             "type": "boolean"
@@ -1427,6 +1434,7 @@
           "run_id",
           "data_origin",
           "query",
+          "judged_documents",
           "baseline_config_id",
           "candidate_config_ids",
           "configs",
@@ -2771,6 +2779,35 @@
             "type": "null"
           }
         ]
+      },
+      "JudgedDocumentSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "document_id": {
+            "format": "uuid",
+            "title": "Document Id",
+            "type": "string"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "maxLength": 512,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          }
+        },
+        "required": [
+          "document_id",
+          "title"
+        ],
+        "title": "JudgedDocumentSummary",
+        "type": "object"
       },
       "JudgedQuery": {
         "additionalProperties": false,

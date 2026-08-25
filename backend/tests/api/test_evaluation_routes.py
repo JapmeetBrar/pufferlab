@@ -42,6 +42,7 @@ from pufferlab.contracts.evals import (
     EvalRunStatus,
     EvalRunView,
     ExcludedPairCount,
+    JudgedDocumentSummary,
     JudgedQuery,
     Qrel,
     QuerySet,
@@ -266,6 +267,10 @@ class _EvaluationViews:
             run_id=run_id,
             data_origin=DataOrigin.LIVE,
             query=self.query,
+            judged_documents=[
+                JudgedDocumentSummary(document_id=qrel.document_id, title="Route test document")
+                for qrel in self.query.qrels
+            ],
             baseline_config_id=self.configs[0].id,
             candidate_config_ids=[config.id for config in self.configs[1:]],
             configs=self.configs,
@@ -406,6 +411,12 @@ def test_evaluation_catalog_and_read_routes_delegate_to_injected_facades() -> No
     assert unscoped.json()["configs"][0]["id"] == str(search.summary.id)
     assert listed.status_code == detail.status_code == regression.status_code == 200
     assert query.status_code == exported.status_code == 200
+    assert query.json()["judged_documents"] == [
+        {
+            "document_id": str(views.query.qrels[0].document_id),
+            "title": "Route test document",
+        }
+    ]
     assert created.status_code == 202
     assert cancelled.status_code == 200
     assert replayed.status_code == 503

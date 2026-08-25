@@ -26,6 +26,11 @@ class Qrel(ContractModel):
     relevance_grade: int = Field(ge=0)
 
 
+class JudgedDocumentSummary(ContractModel):
+    document_id: UUID
+    title: str | None = Field(min_length=1, max_length=512)
+
+
 class JudgedQuery(ContractModel):
     id: UUID
     external_id: str
@@ -566,6 +571,7 @@ class EvalRunQueryDetailResponse(ContractModel):
     run_id: UUID
     data_origin: DataOrigin
     query: JudgedQuery
+    judged_documents: list[JudgedDocumentSummary]
     baseline_config_id: UUID
     candidate_config_ids: list[UUID] = Field(min_length=3, max_length=3)
     configs: list[RetrievalConfigSummary] = Field(min_length=4, max_length=4)
@@ -577,6 +583,10 @@ class EvalRunQueryDetailResponse(ContractModel):
 
     @model_validator(mode="after")
     def validate_run_query_scope(self) -> "EvalRunQueryDetailResponse":
+        if [item.document_id for item in self.judged_documents] != [
+            qrel.document_id for qrel in self.query.qrels
+        ]:
+            raise ValueError("judged-document summaries must retain exact qrel order")
         config_ids = [self.baseline_config_id, *self.candidate_config_ids]
         if len(set(config_ids)) != _CANONICAL_CONFIG_COUNT:
             raise ValueError("query detail requires four distinct ordered configs")

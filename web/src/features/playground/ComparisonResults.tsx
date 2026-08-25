@@ -1,5 +1,6 @@
 import type { SearchCompareResponse } from "../../api/client";
 import { configLabel } from "../configLabels";
+import { relevanceLabel } from "../relevance";
 import { safeSourceUrl } from "./safeUrl";
 
 type ConfigResult = SearchCompareResponse["results"][number];
@@ -82,7 +83,7 @@ function ResultColumn({
                   <div className="hit-meta">
                     <span>{formatScore(hit)}</span>
                     {hit.relevance_grade !== null && hit.relevance_grade !== undefined && (
-                      <span>Relevance grade {hit.relevance_grade}</span>
+                      <span>{relevanceLabel(hit.relevance_grade)} · grade {hit.relevance_grade}</span>
                     )}
                   </div>
                   <div className="hit-actions">

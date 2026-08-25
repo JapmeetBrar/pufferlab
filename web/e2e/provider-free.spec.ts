@@ -93,6 +93,11 @@ test("provider-free synthetic dashboard journey is actionable, navigable, and ac
   await expect(page).toHaveURL(/\/playground\?run=/);
   await expect(page.getByText("NOT_OBSERVABLE · original stages")).toBeVisible();
   await expect(page.getByText("Synthetic demo · replay disabled.")).toBeVisible();
+  const judgments = page.getByRole("table", {
+    name: "Judged documents and durable final ranks",
+  });
+  await expect(judgments.getByText(/Synthetic troubleshooting note/).first()).toBeVisible();
+  await expect(judgments.getByText(/Relevant/).first()).toBeVisible();
   await expectContained(page);
   await expectNoSeriousAxeViolations(page);
 

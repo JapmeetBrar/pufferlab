@@ -84,6 +84,61 @@ def test_immutable_revision_graph_round_trips_exactly(
         repository.put_query_set(sample_graph.query_set, changed_queries)
 
 
+def test_judged_document_titles_are_bounded_scoped_and_immutable(
+    repository: PufferLabRepository,
+    sample_graph: SampleGraph,
+) -> None:
+    persist_graph(repository, sample_graph)
+    first_id = sample_graph.queries[0].qrels[0].document_id
+    second_id = sample_graph.queries[1].qrels[0].document_id
+    titles = {first_id: "First readable title", second_id: "Second readable title"}
+
+    assert repository.put_judged_document_titles(sample_graph.query_set.id, {}) == {}
+    assert repository.put_judged_document_titles(sample_graph.query_set.id, titles) == titles
+    assert repository.put_judged_document_titles(sample_graph.query_set.id, titles) == titles
+    assert (
+        repository.get_judged_document_titles(
+            sample_graph.query_set.id,
+            [second_id, first_id],
+        )
+        == titles
+    )
+    assert (
+        repository.get_judged_document_titles(
+            sample_graph.query_set.id,
+            [stable_uuid("missing-title")],
+        )
+        == {}
+    )
+
+    with pytest.raises(ImmutableRecordError, match="immutable"):
+        repository.put_judged_document_titles(
+            sample_graph.query_set.id,
+            {first_id: "Changed title"},
+        )
+    with pytest.raises(PersistenceValidationError, match="must reference qrels"):
+        repository.put_judged_document_titles(
+            sample_graph.query_set.id,
+            {stable_uuid("foreign-document"): "Foreign title"},
+        )
+    with pytest.raises(PersistenceValidationError, match="title is invalid"):
+        repository.put_judged_document_titles(sample_graph.query_set.id, {first_id: "  "})
+    with pytest.raises(RecordNotFoundError, match="was not found"):
+        repository.put_judged_document_titles(stable_uuid("missing-query-set"), {})
+    assert repository.get_judged_document_titles(
+        sample_graph.query_set.id,
+        [
+            *[stable_uuid(f"requested-title-{index}") for index in range(500)],
+            first_id,
+        ],
+    ) == {first_id: titles[first_id]}
+    with pytest.raises(PersistenceValidationError, match="count exceeds"):
+        repository.put_judged_document_titles(
+            sample_graph.query_set.id,
+            {stable_uuid(f"written-title-{index}"): f"Title {index}" for index in range(5_001)},
+        )
+
+
 def test_revision_selectors_are_deterministic_and_dataset_scoped(
     repository: PufferLabRepository,
     sample_graph: SampleGraph,

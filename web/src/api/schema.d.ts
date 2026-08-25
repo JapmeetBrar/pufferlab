@@ -850,6 +850,8 @@ export interface components {
             /** @default 1 */
             contract_version: components["schemas"]["ContractVersion"];
             data_origin: components["schemas"]["DataOrigin"];
+            /** Judged Documents */
+            judged_documents: components["schemas"]["JudgedDocumentSummary"][];
             /** Live Replay Policy Permitted */
             live_replay_policy_permitted: boolean;
             /**
@@ -1391,6 +1393,16 @@ export interface components {
         "JsonValue-Output": string | number | boolean | components["schemas"]["JsonValue-Output"][] | {
             [key: string]: components["schemas"]["JsonValue-Output"];
         } | null;
+        /** JudgedDocumentSummary */
+        JudgedDocumentSummary: {
+            /**
+             * Document Id
+             * Format: uuid
+             */
+            document_id: string;
+            /** Title */
+            title: string | null;
+        };
         /** JudgedQuery */
         JudgedQuery: {
             /** External Id */

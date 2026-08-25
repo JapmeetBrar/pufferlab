@@ -60,6 +60,7 @@ from pufferlab.evals.models import Judgment
 from pufferlab.jobs.eval_runner import (
     decode_outcome_payload,
     encode_outcome_payload,
+    export_outcome_record,
     finalize_durable_outcomes,
 )
 from pufferlab.main import create_app
@@ -538,15 +539,78 @@ def test_regressions_use_durable_pairing_and_exact_qrels_through_rank_50(
     assert row.relevant_rank_changes[0].candidate_rank == 11
     assert "Safe test query" not in row.playground_url
 
+    judged_document_id = graph.queries[0].qrels[0].document_id
+    repository.put_judged_document_titles(
+        graph.query_set.id,
+        {judged_document_id: "Readable judged document title"},
+    )
     detail = service.get_query_detail(completed.id, graph.queries[0].id)
     assert [record.config_id for record in detail.outcomes] == [
         config.id for config in graph.configs
     ]
     assert detail.rank_changes[0].changes[0].baseline_rank == 50
     assert detail.rank_changes[0].changes[0].candidate_rank == 11
+    assert detail.judged_documents[0].document_id == judged_document_id
+    assert detail.judged_documents[0].title == "Readable judged document title"
     with pytest.raises(EvaluationViewError) as not_found:
         service.get_query_detail(completed.id, _id("foreign-query"))
     assert not_found.value.http_status == 404
+
+
+def test_query_detail_preserves_101_qrels_and_chunked_title_fallbacks(
+    repository: PufferLabRepository,
+) -> None:
+    base_graph = _make_graph()
+    qrels = [
+        Qrel(
+            document_id=(_id("relevant-00") if index == 0 else _id(f"query-00-judged-{index:03d}")),
+            relevance_grade=2 if index == 0 else 0,
+        )
+        for index in range(101)
+    ]
+    queries = list(base_graph.queries)
+    queries[0] = queries[0].model_copy(update={"qrels": qrels})
+    graph = CanonicalGraph(
+        base_graph.dataset,
+        base_graph.configs,
+        base_graph.query_set.model_copy(update={"content_hash": "query-set-101-qrels-hash"}),
+        tuple(queries),
+    )
+    repository.put_dataset_version(graph.dataset)
+    for config in graph.configs:
+        repository.put_retrieval_config(config)
+    repository.put_query_set(graph.query_set, graph.queries)
+    titled_qrels = {
+        qrel.document_id: f"Readable title {index:03d}"
+        for index, qrel in enumerate(qrels)
+        if index % 2 == 0
+    }
+    repository.put_judged_document_titles(graph.query_set.id, titled_qrels)
+    completed = _persist_six_status_runs(repository, graph)[EvalRunStatus.COMPLETED]
+
+    detail = EvaluationViewService(repository).get_query_detail(completed.id, queries[0].id)
+
+    assert detail.query == queries[0]
+    assert [qrel.document_id for qrel in detail.query.qrels] == [qrel.document_id for qrel in qrels]
+    assert [qrel.relevance_grade for qrel in detail.query.qrels] == [
+        qrel.relevance_grade for qrel in qrels
+    ]
+    assert [item.document_id for item in detail.judged_documents] == [
+        qrel.document_id for qrel in qrels
+    ]
+    assert [item.title for item in detail.judged_documents] == [
+        titled_qrels.get(qrel.document_id) for qrel in qrels
+    ]
+    assert detail.outcomes == [
+        export_outcome_record(repository.get_outcome(completed.id, config.id, queries[0].id))
+        for config in graph.configs
+    ]
+    assert len(detail.rank_changes) == 3
+    assert all(
+        [change.document_id for change in group.changes] == [qrels[0].document_id]
+        and [change.relevance_grade for change in group.changes] == [2]
+        for group in detail.rank_changes
+    )
 
 
 def test_partial_regression_coverage_uses_all_frozen_exclusions_and_exact_qrels(

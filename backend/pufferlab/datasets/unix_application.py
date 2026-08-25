@@ -63,6 +63,7 @@ class UnixEvaluationSeed:
     dataset_version: DatasetVersion
     query_set: QuerySet
     curated_queries: tuple[CuratedJudgedQuerySeed, ...]
+    judged_document_titles: tuple[tuple[UUID, str], ...]
 
     @property
     def judged_queries(self) -> tuple[JudgedQuery, ...]:
@@ -237,7 +238,12 @@ def build_ready_unix_evaluation_seed(
     for qrel in local_pack.qrels:
         qrels_by_query[qrel.query_id].append(qrel)
 
+    title_by_external_id = {document.external_id: document.title for document in corpus.documents}
+    if len(title_by_external_id) != len(corpus.documents):
+        raise DatasetPreparationError("curated corpus contains duplicate document source IDs")
+
     curated_queries: list[CuratedJudgedQuerySeed] = []
+    judged_document_titles: dict[UUID, str] = {}
     for selection in local_pack.curated_manifest.entries:
         query = query_by_external_id[selection.query_id]
         source_qrels = tuple(
@@ -254,6 +260,18 @@ def build_ready_unix_evaluation_seed(
             raise DatasetPreparationError(
                 "graded qrels do not match the retained curated-query judgments"
             )
+        try:
+            query_document_titles = {
+                document_uuid(corpus.manifest.version, qrel.document_id): title_by_external_id[
+                    qrel.document_id
+                ]
+                for qrel in source_qrels
+            }
+        except KeyError:
+            raise DatasetPreparationError(
+                "graded qrel document is absent from the curated corpus"
+            ) from None
+        judged_document_titles.update(query_document_titles)
         judged_query = JudgedQuery(
             id=uuid5(
                 PUFFERLAB_NAMESPACE_UUID,
@@ -306,6 +324,9 @@ def build_ready_unix_evaluation_seed(
         dataset_version=dataset_version,
         query_set=query_set,
         curated_queries=tuple(curated_queries),
+        judged_document_titles=tuple(
+            sorted(judged_document_titles.items(), key=lambda item: str(item[0]))
+        ),
     )
 
 

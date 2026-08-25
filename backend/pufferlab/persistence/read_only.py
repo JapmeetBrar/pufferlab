@@ -18,10 +18,10 @@ from sqlalchemy.pool import StaticPool
 
 from pufferlab.persistence.repository import PufferLabRepository
 
-_CURRENT_REVISION = "20260822_0001"
-# Canonical evaluation catalogs store metadata, 50 queries/qrels, and 200 outcomes rather than
-# corpus documents or vectors. 256 MiB leaves substantial evidence headroom while bounding both
-# this temporary image and SQLite's separate in-memory copy.
+_CURRENT_REVISION = "20260825_0002"
+# Canonical evaluation catalogs store metadata, 50 queries/qrels, bounded judged-title snapshots,
+# and 200 outcomes rather than corpus bodies or vectors. 256 MiB leaves substantial evidence
+# headroom while bounding both this temporary image and SQLite's separate in-memory copy.
 _MAX_CATALOG_BYTES = 256 * 1024 * 1024
 _SNAPSHOT_CHUNK_BYTES = 1024 * 1024
 _OPEN_SUPPORTS_DIR_FD = os.open in os.supports_dir_fd

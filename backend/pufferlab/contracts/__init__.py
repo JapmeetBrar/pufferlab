@@ -24,6 +24,7 @@ from pufferlab.contracts.evals import (
     EvalRunExportResponse,
     EvalRunListResponse,
     EvalRunQueryDetailResponse,
+    JudgedDocumentSummary,
     RegressionResponse,
     RegressionRow,
 )
@@ -76,6 +77,7 @@ __all__ = [
     "GateVerdict",
     "HealthResponse",
     "IndexProfile",
+    "JudgedDocumentSummary",
     "LivePlaygroundCapability",
     "ObservedScore",
     "QuerySetListResponse",

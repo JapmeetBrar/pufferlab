@@ -133,6 +133,10 @@ def _unix_seed(manifest: DatasetManifest, *, namespace: str) -> UnixEvaluationSe
         dataset_version=dataset,
         query_set=query_set,
         curated_queries=tuple(curated),
+        judged_document_titles=tuple(
+            (item.judged_query.qrels[0].document_id, f"Runtime document {index:02d}")
+            for index, item in enumerate(curated)
+        ),
     )
 
 
