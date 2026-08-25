@@ -27,7 +27,7 @@ function enumLabel(value: string): string {
 
 function scoreText(score: DiagnosticScore | null | undefined): string {
   if (score == null) return "Unavailable";
-  return `${score.value.toLocaleString(undefined, { maximumFractionDigits: 8 })} · ${enumLabel(score.kind)} · ${enumLabel(score.direction)} · ${enumLabel(score.source)}`;
+  return `${score.value.toLocaleString(undefined, { maximumFractionDigits: 8 })} · ${enumLabel(score.kind)}`;
 }
 
 function responseMatches(

@@ -40,6 +40,8 @@ describe("ForensicEvidence shared diagnostic values", () => {
 
     const { rerender } = render(<EvidenceValueView value={values[0]!} />);
     expect(screen.getByText(/BM25 direct score/)).toBeVisible();
+    expect(screen.getByText(/3\.5 · bm25/i)).toBeVisible();
+    expect(document.body).not.toHaveTextContent(/higher is better|compute attribute/i);
     rerender(<EvidenceValueView value={values[1]!} />);
     expect(screen.getByText(/Filter predicate 2 · path 1\.0 · field category · eq · not matched/)).toBeVisible();
     rerender(<EvidenceValueView value={values[2]!} />);

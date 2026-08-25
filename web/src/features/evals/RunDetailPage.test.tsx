@@ -68,8 +68,10 @@ describe("RunDetailPage", () => {
     const metrics = screen.getByRole("table", { name: "Final metrics by retrieval configuration" });
     expect(within(metrics).getAllByText("Unavailable")).toHaveLength(8);
     expect(within(metrics).getAllByText("sample count 0")).toHaveLength(8);
+    expect(within(metrics).queryByRole("columnheader", { name: "Error rate" })).not.toBeInTheDocument();
 
     const coverage = await screen.findByLabelText("Regression coverage");
+    expect(screen.queryByRole("columnheader", { name: "Judged rank changes" })).not.toBeInTheDocument();
     for (const label of [
       "Baseline missing",
       "Candidate missing",
