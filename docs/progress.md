@@ -15,7 +15,7 @@ checks, and merge events are canonical for completed work. Process details live 
 
 | ID | Deliverable | Owner | Branch / PR | Status | Evidence / next action |
 |---|---|---|---|---|---|
-| REPO-1 | Public README and repository hygiene | public repository polish worker | `codex/public-repo-polish` / PR pending | review requested | The README is 162 lines; approved historical files are removed; retained Markdown passes `9/14/0` file/link/fragment validation; the dataset audit passes `267/963/19`; 68 focused CLI tests, the documented seed/doctor smoke, full `make check`, and all six provider-free browser journeys pass. Push the immutable head, open the PR, then obtain independent exact-head review and reviewer-only merge. |
+| REPO-1 | Public README and repository hygiene | public repository polish worker | `codex/public-repo-polish` / [PR #46](https://github.com/JapmeetBrar/pufferlab/pull/46) | review requested | The README is 162 lines; approved historical files are removed; retained Markdown passes `9/14/0` file/link/fragment validation; the dataset audit passes `267/963/19`; 68 focused CLI tests, the documented seed/doctor smoke, full `make check`, and all six provider-free browser journeys pass. Independent exact-head review and reviewer-only merge are next. |
 
 ## Acceptance criteria
 
