@@ -91,7 +91,7 @@ test("provider-free synthetic dashboard journey is actionable, navigable, and ac
   const queryHeading = page.getByRole("heading", { name: "Query forensics", level: 1 });
   await expect(queryHeading).toBeFocused();
   await expect(page).toHaveURL(/\/playground\?run=/);
-  await expect(page.getByText("NOT_OBSERVABLE · original stages")).toBeVisible();
+  await expect(page.getByText("NOT_OBSERVABLE · original stages")).toHaveCount(0);
   await expect(page.getByText("Synthetic demo · replay disabled.")).toBeVisible();
   const judgments = page.getByRole("table", {
     name: "Judged documents and durable final ranks",
@@ -107,6 +107,10 @@ test("provider-free synthetic dashboard journey is actionable, navigable, and ac
   const close = dialog.getByRole("button", { name: "Close document evidence" });
   await expect(dialog).toBeVisible();
   await expect(close).toBeFocused();
+  await expect(dialog.getByRole("heading", { name: "Stored run evidence" })).toBeVisible();
+  await expect(dialog.getByText(/Judgment: Highly relevant \(grade 2\)/)).toBeVisible();
+  await expect(dialog.getByText(/Recorded final ranks:/)).toBeVisible();
+  await expect(dialog.getByText("NOT_OBSERVABLE · original stages")).toHaveCount(0);
   await page.keyboard.press("Tab");
   await expect(close).toBeFocused();
   await page.keyboard.press("Shift+Tab");
