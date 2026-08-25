@@ -93,6 +93,7 @@ def test_judged_document_titles_are_bounded_scoped_and_immutable(
     second_id = sample_graph.queries[1].qrels[0].document_id
     titles = {first_id: "First readable title", second_id: "Second readable title"}
 
+    assert repository.put_judged_document_titles(sample_graph.query_set.id, {}) == {}
     assert repository.put_judged_document_titles(sample_graph.query_set.id, titles) == titles
     assert repository.put_judged_document_titles(sample_graph.query_set.id, titles) == titles
     assert (
@@ -122,11 +123,15 @@ def test_judged_document_titles_are_bounded_scoped_and_immutable(
         )
     with pytest.raises(PersistenceValidationError, match="title is invalid"):
         repository.put_judged_document_titles(sample_graph.query_set.id, {first_id: "  "})
-    with pytest.raises(PersistenceValidationError, match="count exceeds"):
-        repository.get_judged_document_titles(
-            sample_graph.query_set.id,
-            [stable_uuid(f"requested-title-{index}") for index in range(101)],
-        )
+    with pytest.raises(RecordNotFoundError, match="was not found"):
+        repository.put_judged_document_titles(stable_uuid("missing-query-set"), {})
+    assert repository.get_judged_document_titles(
+        sample_graph.query_set.id,
+        [
+            *[stable_uuid(f"requested-title-{index}") for index in range(500)],
+            first_id,
+        ],
+    ) == {first_id: titles[first_id]}
     with pytest.raises(PersistenceValidationError, match="count exceeds"):
         repository.put_judged_document_titles(
             sample_graph.query_set.id,

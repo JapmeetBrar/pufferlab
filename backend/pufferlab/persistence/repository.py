@@ -51,7 +51,7 @@ _MAX_CATALOG_ROWS = 100
 _MAX_RUN_ROWS = 100
 _MAX_OUTCOME_ROWS = 200
 _MAX_QUERY_SET_JUDGED_DOCUMENT_TITLES = 5_000
-_MAX_QUERY_JUDGED_DOCUMENT_TITLES = 100
+_JUDGED_DOCUMENT_TITLE_QUERY_BATCH_SIZE = 500
 
 _ALLOWED_TRANSITIONS = {
     EvalRunStatus.QUEUED: {
@@ -253,12 +253,29 @@ class PufferLabRepository:
         with self._session_factory.begin() as session:
             if session.get(QuerySetRow, str(query_set_id)) is None:
                 raise RecordNotFoundError(f"query set {query_set_id} was not found")
-            judged_ids = {
-                UUID(value)
-                for value in session.scalars(
-                    select(QrelRow.document_id).where(QrelRow.query_set_id == str(query_set_id))
-                ).all()
-            }
+            if not normalized:
+                return {}
+            requested_ids = tuple(sorted(str(document_id) for document_id in normalized))
+            judged_ids: set[UUID] = set()
+            for batch_start in range(
+                0,
+                len(requested_ids),
+                _JUDGED_DOCUMENT_TITLE_QUERY_BATCH_SIZE,
+            ):
+                batch = requested_ids[
+                    batch_start : batch_start + _JUDGED_DOCUMENT_TITLE_QUERY_BATCH_SIZE
+                ]
+                judged_ids.update(
+                    UUID(value)
+                    for value in session.scalars(
+                        select(QrelRow.document_id)
+                        .distinct()
+                        .where(
+                            QrelRow.query_set_id == str(query_set_id),
+                            QrelRow.document_id.in_(batch),
+                        )
+                    ).all()
+                )
             if not set(normalized).issubset(judged_ids):
                 raise PersistenceValidationError(
                     "judged-document titles must reference qrels in the query set"
@@ -286,23 +303,30 @@ class PufferLabRepository:
         query_set_id: UUID,
         document_ids: Sequence[UUID],
     ) -> dict[UUID, str]:
-        """Load bounded provider-free title snapshots for the requested judged documents."""
-        if len(document_ids) > _MAX_QUERY_JUDGED_DOCUMENT_TITLES:
-            raise PersistenceValidationError("judged-document title count exceeds its bound")
-        requested = set(document_ids)
+        """Load provider-free title snapshots through fixed-size database reads."""
+        requested_ids = tuple(sorted({str(document_id) for document_id in document_ids}))
         with self._session_factory() as session:
             if session.get(QuerySetRow, str(query_set_id)) is None:
                 raise RecordNotFoundError(f"query set {query_set_id} was not found")
-            if not requested:
+            if not requested_ids:
                 return {}
-            rows = session.scalars(
-                select(JudgedDocumentTitleRow).where(
-                    JudgedDocumentTitleRow.query_set_id == str(query_set_id),
-                    JudgedDocumentTitleRow.document_id.in_(
-                        tuple(str(value) for value in requested)
-                    ),
+            rows: list[JudgedDocumentTitleRow] = []
+            for batch_start in range(
+                0,
+                len(requested_ids),
+                _JUDGED_DOCUMENT_TITLE_QUERY_BATCH_SIZE,
+            ):
+                batch = requested_ids[
+                    batch_start : batch_start + _JUDGED_DOCUMENT_TITLE_QUERY_BATCH_SIZE
+                ]
+                rows.extend(
+                    session.scalars(
+                        select(JudgedDocumentTitleRow).where(
+                            JudgedDocumentTitleRow.query_set_id == str(query_set_id),
+                            JudgedDocumentTitleRow.document_id.in_(batch),
+                        )
+                    ).all()
                 )
-            ).all()
             try:
                 return {
                     UUID(row.document_id): self._validate_document_title(row.title) for row in rows

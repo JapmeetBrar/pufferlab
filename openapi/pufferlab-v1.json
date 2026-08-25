@@ -1391,7 +1391,6 @@
             "items": {
               "$ref": "#/components/schemas/JudgedDocumentSummary"
             },
-            "maxItems": 100,
             "title": "Judged Documents",
             "type": "array"
           },

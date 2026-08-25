@@ -365,7 +365,7 @@ def test_query_detail_schema_uses_policy_permission_not_namespace_availability()
     properties = EvalRunQueryDetailResponse.model_json_schema()["properties"]
 
     assert "live_replay_policy_permitted" in properties
-    assert properties["judged_documents"]["maxItems"] == 100
+    assert "maxItems" not in properties["judged_documents"]
     assert "live_replay_allowed" not in properties
     assert "namespace_available" not in properties
 

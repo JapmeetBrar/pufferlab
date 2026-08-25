@@ -571,7 +571,7 @@ class EvalRunQueryDetailResponse(ContractModel):
     run_id: UUID
     data_origin: DataOrigin
     query: JudgedQuery
-    judged_documents: list[JudgedDocumentSummary] = Field(max_length=100)
+    judged_documents: list[JudgedDocumentSummary]
     baseline_config_id: UUID
     candidate_config_ids: list[UUID] = Field(min_length=3, max_length=3)
     configs: list[RetrievalConfigSummary] = Field(min_length=4, max_length=4)
