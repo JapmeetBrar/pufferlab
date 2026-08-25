@@ -884,7 +884,8 @@ CORS origin. The README contains a collision-safe preview procedure that avoids 
 3. Changing candidate/order/limit updates the URL and the table.
 4. **Inspect recorded query** opens an identity-only deep link.
 5. Selecting a document opens a forensic drawer; refresh and Back/Forward preserve the state.
-6. Original unavailable stage evidence is labeled `NOT_OBSERVABLE`.
+6. Opening a judged document keeps its readable judgment and recorded final ranks in view without an
+   extra original-stage warning.
 7. Synthetic timing is represented honestly rather than presented as provider latency.
 8. Live replay and diagnosis remain disabled because provider settings/evidence are not eligible.
 9. Opening and navigating stored evidence generates only read requests, not search comparisons.
@@ -1139,14 +1140,13 @@ Use this order:
    deltas.”
 4. **Open a regression:** “This deep link contains identities, not the query text, and refresh does
    not rerun search.”
-5. **Compare results:** identify a positive judgment, rank movement, and source labels.
-6. **Open the drawer:** point to `NOT_OBSERVABLE` where original stage evidence does not exist.
-7. **Describe replay:** “This would be a new explicitly requested observation, not a recreation of
-   the original.”
-8. **Describe expected-document diagnosis:** show the disabled/eligible action as appropriate and
-   explain the one-request bound, filter evidence, candidate membership, and eligible same-request
-   no-filter subquery.
-9. **Close with the real table:** “The observed winner depended on the workload, and the latency
+5. **Compare results:** identify a positive judgment and the recorded rank movement.
+6. **Open the drawer:** point to the same document's readable judgment and final ranks for the two
+   configurations.
+7. **Open the Playground when live search is configured:** compare the same regression query with
+   BM25 and Vector ANN. Explain that this is a qualitative follow-up to the judged metrics, not a
+   replacement for them.
+8. **Close with the real table:** “The observed winner depended on the workload, and the latency
    trade-off was visible. The next experiment comes from the regression evidence.”
 
 ### Demo recovery

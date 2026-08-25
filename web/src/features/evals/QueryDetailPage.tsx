@@ -196,14 +196,15 @@ function DrawerEvidence({
   const qrel = detail.query.qrels.find((item) => item.document_id === selection.document);
   const pair = [selection.left, selection.right];
   const targetObservations = replay?.observations.filter(
-    (item) => item.document_id === selection.document && pair.includes(item.config_id),
+    (item) => item.document_id === selection.document
+      && pair.includes(item.config_id)
+      && item.origin !== "stored_run",
   ) ?? [];
   const primaryObservations = targetObservations.filter((item) => item.origin === "live_replay_primary");
   const probeObservations = targetObservations.filter(
     (item) => item.origin === "live_replay_counterfactual_probe",
   );
   const computedObservations = targetObservations.filter((item) => item.origin === "client_computed");
-  const storedObservations = targetObservations.filter((item) => item.origin === "stored_run");
   const successfulProbes = replay?.counterfactual_probes.filter((probe) => pair.includes(probe.config_id)) ?? [];
   const failedProbes = (replay?.failed_counterfactual_probes ?? []).filter((probe) => pair.includes(probe.config_id));
 
@@ -219,14 +220,6 @@ function DrawerEvidence({
           {" "}{configName(detail, selection.left)} {finalRank(outcomeFor(detail, selection.left), selection.document) ?? "outside top 50"};
           {" "}{configName(detail, selection.right)} {finalRank(outcomeFor(detail, selection.right), selection.document) ?? "outside top 50"}.
         </p>
-        <div className="not-observable" role="note">
-          <strong>NOT_OBSERVABLE · original stages</strong>
-          <span>
-            The stored run did not persist stage membership, stage scores, provider plan, or cache state.
-            Final ranks and metrics remain recorded evidence; they are not stage proof.
-          </span>
-        </div>
-        {storedObservations.length > 0 && <ForensicEvidence observations={storedObservations} />}
       </section>
 
       {replay !== undefined && (
@@ -478,14 +471,6 @@ export function QueryDetailPage({
               <div><p className="eyebrow">Stored evidence</p><h2 id="durable-outcomes-heading">Recorded outcomes</h2></div>
             </div>
             <StoredOutcomes detail={detail} />
-            <div className="not-observable" role="note">
-              <strong>NOT_OBSERVABLE · original stages</strong>
-              <span>
-                The stored run preserves final outcomes, ranks, metrics, and judgments, but not stage
-                membership, stage scores, provider plan, or cache state. A new replay is a separate
-                observation and cannot reconstruct those original stages.
-              </span>
-            </div>
           </section>
 
           <section className="query-evidence-panel" aria-labelledby="judgments-heading">

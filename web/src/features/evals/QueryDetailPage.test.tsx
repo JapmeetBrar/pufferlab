@@ -90,8 +90,9 @@ describe("QueryDetailPage", () => {
     expect(within(judgments).getByText("Relevant")).toBeVisible();
     expect(within(judgments).getByText("Grade 2")).toBeVisible();
     expect(screen.getByText("A safe recorded failure.")).toBeVisible();
-    expect(screen.getByText(/NOT_OBSERVABLE · original stages/i)).toBeVisible();
+    expect(screen.queryByText(/NOT_OBSERVABLE · original stages/i)).not.toBeInTheDocument();
     expect(replayEvaluationRunQuery).not.toHaveBeenCalled();
+    expect(diagnoseExpectedDocument).not.toHaveBeenCalled();
     await waitFor(() => {
       expect(window.location.search).toBe(`?left=${baselineId}&right=${candidateIds[0]}`);
     });
@@ -247,6 +248,27 @@ describe("QueryDetailPage", () => {
   });
 
   it("renders every discriminated evidence kind for the exact target and traps drawer focus", async () => {
+    const storedUnavailability: (typeof replayResponse.observations)[number] = {
+      code: "not_observable",
+      statement: "Stored original-stage duplicate must stay hidden.",
+      config_id: baselineId,
+      document_id: documentId,
+      origin: "stored_run",
+      observed_at: null,
+      trace_id: null,
+      certainty: "insufficient",
+      evidence: [{
+        label: "original_stage_evidence",
+        value: { kind: "warning", code: "original_stage_evidence_unavailable" },
+        origin: "stored_run",
+        observed_at: null,
+        trace_id: null,
+      }],
+    };
+    vi.mocked(replayEvaluationRunQuery).mockResolvedValueOnce({
+      ...replayResponse,
+      observations: [...replayResponse.observations, storedUnavailability],
+    });
     renderPage();
     await screen.findByRole("heading", { name: "Judged documents" });
     const inspectButtons = screen.getAllByRole("button", { name: "Inspect document" });
@@ -258,7 +280,9 @@ describe("QueryDetailPage", () => {
     const close = within(drawer).getByRole("button", { name: "Close document evidence" });
     expect(close).toHaveFocus();
     expect(document.body.style.overflow).toBe("hidden");
-    expect(within(drawer).getByText(/NOT_OBSERVABLE · original stages/)).toBeVisible();
+    expect(within(drawer).getByText(/Judgment: Highly relevant \(grade 2\)/)).toBeVisible();
+    expect(within(drawer).getByText(/Recorded final ranks: BM25 1; Vector ANN 2\./)).toBeVisible();
+    expect(within(drawer).queryByText(/NOT_OBSERVABLE · original stages/)).not.toBeInTheDocument();
 
     fireEvent.click(close);
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
@@ -278,6 +302,8 @@ describe("QueryDetailPage", () => {
     expect(within(replayDrawer).getByText(/1 \/ \(60 \+ 3\)/)).toBeVisible();
     expect(within(replayDrawer).getAllByText(new RegExp(probeTrace)).length).toBeGreaterThan(0);
     expect(within(replayDrawer).getAllByText(/probe unavailable/i).length).toBeGreaterThan(0);
+    expect(within(replayDrawer).queryByText("Stored original-stage duplicate must stay hidden.")).not.toBeInTheDocument();
+    expect(within(replayDrawer).queryByText(/original stage evidence unavailable/i)).not.toBeInTheDocument();
 
     const replayClose = within(replayDrawer).getByRole("button", { name: "Close document evidence" });
     const diagnosticConfig = within(replayDrawer).getByLabelText("Configuration");
