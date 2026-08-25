@@ -11,6 +11,7 @@ import {
 } from "../../api/evaluations";
 import { AppLink, RouteHeading } from "../../app/router";
 import { navigate } from "../../app/routing";
+import { configLabel } from "../configLabels";
 import {
   OriginBadge,
   PageIntro,
@@ -88,8 +89,8 @@ function CreateRunPanel() {
         <p className="eyebrow">Canonical evaluation</p>
         <h2 id="create-run-heading">Start a 50-query run</h2>
         <p>
-          One baseline and three candidates produce 200 durable retrieval attempts. Live runs may
-          incur embedding and provider usage.
+          Runs 50 queries across one baseline and three candidates—200 recorded attempts. Live runs
+          may incur embedding and provider cost.
         </p>
       </div>
 
@@ -160,8 +161,7 @@ function CreateRunPanel() {
               {orderedConfigs.map((config, index) => (
                 <li key={config.id}>
                   <span>{index === 0 ? "Baseline" : `Candidate ${index}`}</span>
-                  <strong>{config.name}</strong>
-                  <small>{config.mode.replaceAll("_", " ")}</small>
+                  <strong>{configLabel(config)}</strong>
                 </li>
               ))}
             </ol>
@@ -169,8 +169,7 @@ function CreateRunPanel() {
 
           {synthetic && (
             <p className="synthetic-notice" role="note">
-              <strong>Synthetic demo · read-only.</strong> This authored offline dataset has no
-              provider timing. Starting a cost-bearing run is disabled.
+              <strong>Synthetic demo · read-only.</strong> No provider timing or live run creation.
             </p>
           )}
           {!synthetic && selectedDataset !== undefined && (
@@ -206,11 +205,10 @@ export function RunListPage({ routeKey }: { routeKey: string }) {
   return (
     <section className="dashboard-page">
       <div className="page-heading">
-        <p className="eyebrow">Durable evaluation history</p>
+        <p className="eyebrow">Evaluation history</p>
         <RouteHeading routeKey={routeKey}>Evaluation runs</RouteHeading>
         <PageIntro>
-          Treat search-quality changes like code changes: inspect persisted metrics, coverage, and
-          per-query regressions before shipping.
+          Compare recorded quality, coverage, and per-query regressions before shipping.
         </PageIntro>
       </div>
 
@@ -261,15 +259,15 @@ export function RunListPage({ routeKey }: { routeKey: string }) {
                       </AppLink>
                       <span className="run-id">{view.run.id}</span>
                       <span className="config-line">
-                        {view.configs.map((config) => config.name).join(" · ")}
+                        {view.configs.map(configLabel).join(" · ")}
                       </span>
                     </th>
                     <td><StatusBadge status={view.run.status} /></td>
                     <td>
                       <strong>{view.run.completed_queries} / {view.run.total_queries}</strong>
-                      <span className="table-subcopy">query groups</span>
+                      <span className="table-subcopy">queries</span>
                       <span className="table-subcopy">
-                        {view.completed_attempts} / {view.total_attempts} durable attempts
+                        {view.completed_attempts} / {view.total_attempts} attempts recorded
                       </span>
                     </td>
                     <td><OriginBadge origin={view.data_origin} /></td>

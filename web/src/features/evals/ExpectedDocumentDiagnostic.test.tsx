@@ -51,7 +51,7 @@ function renderDiagnostic(props: Partial<Props> = {}) {
 }
 
 function selectAndConfirm(configId: string, includeNoFilter = false) {
-  fireEvent.change(screen.getByLabelText("Diagnostic configuration"), {
+  fireEvent.change(screen.getByLabelText("Configuration"), {
     target: { value: configId },
   });
   if (includeNoFilter) {
@@ -88,11 +88,11 @@ describe("ExpectedDocumentDiagnostic", () => {
   ] as const)("discloses exact normal and no-filter bounds for config %s", (configId, normal, noFilter) => {
     renderDiagnostic();
 
-    expect(screen.getByLabelText("Diagnostic configuration")).toHaveValue("");
+    expect(screen.getByLabelText("Configuration")).toHaveValue("");
     expect(screen.getByRole("button", { name: "Run expected-document diagnostic" })).toBeDisabled();
     expect(diagnoseExpectedDocument).not.toHaveBeenCalled();
 
-    fireEvent.change(screen.getByLabelText("Diagnostic configuration"), {
+    fireEvent.change(screen.getByLabelText("Configuration"), {
       target: { value: configId },
     });
     expect(screen.getByText(new RegExp(`exactly ${normal} ordered subqueries`, "i"))).toBeVisible();
@@ -114,7 +114,7 @@ describe("ExpectedDocumentDiagnostic", () => {
     renderDiagnostic(props);
 
     expect(screen.getByText(copy, { exact: false })).toBeVisible();
-    expect(screen.queryByLabelText("Diagnostic configuration")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Configuration")).not.toBeInTheDocument();
     expect(diagnoseExpectedDocument).not.toHaveBeenCalled();
   });
 
@@ -123,7 +123,7 @@ describe("ExpectedDocumentDiagnostic", () => {
     const option = screen.getByLabelText("Include a same-request no-filter counterfactual");
     expect(option).toBeDisabled();
     expect(screen.getByText(/no-filter option is ineligible/i)).toBeVisible();
-    fireEvent.change(screen.getByLabelText("Diagnostic configuration"), {
+    fireEvent.change(screen.getByLabelText("Configuration"), {
       target: { value: baselineId },
     });
     expect(screen.getByText(/exactly 2 ordered subqueries/i)).toBeVisible();
@@ -131,9 +131,9 @@ describe("ExpectedDocumentDiagnostic", () => {
 
   it.each([
     [baselineId, "BM25", 2],
-    [candidateIds[0], "Vector", 2],
+    [candidateIds[0], "Vector ANN", 2],
     [candidateIds[1], "Hybrid RRF", 3],
-    [candidateIds[2], "Hybrid rerank", 3],
+    [candidateIds[2], "Hybrid + local cross-encoder", 3],
   ] as const)("runs %s only after fresh confirmation and renders typed evidence", async (configId, mode, count) => {
     renderDiagnostic();
     runDiagnostic(configId);
@@ -150,12 +150,12 @@ describe("ExpectedDocumentDiagnostic", () => {
     expect(originNotice).not.toBeNull();
     expect(originNotice).toHaveTextContent(mode);
     expect(originNotice).toHaveTextContent(`${count} ordered subqueries`);
-    expect(screen.getByRole("heading", { name: "Exact selected-target lookup" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Exact target lookup" })).toBeVisible();
     expect(screen.getByRole("heading", { name: "Stored-query candidates" })).toBeVisible();
     expect(screen.getByLabelText("I understand this starts cost-bearing provider work.")).not.toBeChecked();
     expect(screen.getByRole("button", { name: "Run expected-document diagnostic" })).toBeDisabled();
     if (mode.startsWith("Hybrid")) {
-      expect(screen.getByRole("heading", { name: "Qualified client-computed RRF" })).toBeVisible();
+      expect(screen.getByRole("heading", { name: "Client-computed RRF" })).toBeVisible();
       expect(screen.getByText(/not observed server RRF, reranker, or final-order evidence/i)).toBeVisible();
     }
   });
@@ -167,14 +167,14 @@ describe("ExpectedDocumentDiagnostic", () => {
     renderDiagnostic();
     runDiagnostic(baselineId, true);
 
-    expect(await screen.findByRole("heading", { name: "Same-request no-filter counterfactual candidates" })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "No-filter counterfactual candidates" })).toBeVisible();
     expect(screen.getByText(/do not establish why the stored-query candidate lists differ/i)).toBeVisible();
     expect(screen.getByText(/Aggregate result:/)).toHaveTextContent("not matched");
     expect(screen.getByText(/Predicate 1 · not matched/)).toBeVisible();
     expect(screen.getByText(/Predicate and observed attribute values are intentionally omitted/)).toBeVisible();
     expect(screen.getAllByText(/no filter counterfactual/i).length).toBeGreaterThan(0);
     const counterfactual = screen.getByRole("heading", {
-      name: "Same-request no-filter counterfactual candidates",
+      name: "No-filter counterfactual candidates",
     }).closest("section");
     expect(counterfactual).not.toBeNull();
     expect(within(counterfactual!).getByText("counterfactual")).toBeVisible();
@@ -297,7 +297,7 @@ describe("ExpectedDocumentDiagnostic", () => {
     renderDiagnostic();
     runDiagnostic(candidateIds[1]);
     await waitFor(() => expect(signal).toBeDefined());
-    expect(screen.getByLabelText("Diagnostic configuration")).toBeEnabled();
+    expect(screen.getByLabelText("Configuration")).toBeEnabled();
     expect(screen.getByLabelText("Include a same-request no-filter counterfactual")).toBeEnabled();
 
     fireEvent.click(screen.getByLabelText("Include a same-request no-filter counterfactual"));
@@ -346,7 +346,7 @@ describe("ExpectedDocumentDiagnostic", () => {
         view.rerender(<ExpectedDocumentDiagnostic {...baseProps} configs={evaluationConfigs.slice(0, 3)} />);
         break;
       case "selected-config":
-        fireEvent.change(screen.getByLabelText("Diagnostic configuration"), {
+        fireEvent.change(screen.getByLabelText("Configuration"), {
           target: { value: candidateIds[0] },
         });
         break;
@@ -363,7 +363,7 @@ describe("ExpectedDocumentDiagnostic", () => {
       expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     });
     expect(diagnoseExpectedDocument).toHaveBeenCalledTimes(1);
-    expect(screen.getByLabelText("Diagnostic configuration")).toHaveValue(
+    expect(screen.getByLabelText("Configuration")).toHaveValue(
       boundary === "selected-config" ? candidateIds[0] : boundary === "option" ? baselineId : "",
     );
     expect(screen.getByLabelText("I understand this starts cost-bearing provider work.")).not.toBeChecked();

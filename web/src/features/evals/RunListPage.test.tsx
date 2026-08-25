@@ -107,7 +107,7 @@ describe("RunListPage", () => {
     for (const label of ["Queued", "Running", "Completed", "Failed", "Cancelled", "Interrupted"]) {
       expect(within(table).getByText(label)).toBeVisible();
     }
-    expect(within(table).getAllByText(/durable attempts/)).toHaveLength(6);
+    expect(within(table).getAllByText(/attempts recorded/)).toHaveLength(6);
   });
 
   it("labels synthetic data and prevents every create mutation", async () => {
@@ -119,7 +119,7 @@ describe("RunListPage", () => {
     renderPage();
 
     expect(await screen.findAllByText("Synthetic demo")).not.toHaveLength(0);
-    expect(screen.getByText(/authored offline dataset has no provider timing/i)).toBeVisible();
+    expect(screen.getByText(/No provider timing or live run creation/i)).toBeVisible();
     const start = screen.getByRole("button", { name: "Start evaluation run" });
     expect(start).toBeDisabled();
     fireEvent.click(start);

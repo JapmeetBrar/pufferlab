@@ -9,6 +9,7 @@ import {
 } from "../../api/evaluations";
 import { AppLink, RouteHeading } from "../../app/router";
 import { navigate } from "../../app/routing";
+import { configLabel } from "../configLabels";
 import {
   type MetricAggregate,
   MetricValue,
@@ -34,8 +35,8 @@ const metricLabels: Record<MetricAggregate["name"], string> = {
   "ndcg@10": "NDCG@10",
   "recall@50": "Recall@50",
   "mrr@10": "MRR@10",
-  latency_p50_ms: "p50 client wall",
-  latency_p95_ms: "p95 client wall",
+  latency_p50_ms: "p50 latency",
+  latency_p95_ms: "p95 latency",
   error_rate: "Error rate",
 };
 
@@ -96,7 +97,7 @@ function MetricsTable({
   return (
     <>
       <div className="metric-context" role="note">
-        <strong>{complete ? "Final durable metrics" : "Partial durable metrics · not final"}</strong>
+        <strong>{complete ? "Final metrics" : "Partial metrics · not final"}</strong>
         <span>
           Latency is observed PufferLab client-wall time, not provider service time or a benchmark.
         </span>
@@ -118,8 +119,7 @@ function MetricsTable({
               return (
                 <tr key={config.id}>
                   <th scope="row">
-                    {config.name}
-                    <span className="table-subcopy">{config.mode.replaceAll("_", " ")}</span>
+                    {configLabel(config)}
                     {summary !== undefined && (
                       <span className="table-subcopy">
                         {summary.completed_queries} completed · {summary.failed_queries} failed
@@ -209,11 +209,14 @@ function RegressionSection({
                 value={query.candidate_config_id}
                 onChange={(event) => updateUrl({ candidate: event.target.value })}
               >
-                {view.run.candidate_config_ids.map((configId) => (
-                  <option key={configId} value={configId}>
-                    {configById.get(configId)?.name ?? configId}
-                  </option>
-                ))}
+                {view.run.candidate_config_ids.map((configId) => {
+                  const config = configById.get(configId);
+                  return (
+                    <option key={configId} value={configId}>
+                      {config === undefined ? configId : configLabel(config)}
+                    </option>
+                  );
+                })}
               </select>
             </label>
             <label>
@@ -289,8 +292,8 @@ function RegressionSection({
                         <th scope="col">NDCG@10</th>
                         <th scope="col">Recall delta</th>
                         <th scope="col">MRR delta</th>
-                        <th scope="col">Client-wall latency</th>
-                        <th scope="col">Relevant movement</th>
+                        <th scope="col">Latency · client wall</th>
+                        <th scope="col">Judged rank changes</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -351,13 +354,12 @@ export function RunDetailPage({
   return (
     <section className="dashboard-page run-detail-page">
       <div className="page-heading compact-heading">
-        <p className="eyebrow">Durable evaluation record</p>
+        <p className="eyebrow">Evaluation record</p>
         <RouteHeading routeKey={routeKey}>
           {requestError?.status === 404 ? "Run not found" : "Evaluation run"}
         </RouteHeading>
         <PageIntro>
-          Recorded progress and metrics come from SQLite. Opening or refreshing this page never
-          performs provider work.
+          This page reads SQLite only; opening or refreshing it does not contact the provider.
         </PageIntro>
       </div>
 
@@ -365,7 +367,7 @@ export function RunDetailPage({
       {run.isError && requestError?.status === 404 && (
         <div className="dashboard-empty" role="alert">
           <h2>No run matches this URL</h2>
-          <p>The durable run may not exist in this local database.</p>
+          <p>The run may not exist in this local database.</p>
           <AppLink href="/runs">Return to run history</AppLink>
         </div>
       )}
@@ -393,7 +395,7 @@ export function RunDetailPage({
             <div className="progress-card">
               <label htmlFor="run-query-progress">
                 <strong>{view.run.completed_queries} of {view.run.total_queries}</strong>
-                <span>durable query groups</span>
+                <span>queries</span>
               </label>
               <progress
                 id="run-query-progress"
@@ -401,8 +403,8 @@ export function RunDetailPage({
                 value={view.run.completed_queries}
               />
               <p aria-live="polite" role="status">
-                {view.run.completed_queries} of {view.run.total_queries} query groups complete;
-                {" "}{view.completed_attempts} of {view.total_attempts} attempts durable.
+                {view.run.completed_queries} of {view.run.total_queries} queries complete;
+                {" "}{view.completed_attempts} of {view.total_attempts} attempts recorded.
                 {isActiveStatus(view.run.status) ? " Progress refreshes automatically." : " Polling stopped."}
               </p>
             </div>
@@ -420,9 +422,8 @@ export function RunDetailPage({
             )}
             {view.data_origin === "synthetic_demo" ? (
               <p className="synthetic-notice" role="note">
-                <strong>Synthetic demo · read-only.</strong> Quality is recomputed from authored
-                judgments and ranks. Timing is unavailable because no live requests occurred;
-                create and replay actions are disabled.
+                <strong>Synthetic demo · read-only.</strong> Quality comes from authored judgments
+                and ranks; timing and live actions are unavailable.
               </p>
             ) : (
               <p className="evidence-policy" role="note">
@@ -437,7 +438,7 @@ export function RunDetailPage({
             <div className="section-heading-row">
               <div>
                 <p className="eyebrow">Aggregate evidence</p>
-                <h2 id="metrics-heading">Quality and client timing</h2>
+                <h2 id="metrics-heading">Quality and latency</h2>
               </div>
             </div>
             <MetricsTable view={view} />

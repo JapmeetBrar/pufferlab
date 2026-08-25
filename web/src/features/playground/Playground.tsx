@@ -10,6 +10,7 @@ import {
   type RetrievalConfigListResponse,
   type SearchCompareRequest,
 } from "../../api/client";
+import { configLabel } from "../configLabels";
 import { ComparisonResults } from "./ComparisonResults";
 import { currentCapabilityReadiness } from "./capabilityState";
 
@@ -68,10 +69,6 @@ const actionGuidance: Record<CapabilityAction, { heading: string; instruction: s
     command: "uv run pufferlab namespace show-tiny",
   },
 };
-
-function configLabel(config: Config): string {
-  return `${config.name} · ${config.mode.replaceAll("_", " ")}`;
-}
 
 function selectedConfigId(
   requestedId: string,
@@ -181,8 +178,7 @@ export function Playground() {
             One query. Two retrieval instincts.
           </h1>
           <p className="lede">
-            Put exact-token matching next to semantic similarity and inspect only what the system
-            actually observed.
+            Compare exact-token and semantic retrieval using observed evidence.
           </p>
         </div>
         <form className="query-console" onSubmit={submit}>
@@ -238,12 +234,12 @@ export function Playground() {
           </div>
           {locallyConfigured && configs.isPending && (
             <p className="connection-message" role="status">
-              Loading retrieval configurations…
+              Loading configurations…
             </p>
           )}
           {locallyConfigured && configs.isError && (
             <div className="config-error" role="alert">
-              <span>Retrieval configurations are unavailable.</span>
+              <span>Configurations are unavailable.</span>
               <button type="button" onClick={() => void configs.refetch()}>
                 Retry
               </button>
@@ -251,7 +247,7 @@ export function Playground() {
           )}
           {locallyConfigured && configs.isSuccess && availableConfigs.length === 0 && (
             <div className="config-error" role="status">
-              <span>No retrieval configurations have been seeded yet.</span>
+              <span>No configurations have been seeded.</span>
               <button type="button" onClick={() => void configs.refetch()}>
                 Check again
               </button>
@@ -265,10 +261,10 @@ export function Playground() {
               comparison.isPending
             }
           >
-            <legend>Configurations to compare</legend>
+            <legend>Compare configurations</legend>
             <div className="config-grid">
               <label>
-                <span>Left result set</span>
+                <span>Left</span>
                 <select
                   value={resolvedLeftId}
                   onChange={(event) => setLeftConfigId(event.target.value)}
@@ -284,7 +280,7 @@ export function Playground() {
                 vs
               </span>
               <label>
-                <span>Right result set</span>
+                <span>Right</span>
                 <select
                   value={resolvedRightId}
                   onChange={(event) => setRightConfigId(event.target.value)}
@@ -302,7 +298,7 @@ export function Playground() {
             <button className="compare-button" type="submit" disabled={!canCompare}>
               {comparison.isPending ? "Comparing…" : "Compare results"}
             </button>
-            <p>Query and config choices are saved in the copyable page URL.</p>
+            <p>Query and configs are saved in this URL.</p>
           </div>
           <div className="visually-hidden" role="status" aria-live="polite">
             {comparison.isPending && "Comparison is loading."}

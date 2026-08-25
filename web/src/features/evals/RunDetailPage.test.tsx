@@ -63,7 +63,7 @@ describe("RunDetailPage", () => {
 
     expect(screen.getByRole("heading", { name: "Evaluation run", level: 1 })).toHaveFocus();
     expect(await screen.findByText("Completed", { selector: ".status-badge" })).toBeVisible();
-    expect(screen.getByText(/Quality is recomputed from authored judgments and ranks/)).toBeVisible();
+    expect(screen.getByText(/Quality comes from authored judgments and ranks/)).toBeVisible();
     expect(screen.getByText(/not provider service time or a benchmark/)).toBeVisible();
     const metrics = screen.getByRole("table", { name: "Final metrics by retrieval configuration" });
     expect(within(metrics).getAllByText("Unavailable")).toHaveLength(8);
@@ -109,7 +109,7 @@ describe("RunDetailPage", () => {
           selector: ".status-badge",
         }),
       ).toBeVisible();
-      expect(screen.getByRole("progressbar", { name: /durable query groups/i })).toBeVisible();
+      expect(screen.getByRole("progressbar", { name: /queries/i })).toBeVisible();
       expect(
         screen.getByText(
           status === "queued" || status === "running"
@@ -127,8 +127,8 @@ describe("RunDetailPage", () => {
 
     renderPage();
 
-    expect(await screen.findByText("Partial durable metrics · not final")).toBeVisible();
-    expect(screen.queryByText("Final durable metrics")).not.toBeInTheDocument();
+    expect(await screen.findByText("Partial metrics · not final")).toBeVisible();
+    expect(screen.queryByText("Final metrics")).not.toBeInTheDocument();
     expect(screen.getByRole("table", { name: "Partial metrics by retrieval configuration" })).toBeVisible();
   });
 
