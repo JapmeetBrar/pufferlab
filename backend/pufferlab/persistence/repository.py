@@ -1,7 +1,7 @@
 """Transaction-scoped repositories for immutable revisions and eval lifecycle state."""
 
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -30,6 +30,7 @@ from pufferlab.persistence.errors import (
 from pufferlab.persistence.models import (
     DatasetVersionRow,
     EvalRunRow,
+    JudgedDocumentTitleRow,
     JudgedQueryRow,
     QrelRow,
     QueryOutcomeRow,
@@ -49,6 +50,8 @@ _TERMINAL_STATUSES = {
 _MAX_CATALOG_ROWS = 100
 _MAX_RUN_ROWS = 100
 _MAX_OUTCOME_ROWS = 200
+_MAX_QUERY_SET_JUDGED_DOCUMENT_TITLES = 5_000
+_MAX_QUERY_JUDGED_DOCUMENT_TITLES = 100
 
 _ALLOWED_TRANSITIONS = {
     EvalRunStatus.QUEUED: {
@@ -234,6 +237,80 @@ class PufferLabRepository:
             if row is None:
                 raise RecordNotFoundError(f"query set {query_set_id} was not found")
             return self._load_query_set(session, row)
+
+    def put_judged_document_titles(
+        self,
+        query_set_id: UUID,
+        titles: Mapping[UUID, str],
+    ) -> dict[UUID, str]:
+        """Idempotently attach immutable display titles to documents judged in one query set."""
+        if len(titles) > _MAX_QUERY_SET_JUDGED_DOCUMENT_TITLES:
+            raise PersistenceValidationError("judged-document title count exceeds its bound")
+        normalized = {
+            document_id: self._validate_document_title(title)
+            for document_id, title in titles.items()
+        }
+        with self._session_factory.begin() as session:
+            if session.get(QuerySetRow, str(query_set_id)) is None:
+                raise RecordNotFoundError(f"query set {query_set_id} was not found")
+            judged_ids = {
+                UUID(value)
+                for value in session.scalars(
+                    select(QrelRow.document_id).where(QrelRow.query_set_id == str(query_set_id))
+                ).all()
+            }
+            if not set(normalized).issubset(judged_ids):
+                raise PersistenceValidationError(
+                    "judged-document titles must reference qrels in the query set"
+                )
+            for document_id, title in normalized.items():
+                identity = (str(query_set_id), str(document_id))
+                existing = session.get(JudgedDocumentTitleRow, identity)
+                if existing is not None:
+                    if existing.title != title:
+                        raise ImmutableRecordError(
+                            f"judged-document title {document_id} is immutable"
+                        )
+                    continue
+                session.add(
+                    JudgedDocumentTitleRow(
+                        query_set_id=str(query_set_id),
+                        document_id=str(document_id),
+                        title=title,
+                    )
+                )
+        return normalized
+
+    def get_judged_document_titles(
+        self,
+        query_set_id: UUID,
+        document_ids: Sequence[UUID],
+    ) -> dict[UUID, str]:
+        """Load bounded provider-free title snapshots for the requested judged documents."""
+        if len(document_ids) > _MAX_QUERY_JUDGED_DOCUMENT_TITLES:
+            raise PersistenceValidationError("judged-document title count exceeds its bound")
+        requested = set(document_ids)
+        with self._session_factory() as session:
+            if session.get(QuerySetRow, str(query_set_id)) is None:
+                raise RecordNotFoundError(f"query set {query_set_id} was not found")
+            if not requested:
+                return {}
+            rows = session.scalars(
+                select(JudgedDocumentTitleRow).where(
+                    JudgedDocumentTitleRow.query_set_id == str(query_set_id),
+                    JudgedDocumentTitleRow.document_id.in_(
+                        tuple(str(value) for value in requested)
+                    ),
+                )
+            ).all()
+            try:
+                return {
+                    UUID(row.document_id): self._validate_document_title(row.title) for row in rows
+                }
+            except ValueError:
+                raise PersistenceValidationError(
+                    "stored judged-document title payload is invalid"
+                ) from None
 
     def get_query_set_revision(self, query_set_id: UUID) -> QuerySet:
         """Return query-set metadata without loading licensed query text or qrels."""
@@ -664,6 +741,12 @@ class PufferLabRepository:
                 "stored judged-query count does not match the query-set payload"
             )
         return value, queries
+
+    @staticmethod
+    def _validate_document_title(value: str) -> str:
+        if not isinstance(value, str) or not value.strip() or len(value) > 512:
+            raise PersistenceValidationError("judged-document title is invalid")
+        return value
 
     @staticmethod
     def _load_judged_query(session: Session, row: JudgedQueryRow) -> JudgedQuery:

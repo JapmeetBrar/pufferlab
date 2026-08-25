@@ -129,22 +129,30 @@ def test_rerun_is_byte_identical_and_does_not_duplicate_rows(tmp_path: Path) -> 
                 "retrieval_configs",
                 "query_sets",
                 "judged_queries",
+                "judged_document_titles",
                 "qrels",
                 "eval_runs",
                 "run_configs",
                 "query_outcomes",
             )
         }
+        stored_titles = {
+            row[0]
+            for row in connection.execute("SELECT title FROM judged_document_titles").fetchall()
+        }
     assert counts == {
         "dataset_versions": 1,
         "retrieval_configs": 4,
         "query_sets": 1,
         "judged_queries": 50,
+        "judged_document_titles": 60,
         "qrels": 100,
         "eval_runs": 1,
         "run_configs": 4,
         "query_outcomes": 200,
     }
+    assert "Synthetic troubleshooting note 001" in stored_titles
+    assert "Synthetic troubleshooting note 060" in stored_titles
 
 
 def test_quality_is_recomputed_from_authored_ranks_and_qrels() -> None:

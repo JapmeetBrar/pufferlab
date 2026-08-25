@@ -120,6 +120,12 @@ def test_builder_preserves_grades_curation_metadata_and_contract_native_seed(
         assert curated.primary_tag in curated.tags
         assert curated.reason.startswith("Selected")
     assert any(qrel.relevance_grade > 1 for judged in first.judged_queries for qrel in judged.qrels)
+    title_by_document_id = dict(first.judged_document_titles)
+    judged_document_ids = {
+        qrel.document_id for judged in first.judged_queries for qrel in judged.qrels
+    }
+    assert set(title_by_document_id) == judged_document_ids
+    assert all(title.strip() for title in title_by_document_id.values())
 
     database = Database(tmp_path / "seed.sqlite3")
     database.migrate()

@@ -9,12 +9,12 @@ function focusableElements(container: HTMLElement): HTMLElement[] {
 }
 
 export function ForensicDrawer({
-  documentId,
+  documentLabel,
   onClose,
   returnFocusRef,
   children,
 }: {
-  documentId: string;
+  documentLabel: string;
   onClose: () => void;
   returnFocusRef: RefObject<HTMLElement | null>;
   children: ReactNode;
@@ -68,7 +68,7 @@ export function ForensicDrawer({
           <div>
             <p className="eyebrow">Exact document target</p>
             <h2 id="forensic-drawer-heading">Document evidence</h2>
-            <p className="drawer-document-id">{documentId}</p>
+            <p className="drawer-document-title">{documentLabel}</p>
           </div>
           <button ref={closeRef} type="button" onClick={onClose} aria-label="Close document evidence">
             Close

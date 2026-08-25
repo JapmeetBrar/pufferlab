@@ -45,6 +45,7 @@ from pufferlab.contracts.evals import (
     EvalRunView,
     EvalSuccessPayload,
     ExcludedPairCount,
+    JudgedDocumentSummary,
     JudgedQuery,
     QuerySet,
     QuerySetSummary,
@@ -552,6 +553,10 @@ class EvaluationViewService:
                 message="query was not found in the requested evaluation run",
                 operation="get_query_detail",
             )
+        judged_document_titles = self._repository.get_judged_document_titles(
+            query_set.id,
+            [qrel.document_id for qrel in query.qrels],
+        )
         records_by_config = {
             record.config_id: record for record in context.outcomes if record.query_id == query.id
         }
@@ -569,6 +574,13 @@ class EvaluationViewService:
             run_id=context.run.id,
             data_origin=context.dataset.data_origin,
             query=query,
+            judged_documents=[
+                JudgedDocumentSummary(
+                    document_id=qrel.document_id,
+                    title=judged_document_titles.get(qrel.document_id),
+                )
+                for qrel in query.qrels
+            ],
             baseline_config_id=context.run.baseline_config_id,
             candidate_config_ids=list(context.run.candidate_config_ids),
             configs=[self._config_summary(config) for config in context.configs],

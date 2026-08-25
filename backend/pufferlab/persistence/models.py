@@ -93,6 +93,16 @@ class QrelRow(Base):
     )
 
 
+class JudgedDocumentTitleRow(Base):
+    __tablename__ = "judged_document_titles"
+
+    query_set_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("query_sets.id", ondelete="CASCADE"), primary_key=True
+    )
+    document_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    title: Mapped[str] = mapped_column(String(512), nullable=False)
+
+
 class EvalRunRow(Base):
     __tablename__ = "eval_runs"
 

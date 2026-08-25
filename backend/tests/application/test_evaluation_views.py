@@ -538,12 +538,19 @@ def test_regressions_use_durable_pairing_and_exact_qrels_through_rank_50(
     assert row.relevant_rank_changes[0].candidate_rank == 11
     assert "Safe test query" not in row.playground_url
 
+    judged_document_id = graph.queries[0].qrels[0].document_id
+    repository.put_judged_document_titles(
+        graph.query_set.id,
+        {judged_document_id: "Readable judged document title"},
+    )
     detail = service.get_query_detail(completed.id, graph.queries[0].id)
     assert [record.config_id for record in detail.outcomes] == [
         config.id for config in graph.configs
     ]
     assert detail.rank_changes[0].changes[0].baseline_rank == 50
     assert detail.rank_changes[0].changes[0].candidate_rank == 11
+    assert detail.judged_documents[0].document_id == judged_document_id
+    assert detail.judged_documents[0].title == "Readable judged document title"
     with pytest.raises(EvaluationViewError) as not_found:
         service.get_query_detail(completed.id, _id("foreign-query"))
     assert not_found.value.http_status == 404

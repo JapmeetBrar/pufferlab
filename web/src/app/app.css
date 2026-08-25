@@ -247,6 +247,7 @@ h1:focus-visible { outline: 3px solid #48690f; outline-offset: 7px; }
 .query-outcome-table tbody tr:last-child > *, .judgment-table tbody tr:last-child > * { border-bottom: 0; }
 .query-outcome-table td, .judgment-table td { font-size: 12px; }
 .document-id-cell { max-width: 260px; overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; }
+.document-title-cell { max-width: 320px; overflow-wrap: anywhere; font-size: 12px; }
 .judgment-table button { min-height: 44px; padding: 0 12px; border: 1px solid #829674; border-radius: 8px; color: #365d10; background: #f7faef; font-weight: 720; cursor: pointer; }
 .rank-change-groups { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 18px; }
 .rank-change-groups section { min-width: 0; padding: 16px; border: 1px solid #d7dbd2; border-radius: 10px; background: #f5f6ef; }
@@ -273,7 +274,7 @@ h1:focus-visible { outline: 3px solid #48690f; outline-offset: 7px; }
 .forensic-drawer { display: flex; width: min(34rem, 100%); min-width: 0; max-height: 100dvh; flex-direction: column; color: #18211b; background: #fbfaf3; box-shadow: -18px 0 55px rgb(11 18 13 / 23%); }
 .drawer-header { display: flex; flex: none; gap: 18px; align-items: flex-start; justify-content: space-between; padding: 20px; border-bottom: 1px solid #d4d8cf; background: #f3f5ec; }
 .drawer-header h2 { margin: 0; font-family: Georgia, "Times New Roman", serif; font-size: 31px; font-weight: 400; letter-spacing: -.03em; }
-.drawer-document-id { max-width: 35ch; margin: 7px 0 0; overflow-wrap: anywhere; color: #667068; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; }
+.drawer-document-title { max-width: 42ch; margin: 7px 0 0; overflow-wrap: anywhere; color: #667068; font-size: 12px; }
 .drawer-header button { min-width: 64px; min-height: 44px; padding: 0 11px; border: 1px solid #718168; border-radius: 8px; color: #263b24; background: #fffef9; font-weight: 720; cursor: pointer; }
 .drawer-body { min-width: 0; padding: 20px; overflow: auto; overscroll-behavior: contain; }
 .drawer-section { min-width: 0; padding-bottom: 22px; margin-bottom: 22px; border-bottom: 1px solid #d6dad2; }

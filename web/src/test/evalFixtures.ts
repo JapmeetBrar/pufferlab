@@ -292,6 +292,10 @@ export function queryDetail(
         ? { kind: "predicate", field: "category", op: "eq", value: "authored-filter-value" }
         : null,
     },
+    judged_documents: [
+      { document_id: documentId, title: "Authored relevant document" },
+      { document_id: secondDocumentId, title: "Authored secondary document" },
+    ],
     baseline_config_id: baselineId,
     candidate_config_ids: [...candidateIds],
     configs: evaluationConfigs,

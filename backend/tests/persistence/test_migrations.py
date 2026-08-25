@@ -15,6 +15,7 @@ APPLICATION_TABLES = {
     "retrieval_configs",
     "query_sets",
     "judged_queries",
+    "judged_document_titles",
     "qrels",
     "eval_runs",
     "run_configs",

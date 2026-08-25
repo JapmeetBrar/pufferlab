@@ -80,6 +80,15 @@ describe("QueryDetailPage", () => {
     expect(screen.getByRole("heading", { name: "Query forensics", level: 1 })).toHaveFocus();
     expect(await screen.findByRole("heading", { name: "authored local query text" })).toBeVisible();
     expect(screen.getByRole("table", { name: "Durable outcomes for the recorded query" })).toBeVisible();
+    const judgments = screen.getByRole("table", {
+      name: "Judged documents and durable final ranks",
+    });
+    expect(within(judgments).getByText("Authored relevant document")).toBeVisible();
+    expect(within(judgments).getByText("Authored secondary document")).toBeVisible();
+    expect(within(judgments).queryByText(documentId)).not.toBeInTheDocument();
+    expect(within(judgments).getByText("Highly relevant")).toBeVisible();
+    expect(within(judgments).getByText("Relevant")).toBeVisible();
+    expect(within(judgments).getByText("Grade 2")).toBeVisible();
     expect(screen.getByText("A safe recorded failure.")).toBeVisible();
     expect(screen.getByText(/NOT_OBSERVABLE · original stages/i)).toBeVisible();
     expect(replayEvaluationRunQuery).not.toHaveBeenCalled();
@@ -97,6 +106,23 @@ describe("QueryDetailPage", () => {
     expect(screen.queryByRole("button", { name: /run live replay/i })).not.toBeInTheDocument();
     expect(replayEvaluationRunQuery).not.toHaveBeenCalled();
     expect(diagnoseExpectedDocument).not.toHaveBeenCalled();
+  });
+
+  it("falls back safely when an older catalog has no stored document title", async () => {
+    const detail = queryDetail();
+    vi.mocked(getEvaluationRunQuery).mockResolvedValue({
+      ...detail,
+      judged_documents: detail.judged_documents.map((document, index) => index === 0
+        ? { ...document, title: null }
+        : document),
+    });
+    renderPage();
+
+    const judgments = await screen.findByRole("table", {
+      name: "Judged documents and durable final ranks",
+    });
+    expect(within(judgments).getByText("Title unavailable")).toBeVisible();
+    expect(within(judgments).getByText(documentId)).toBeVisible();
   });
 
   it("keeps live replay unavailable when the durable origin policy denies it", async () => {
@@ -117,6 +143,7 @@ describe("QueryDetailPage", () => {
     await screen.findByRole("heading", { name: "Judged documents" });
     fireEvent.click(screen.getAllByRole("button", { name: "Inspect document" })[0]!);
     const drawer = await screen.findByRole("dialog", { name: "Document evidence" });
+    expect(within(drawer).getByText("Authored relevant document")).toBeVisible();
     const config = within(drawer).getByLabelText("Configuration");
     expect(config).toHaveValue("");
     expect(within(drawer).getByRole("button", { name: "Run expected-document diagnostic" })).toBeDisabled();
@@ -189,6 +216,7 @@ describe("QueryDetailPage", () => {
     fireEvent.click(screen.getAllByRole("button", { name: "Inspect document" })[0]!);
     const drawer = await screen.findByRole("dialog", { name: "Document evidence" });
 
+    expect(within(drawer).getByText(/Judgment: Not relevant \(grade 0\)/)).toBeVisible();
     expect(within(drawer).getByText(/Only a positively judged document is eligible/)).toBeVisible();
     expect(within(drawer).queryByLabelText("Configuration")).not.toBeInTheDocument();
     expect(diagnoseExpectedDocument).not.toHaveBeenCalled();

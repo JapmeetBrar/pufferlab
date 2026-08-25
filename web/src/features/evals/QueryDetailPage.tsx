@@ -14,6 +14,7 @@ import { navigate } from "../../app/routing";
 import { configLabel } from "../configLabels";
 import { ComparisonResults } from "../playground/ComparisonResults";
 import { safeSourceUrl } from "../playground/safeUrl";
+import { relevanceLabel } from "../relevance";
 import { RequestErrorPanel } from "./components";
 import { ExpectedDocumentDiagnostic } from "./ExpectedDocumentDiagnostic";
 import { ForensicDrawer } from "./ForensicDrawer";
@@ -48,6 +49,10 @@ function formatMetric(value: number | null | undefined): string {
 function configName(detail: QueryDetail, configId: string): string {
   const config = detail.configs.find((item) => item.id === configId);
   return config === undefined ? configId : configLabel(config);
+}
+
+function documentTitle(detail: QueryDetail, documentId: string): string | null {
+  return detail.judged_documents.find((item) => item.document_id === documentId)?.title ?? null;
 }
 
 function StoredOutcomes({ detail }: { detail: QueryDetail }) {
@@ -112,7 +117,7 @@ function JudgedDocuments({
         <thead>
           <tr>
             <th scope="col">Judged document</th>
-            <th scope="col">Grade</th>
+            <th scope="col">Relevance</th>
             <th scope="col">{configName(detail, selection.left)} rank</th>
             <th scope="col">{configName(detail, selection.right)} rank</th>
             <th scope="col">Evidence</th>
@@ -121,8 +126,16 @@ function JudgedDocuments({
         <tbody>
           {detail.query.qrels.map((qrel) => (
             <tr key={qrel.document_id}>
-              <th scope="row" className="document-id-cell">{qrel.document_id}</th>
-              <td>{qrel.relevance_grade}</td>
+              <th scope="row" className="document-title-cell">
+                {documentTitle(detail, qrel.document_id) ?? "Title unavailable"}
+                {documentTitle(detail, qrel.document_id) === null && (
+                  <span className="table-subcopy">{qrel.document_id}</span>
+                )}
+              </th>
+              <td>
+                {relevanceLabel(qrel.relevance_grade)}
+                <span className="table-subcopy">Grade {qrel.relevance_grade}</span>
+              </td>
               <td>{finalRank(left, qrel.document_id) ?? "Not in top 50"}</td>
               <td>{finalRank(right, qrel.document_id) ?? "Not in top 50"}</td>
               <td>
@@ -152,8 +165,8 @@ function RankChanges({ detail }: { detail: QueryDetail }) {
             <ul>
               {group.changes.map((change) => (
                 <li key={change.document_id}>
-                  <span className="document-id-cell">{change.document_id}</span>
-                  <span>grade {change.relevance_grade}</span>
+                  <strong>{documentTitle(detail, change.document_id) ?? "Title unavailable"}</strong>
+                  <span>{relevanceLabel(change.relevance_grade)} · grade {change.relevance_grade}</span>
                   <span>baseline {change.baseline_rank ?? "outside top 50"}</span>
                   <span>candidate {change.candidate_rank ?? "outside top 50"}</span>
                 </li>
@@ -199,7 +212,10 @@ function DrawerEvidence({
       <section className="drawer-section" aria-labelledby="stored-evidence-heading">
         <h3 id="stored-evidence-heading">Stored run evidence</h3>
         <p>
-          Judgment grade {qrel?.relevance_grade ?? "not recorded"}. Recorded final ranks:
+          Judgment: {qrel === undefined
+            ? "not recorded"
+            : `${relevanceLabel(qrel.relevance_grade)} (grade ${qrel.relevance_grade})`}.
+          {" "}Recorded final ranks:
           {" "}{configName(detail, selection.left)} {finalRank(outcomeFor(detail, selection.left), selection.document) ?? "outside top 50"};
           {" "}{configName(detail, selection.right)} {finalRank(outcomeFor(detail, selection.right), selection.document) ?? "outside top 50"}.
         </p>
@@ -452,7 +468,8 @@ export function QueryDetailPage({
               <AppLink href={`/runs/${encodeURIComponent(runId)}`}>Back to run</AppLink>
             </div>
             <p className="licensed-data-notice" role="note">
-              Query text and judgments are local licensed data. The canonical URL stores UUIDs only.
+              Query text, document titles, and judgments are local licensed data. The canonical URL
+              stores UUIDs only.
             </p>
           </section>
 
@@ -588,7 +605,7 @@ export function QueryDetailPage({
 
           {selection.document !== null && (
             <ForensicDrawer
-              documentId={selection.document}
+              documentLabel={documentTitle(detail, selection.document) ?? selection.document}
               onClose={closeDrawer}
               returnFocusRef={openerRef}
             >
