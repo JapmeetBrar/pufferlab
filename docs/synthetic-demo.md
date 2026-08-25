@@ -1,9 +1,9 @@
 # PufferLab operator runbook
 
-This is the current interview and local-operator path. The main workflow is provider-free: it seeds
-authenticated synthetic evidence, evaluates a quality policy, and serves the built dashboard from
-one local SQLite database. The optional final section describes the separately authorized,
-cost-bearing generated tiny-namespace lifecycle.
+This is the detailed local-operator path. The main workflow is provider-free: it seeds authenticated
+synthetic evidence, evaluates a quality policy, and serves the built dashboard from one local SQLite
+database. The optional final section describes the separately authorized, cost-bearing generated
+tiny-namespace lifecycle.
 
 ## 1. Install the pinned tools
 
@@ -268,8 +268,7 @@ is alive.
    query text.
 4. Open **Inspect document**, refresh, press Back, then Forward. The drawer closes and restores from
    only the document UUID.
-5. Confirm original stage evidence is `NOT_OBSERVABLE`, timing is unavailable, and synthetic live
-   replay is disabled.
+5. Confirm timing is unavailable and synthetic live replay is disabled.
 6. Open the Playground. With the blank live settings it presents actionable setup guidance and
    keeps **Compare results** disabled. No compare POST should be sent.
 7. Repeat at a narrow viewport and confirm the tables scroll internally without page overflow.
